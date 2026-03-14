@@ -127,11 +127,38 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
   async function doConnect() {
     setAuthBusy(true);
     setAuthErr("");
+    // Open popup BEFORE async call to avoid popup blocker
+    const popupName = `auditor-atl-auth-modal-${Date.now()}`;
+    let popup: Window | null = null;
+    try {
+      popup = window.open("", popupName, "width=600,height=700,left=200,top=100");
+      if (popup && !popup.closed) {
+        try { popup.document.title = "Atlassian Anmeldung"; popup.document.body.innerHTML = "<p>Atlassian-Authentifizierung wird gestartet…</p>"; } catch { /* */ }
+      }
+    } catch { popup = null; }
     try {
       const s = await startAtlassianAuthorization();
-      window.open(s.authorization_url, "_blank", "width=600,height=700");
-    } catch (e) { setAuthErr(String(e)); }
-    finally { setAuthBusy(false); }
+      const url = s.authorization_url;
+      if (!url) throw new Error("authorization_url fehlt");
+      if (popup && !popup.closed) {
+        const reused = window.open(url, popupName, "width=600,height=700,left=200,top=100");
+        if (reused && !reused.closed) popup = reused;
+      } else {
+        popup = window.open(url, "_blank");
+      }
+      // Poll for auth completion while popup is open
+      const pollId = window.setInterval(async () => {
+        try {
+          if (popup && popup.closed) { window.clearInterval(pollId); void checkAuth(); return; }
+          const status = await getAtlassianAuthStatus();
+          if (status.token_valid) { window.clearInterval(pollId); setAuthStatus(status); setStep("scope"); try { popup?.close(); } catch { /* */ } }
+        } catch { /* ignore */ }
+      }, 2000);
+      setTimeout(() => window.clearInterval(pollId), 5 * 60 * 1000);
+    } catch (e) {
+      try { popup?.close(); } catch { /* */ }
+      setAuthErr(String(e));
+    } finally { setAuthBusy(false); }
   }
 
   async function checkAuth() {

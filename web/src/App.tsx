@@ -223,9 +223,42 @@ export default function App(): ReactNode {
   async function refreshAtl() { try { setAtlAuth(await getAtlassianAuthStatus()); } catch { /* */ } }
   async function startAtl() {
     setAtlBusy(true); setAtlErr("");
-    try { const s = await startAtlassianAuthorization(); window.open(s.authorization_url, "_blank"); }
-    catch (e) { setAtlErr(String(e)); }
-    finally { setAtlBusy(false); }
+    // Open popup IMMEDIATELY in the user-gesture context (before any await)
+    // Otherwise browsers block the popup as "not user initiated"
+    const popupName = `auditor-atl-auth-${Date.now()}`;
+    let popup: Window | null = null;
+    try {
+      popup = window.open("", popupName, "width=600,height=700,left=200,top=100");
+      if (popup && !popup.closed) {
+        try { popup.document.title = "Atlassian Anmeldung"; popup.document.body.innerHTML = "<p>Atlassian-Authentifizierung wird gestartet…</p>"; } catch { /* x-origin */ }
+      }
+    } catch { popup = null; }
+    try {
+      const s = await startAtlassianAuthorization();
+      const url = s.authorization_url;
+      if (!url) throw new Error("authorization_url fehlt");
+      if (popup && !popup.closed) {
+        // Navigate the already-open popup to the OAuth URL
+        const reused = window.open(url, popupName, "width=600,height=700,left=200,top=100");
+        if (reused && !reused.closed) popup = reused;
+      } else {
+        // Fallback: try opening directly (may be blocked)
+        popup = window.open(url, "_blank");
+      }
+      // Poll for auth completion while popup is open
+      const pollId = window.setInterval(async () => {
+        try {
+          if (popup && popup.closed) { window.clearInterval(pollId); await refreshAtl(); return; }
+          const status = await getAtlassianAuthStatus();
+          if (status.token_valid) { window.clearInterval(pollId); setAtlAuth(status); try { popup?.close(); } catch { /* */ } }
+        } catch { /* ignore */ }
+      }, 2000);
+      // Safety: stop polling after 5 minutes
+      setTimeout(() => window.clearInterval(pollId), 5 * 60 * 1000);
+    } catch (e) {
+      try { popup?.close(); } catch { /* */ }
+      setAtlErr(String(e));
+    } finally { setAtlBusy(false); }
   }
   async function verConf() {
     setAtlBusy(true);
