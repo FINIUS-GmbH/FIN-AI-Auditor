@@ -47,6 +47,13 @@ ORDER BY node_count DESC, label ASC
 LIMIT 40
 """
 
+_RELATIONSHIP_SUMMARY_QUERY = """
+MATCH ()-[rel]->()
+RETURN type(rel) AS relation_type, count(*) AS relation_count
+ORDER BY relation_count DESC, relation_type ASC
+LIMIT 120
+"""
+
 _METACLASS_QUERY = """
 MATCH (meta:metaclass)
 OPTIONAL MATCH (pkg:package)-[:CONTAINS]->(meta)
@@ -184,6 +191,7 @@ def _fetch_direct_catalog(*, config: DirectMetaModelConfig) -> list[dict[str, An
         with driver.session(database=str(config.database), default_access_mode=READ_ACCESS) as session:
             phase_rows = [record.data() for record in session.run(_BSM_CATALOG_QUERY)]
             label_rows = [record.data() for record in session.run(_LABEL_SUMMARY_QUERY)]
+            relationship_rows = [record.data() for record in session.run(_RELATIONSHIP_SUMMARY_QUERY)]
             metaclass_rows = [record.data() for record in session.run(_METACLASS_QUERY)]
             function_rows = [record.data() for record in session.run(_BSM_FUNCTION_QUERY)]
     finally:
@@ -191,6 +199,7 @@ def _fetch_direct_catalog(*, config: DirectMetaModelConfig) -> list[dict[str, An
     rows: list[dict[str, Any]] = []
     rows.extend(_shape_phase_row(row) for row in phase_rows)
     rows.extend(_shape_label_summary_row(row) for row in label_rows)
+    rows.extend(_shape_relationship_summary_row(row) for row in relationship_rows)
     rows.extend(_shape_metaclass_row(row) for row in metaclass_rows)
     rows.extend(_shape_function_row(row) for row in function_rows)
     return rows
@@ -239,6 +248,14 @@ def _shape_label_summary_row(row: dict[str, Any]) -> dict[str, Any]:
         "entity_kind": "label_summary",
         "label": str(row.get("label") or "").strip(),
         "node_count": int(row.get("node_count") or 0),
+    }
+
+
+def _shape_relationship_summary_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "entity_kind": "relationship_summary",
+        "relation_type": str(row.get("relation_type") or "").strip(),
+        "relation_count": int(row.get("relation_count") or 0),
     }
 
 

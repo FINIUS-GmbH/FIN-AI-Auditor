@@ -9,6 +9,7 @@ from fin_ai_auditor.domain.models import (
     AuditLocation,
     SemanticEntity,
     SemanticRelation,
+    SchemaTruthEntry,
     AuditSourceSnapshot,
     RetrievalSegment,
     RetrievalSegmentClaimLink,
@@ -70,6 +71,7 @@ class PipelineAnalysisResult:
     finding_links: list[AuditFindingLink]
     claims: list[object]
     truths: list[TruthLedgerEntry]
+    schema_truths: list[SchemaTruthEntry]
     semantic_entities: list[SemanticEntity]
     semantic_relations: list[SemanticRelation]
     retrieval_segments: list[RetrievalSegment]

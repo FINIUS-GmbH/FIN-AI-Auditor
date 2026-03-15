@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
@@ -105,6 +106,21 @@ class _ScopedOAuthService:
         assert required_scopes == self._expected_scopes
         return "access-token"
 
+    def build_scope_verification(
+        self,
+        *,
+        required_scopes: set[str] | None = None,
+        target_url: str | None = None,
+        target_type: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "required_scopes": sorted(required_scopes or []),
+            "granted_scopes": sorted(self._expected_scopes),
+            "target_url": target_url,
+            "target_type": target_type,
+            "oauth_ready": True,
+        }
+
 
 class _FakeConfluenceWriteConnector:
     def update_page(
@@ -123,6 +139,10 @@ class _FakeConfluenceWriteConnector:
             page_url=target.page_url,
             version_number=8,
             response_payload={"id": target.page_id, "title": target.page_title, "version": {"number": 8}},
+            verification_metadata={
+                "resource_id": "cloud-1",
+                "access_mode": "oauth_cloud",
+            },
         )
 
 
@@ -282,6 +302,147 @@ def test_audit_service_executes_approved_confluence_writeback(tmp_path: Path) ->
     assert executed.implemented_changes
     assert executed.implemented_changes[0].target_label == "Statement Contract"
     assert executed.implemented_changes[0].metadata["execution_mode"] == "external_confluence_api"
+    assert executed.implemented_changes[0].metadata["writeback_verification"]["verified"] is True
+    assert executed.implemented_changes[0].metadata["writeback_verification"]["resource_id"] == "cloud-1"
     assert executed.implemented_changes[0].confluence_update is not None
     assert executed.implemented_changes[0].confluence_update.applied_revision_id == "8"
     assert executed.approval_requests[0].status == "executed"
+
+
+def test_confluence_writeback_failure_persists_http_classification(tmp_path: Path) -> None:
+    class _FailingConfluenceWriteConnector:
+        def update_page(
+            self,
+            *,
+            target: ConfluencePageTarget,
+            patch_preview: ConfluencePatchPreview,
+            access_token: str,
+        ) -> ConfluenceUpdatedPage:
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=httpx.Request("PUT", target.page_url),
+                response=httpx.Response(429),
+            )
+
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(
+        repository=repository,
+        settings=settings,
+        atlassian_oauth_service=_ScopedOAuthService(expected_scopes={"write:page:confluence"}),
+        confluence_page_write_connector=_FailingConfluenceWriteConnector(),
+    )
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    demo_run = service._repository.upsert_run(
+        run=run.model_copy(
+            update={
+                "findings": [service._build_demo_findings(run=run)[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run),
+            }
+        )
+    )
+    run_with_approval = service.create_writeback_approval_request(
+        run_id=demo_run.run_id,
+        target_type="confluence_page_update",
+        title="Confluence-Writeback fuer Statement Contract",
+        summary="Die Seite soll nach expliziter Freigabe extern aktualisiert werden.",
+        target_url=settings.confluence_home_url,
+        related_package_ids=[],
+        related_finding_ids=[],
+        payload_preview=[],
+    )
+    approval_request_id = run_with_approval.approval_requests[0].approval_request_id
+    service.resolve_writeback_approval_request(
+        run_id=demo_run.run_id,
+        approval_request_id=approval_request_id,
+        decision="approve",
+        comment_text="Freigegeben",
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        service.execute_confluence_page_writeback(run_id=demo_run.run_id, approval_request_id=approval_request_id)
+
+    persisted = service.get_run(run_id=demo_run.run_id)
+    assert persisted is not None
+    approval = persisted.approval_requests[0]
+    assert approval.metadata["last_execution_error"]["failure_class"] == "rate_limited"
+    assert approval.metadata["writeback_verification"]["patch_execution_ready"] is True
+
+
+def test_audit_service_reuses_existing_confluence_writeback_idempotently(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(
+        repository=repository,
+        settings=settings,
+        atlassian_oauth_service=_ScopedOAuthService(expected_scopes={"write:page:confluence"}),
+        confluence_page_write_connector=_FakeConfluenceWriteConnector(),
+    )
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    demo_run = service._repository.upsert_run(
+        run=run.model_copy(
+            update={
+                "findings": [service._build_demo_findings(run=run)[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run),
+            }
+        )
+    )
+    run_with_approval = service.create_writeback_approval_request(
+        run_id=demo_run.run_id,
+        target_type="confluence_page_update",
+        title="Confluence-Writeback fuer Statement Contract",
+        summary="Die Seite soll nach expliziter Freigabe extern aktualisiert werden.",
+        target_url=settings.confluence_home_url,
+        related_package_ids=[],
+        related_finding_ids=[],
+        payload_preview=[],
+    )
+    approval_request_id = run_with_approval.approval_requests[0].approval_request_id
+    service.resolve_writeback_approval_request(
+        run_id=demo_run.run_id,
+        approval_request_id=approval_request_id,
+        decision="approve",
+        comment_text="Freigegeben",
+    )
+
+    first = service.execute_confluence_page_writeback(run_id=demo_run.run_id, approval_request_id=approval_request_id)
+    second = service.execute_confluence_page_writeback(run_id=demo_run.run_id, approval_request_id=approval_request_id)
+
+    assert len(first.implemented_changes) == 1
+    assert len(second.implemented_changes) == 1
+    assert second.approval_requests[0].status == "executed"
+    assert any(entry.title == "Writeback bereits ausgefuehrt" for entry in second.analysis_log)

@@ -46,26 +46,30 @@ def detect_documentation_gaps(
 
     # 1. Build sets: subjects documented vs subjects in code
     documented_subjects: set[str] = set()
+    documented_roots: set[str] = set()
     code_subjects: dict[str, list[ExtractedClaimRecord]] = defaultdict(list)
 
     for record in claim_records:
         subject = record.claim.subject_key
         if record.claim.source_type in _DOC_SOURCE_TYPES:
+            authority = str(getattr(record.claim, "source_authority", "") or "").strip()
+            assertion_status = str(getattr(record.claim, "assertion_status", "asserted") or "asserted").strip()
+            if authority == "historical" or assertion_status == "secondary_only":
+                continue
             documented_subjects.add(subject)
-            # Also mark parent scope as documented
-            if "." in subject:
-                documented_subjects.add(subject.split(".", 1)[0])
+            documented_roots.add(subject.split(".", 1)[0] if "." in subject else subject)
         elif record.claim.source_type in _CODE_SOURCE_TYPES:
             code_subjects[subject].append(record)
 
-    # 2. Find undocumented scopes (group by root object)
+    # 2. Find undocumented scopes. If the root object is documented, keep missing
+    # subscope findings instead of suppressing them behind the root.
     undocumented_scopes: dict[str, list[ExtractedClaimRecord]] = defaultdict(list)
     for subject, records in code_subjects.items():
         if subject in documented_subjects:
             continue
-        # Check if parent is documented
         root = subject.split(".", 1)[0] if "." in subject else subject
-        if root in documented_subjects:
+        if root in documented_roots and subject != root:
+            undocumented_scopes[subject].extend(records)
             continue
         undocumented_scopes[root].extend(records)
 
@@ -79,8 +83,9 @@ def detect_documentation_gaps(
     # 4. Generate findings with MD proposals
     findings: list[AuditFinding] = []
     for scope_root, records in sorted(undocumented_scopes.items()):
-        # Skip very small clusters (likely noise)
-        if len(records) < 2:
+        root = scope_root.split(".", 1)[0] if "." in scope_root else scope_root
+        min_records = 1 if scope_root != root and root in documented_roots else 2
+        if len(records) < min_records:
             continue
 
         gap_type = _classify_gap(records=records)
@@ -112,6 +117,7 @@ def detect_documentation_gaps(
                     "proposed_page_title": _page_title(scope_root),
                     "proposed_page_md": md_proposal,
                     "undocumented_claims_count": len(records),
+                    "root_documented": root in documented_roots,
                     "code_files": list({r.evidence.location.source_id for r in records})[:10],
                 },
             )

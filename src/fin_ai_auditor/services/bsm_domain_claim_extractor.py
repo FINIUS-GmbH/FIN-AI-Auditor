@@ -52,7 +52,7 @@ _STATUS_PATTERN = re.compile(
 # Matches role assertions: "X soll/muss/ist/wird... <assertion>"
 _ROLE_ASSERTION = re.compile(
     r"\b(?P<entity>" + "|".join(re.escape(e) for e in BSM_ENTITIES) + r")\b"
-    r"\s+(?:soll|muss|ist|wird|darf|kann|entf[aä]llt|bleibt|startet|beginnt)"
+    r"\s+(?:soll|muss|ist|wird|darf|kann|entf[aä]llt|entfaellt|bleibt|startet|beginnt)"
     r"\s+(?P<assertion>[^.;]{5,120})",
     re.IGNORECASE,
 )
@@ -99,6 +99,20 @@ _PUML_STATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NEGATION_PATTERN = re.compile(
+    r"(?:\bno\b|\bkein(?:e|er|em|en)?\b|\bwithout\b|\bnicht\b|\bexcluded\b|\bausgeschlossen\b|\bnot\b)",
+    re.IGNORECASE,
+)
+_DEPRECATED_PATTERN = re.compile(
+    r"(?:\bdeprecated\b|\blegacy\b|\bhistoric\b|\bveraltet\b|\bentf[aä]llt\b|\bentfaellt\b|\bremoved\b)",
+    re.IGNORECASE,
+)
+_NOT_SSOT_PATTERN = re.compile(
+    r"(?:\bnot\s+ssot\b|\bkein\s+ssot\b|\bnicht\s+ssot\b|\bsekund[aä]r\b|\bsecondary\b)",
+    re.IGNORECASE,
+)
+_TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|$")
+
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +129,8 @@ def extract_bsm_domain_claims(
         try:
             if doc.source_type in {"confluence_page", "local_doc"}:
                 records.extend(_extract_from_documentation(document=doc))
+            elif doc.source_type == "metamodel":
+                records.extend(_extract_from_metamodel_json(document=doc))
             elif doc.source_type == "github_file":
                 path = (doc.path_hint or doc.source_id or "").lower()
                 if path.endswith(".puml") or path.endswith(".plantuml"):
@@ -137,11 +153,13 @@ def _extract_from_documentation(
     records: list[ExtractedClaimRecord] = []
     lines = document.body.splitlines()
     heading_stack: list[str] = []
+    table_headers: list[str] = []
     doc_context = document.title or document.source_id or "doc"
 
     for line_no, raw_line in enumerate(lines, start=1):
         stripped = raw_line.strip()
         if not stripped:
+            table_headers = []
             continue
 
         # Track headings for context
@@ -150,9 +168,25 @@ def _extract_from_documentation(
             level = len(heading_match.group(1))
             title = heading_match.group(2).strip()
             heading_stack = heading_stack[:level - 1] + [title]
+            table_headers = []
             continue
 
         section = " > ".join([doc_context] + heading_stack)
+        table_cells = _parse_table_row(stripped)
+        if table_cells is not None:
+            if _looks_like_table_header(table_cells):
+                table_headers = table_cells
+                continue
+            records.extend(
+                _extract_from_table_row(
+                    document=document,
+                    line_no=line_no,
+                    section=section,
+                    headers=table_headers,
+                    cells=table_cells,
+                    raw_line=stripped,
+                )
+            )
 
         # 1. Entity role assertions
         for m in _ROLE_ASSERTION.finditer(stripped):
@@ -183,7 +217,7 @@ def _extract_from_documentation(
         # 3. HITL claims
         hitl_match = _HITL_PATTERN.search(stripped)
         if hitl_match:
-            is_exclusion = bool(re.search(r"(?:no|kein|without|nicht|excluded|ausgeschlossen)", stripped, re.IGNORECASE))
+            is_exclusion = bool(_NEGATION_PATTERN.search(stripped))
             entities = _ENTITY_PATTERN.findall(stripped) or ["general"]
             for entity in set(entities):
                 records.append(_make_claim(
@@ -204,12 +238,16 @@ def _extract_from_documentation(
                 r"(?:run_id.*zentriert|run_id.*SSOT|run_id.*fuehrend|ohne.*PhaseRun|vereinfacht)",
                 stripped, re.IGNORECASE,
             ))
-            if is_hierarchical or is_flat:
+            is_secondary = bool(
+                re.search(r"(?:run_id)", stripped, re.IGNORECASE)
+                and _NOT_SSOT_PATTERN.search(stripped)
+            )
+            if is_hierarchical or is_flat or is_secondary:
                 records.append(_make_claim(
                     document=document, line_no=line_no, line_text=stripped,
                     subject_key="Run.model",
                     predicate="run_hierarchy",
-                    normalized_value="hierarchical_3tier" if is_hierarchical else "run_id_centric",
+                    normalized_value="run_id_secondary_only" if is_secondary else ("hierarchical_3tier" if is_hierarchical else "run_id_centric"),
                     section_path=section,
                 ))
 
@@ -241,7 +279,10 @@ def _extract_from_documentation(
 
         # 7. TO_MODIFY role claims
         if re.search(r"\bTO_MODIFY\b", stripped):
-            is_excluded = bool(re.search(r"(?:nicht.*Teil|nicht.*Zielbild|ausgeschlossen|excluded|not.*part)", stripped, re.IGNORECASE))
+            is_excluded = bool(
+                re.search(r"(?:nicht.*Teil|nicht.*Zielbild|ausgeschlossen|excluded|not.*part)", stripped, re.IGNORECASE)
+                or _NEGATION_PATTERN.search(stripped)
+            )
             is_included = bool(re.search(r"(?:Workflow|offiziell|Label|state|status|:TO_MODIFY)", stripped))
             if is_excluded or is_included:
                 records.append(_make_claim(
@@ -333,7 +374,7 @@ def _extract_from_puml(*, document: CollectedDocument) -> list[ExtractedClaimRec
         # HITL in PUML
         hitl_match = _HITL_PATTERN.search(stripped)
         if hitl_match:
-            is_exclusion = bool(re.search(r"(?:no|kein|without|nicht)", stripped, re.IGNORECASE))
+            is_exclusion = bool(_NEGATION_PATTERN.search(stripped))
             entities = _ENTITY_PATTERN.findall(stripped) or ["general"]
             for entity in set(entities):
                 records.append(_make_claim(
@@ -347,13 +388,14 @@ def _extract_from_puml(*, document: CollectedDocument) -> list[ExtractedClaimRec
         # IN_RUN / run_id patterns
         if _RUN_HIERARCHY_PATTERN.search(stripped):
             is_hierarchical = bool(re.search(r"(?:PhaseRun|ChunkPhaseRun|IN_RUN)", stripped))
-            is_flat = bool(re.search(r"(?:run_id)", stripped)) and not is_hierarchical
-            if is_hierarchical or is_flat:
+            is_secondary = bool(re.search(r"(?:run_id)", stripped)) and bool(_NOT_SSOT_PATTERN.search(stripped))
+            is_flat = bool(re.search(r"(?:run_id)", stripped)) and not is_hierarchical and not is_secondary
+            if is_hierarchical or is_flat or is_secondary:
                 records.append(_make_claim(
                     document=document, line_no=line_no, line_text=stripped,
                     subject_key="Run.model",
                     predicate="puml_run_hierarchy",
-                    normalized_value="hierarchical_3tier" if is_hierarchical else "run_id_centric",
+                    normalized_value="run_id_secondary_only" if is_secondary else ("hierarchical_3tier" if is_hierarchical else "run_id_centric"),
                     section_path=section,
                 ))
 
@@ -362,8 +404,8 @@ def _extract_from_puml(*, document: CollectedDocument) -> list[ExtractedClaimRec
             records.append(_make_claim(
                 document=document, line_no=line_no, line_text=stripped,
                 subject_key="TO_MODIFY.role",
-                predicate="puml_to_modify_usage",
-                normalized_value="included",
+                predicate="puml_to_modify_inclusion",
+                normalized_value="excluded" if _NEGATION_PATTERN.search(stripped) else "included",
                 section_path=section,
             ))
 
@@ -375,8 +417,25 @@ def _extract_from_puml(*, document: CollectedDocument) -> list[ExtractedClaimRec
                 records.append(_make_claim(
                     document=document, line_no=line_no, line_text=stripped,
                     subject_key="EvidenceChain.direction",
-                    predicate="puml_evidence_chain",
+                    predicate="puml_evidence_chain_type",
                     normalized_value="unit_centric" if is_unit_centric else "summary_centric",
+                    section_path=section,
+                ))
+
+        # Phase/scope distinction in PUML
+        if _PHASE_SCOPE_PATTERN.search(stripped):
+            is_separated = bool(
+                re.search(r"(?:ui_phase_id.*UI.only|getrennt|separate|distinct)", stripped, re.IGNORECASE)
+            )
+            is_mixed = bool(
+                re.search(r"(?:UI.*kennt.*Fachphasen|vermisch|mixed|ingestion.*genai_ba)", stripped, re.IGNORECASE)
+            )
+            if is_separated or is_mixed:
+                records.append(_make_claim(
+                    document=document, line_no=line_no, line_text=stripped,
+                    subject_key="Phase.scope_distinction",
+                    predicate="puml_phase_scope_type",
+                    normalized_value="separated" if is_separated else "mixed",
                     section_path=section,
                 ))
 
@@ -397,10 +456,46 @@ def _extract_from_puml(*, document: CollectedDocument) -> list[ExtractedClaimRec
             records.append(_make_claim(
                 document=document, line_no=line_no, line_text=stripped,
                 subject_key="Relationship.lifecycle",
-                predicate="puml_relationship_lifecycle",
+                predicate="puml_relationship_lifecycle_type",
                 normalized_value=lifecycle_type,
                 section_path=section,
             ))
+
+        # Initial state in PUML
+        start_match = re.search(
+            r"\b(?P<entity>" + "|".join(re.escape(e) for e in BSM_ENTITIES) + r")\b"
+            r".*?(?:startet|beginnt|start|initial)\s+(?:als|as|mit|with|=)?\s*"
+            r"(?P<status>STAGED|PROPOSED|VALIDATED|ACTIVE)",
+            stripped,
+            re.IGNORECASE,
+        )
+        if start_match:
+            records.append(_make_claim(
+                document=document, line_no=line_no, line_text=stripped,
+                subject_key=f"{start_match.group('entity')}.initial_state",
+                predicate="puml_initial_status",
+                normalized_value=start_match.group("status").upper(),
+                section_path=section,
+            ))
+
+        # Relationship change model in PUML
+        if re.search(r"\bRelationship\b", stripped, re.IGNORECASE):
+            if re.search(r"(?:version|versionier|immutable|snapshot)", stripped, re.IGNORECASE):
+                records.append(_make_claim(
+                    document=document, line_no=line_no, line_text=stripped,
+                    subject_key="Relationship.change_model",
+                    predicate="puml_relationship_change_approach",
+                    normalized_value="full_versioning",
+                    section_path=section,
+                ))
+            if re.search(r"(?:edge.state|state.*wechsel|direkt.*relationship|to_modify)", stripped, re.IGNORECASE):
+                records.append(_make_claim(
+                    document=document, line_no=line_no, line_text=stripped,
+                    subject_key="Relationship.change_model",
+                    predicate="puml_relationship_change_approach",
+                    normalized_value="edge_state_only",
+                    section_path=section,
+                ))
 
     return records
 
@@ -449,6 +544,8 @@ def _make_claim(
     section_path: str,
 ) -> ExtractedClaimRecord:
     """Build a domain-specific claim record."""
+    assertion_status = _assertion_status(line_text)
+    source_authority = _source_authority(document=document)
     claim = AuditClaimEntry(
         source_type=document.source_type,
         source_id=document.source_id,
@@ -462,6 +559,22 @@ def _make_claim(
         confidence=0.9,
         fingerprint=f"bsm_domain|{subject_key}|{predicate}|{document.source_id}|{line_no}",
         status="active",
+        operator=_claim_operator(predicate=predicate, assertion_status=assertion_status, normalized_value=normalized_value),
+        constraint=normalized_value,
+        focus_value=normalized_value,
+        assertion_status=assertion_status,
+        source_authority=source_authority,
+        metadata={
+            "assertion_status": assertion_status,
+            "source_authority": source_authority,
+            "claim_operator": _claim_operator(predicate=predicate, assertion_status=assertion_status, normalized_value=normalized_value),
+            "claim_constraint": normalized_value,
+            "claim_focus_value": normalized_value,
+            "source_governance_level": source_authority,
+            "source_temporal_status": "historical" if source_authority == "historical" else "current",
+            "title": document.title,
+            "path_hint": document.path_hint,
+        },
     )
     location = AuditLocation(
         source_type=document.source_type,
@@ -483,3 +596,113 @@ def _make_claim(
         matched_text=line_text[:300],
     )
     return ExtractedClaimRecord(claim=claim, evidence=evidence)
+
+
+def _parse_table_row(line: str) -> list[str] | None:
+    match = _TABLE_ROW_PATTERN.match(line)
+    if match is None:
+        return None
+    cells = [cell.strip() for cell in match.group(1).split("|")]
+    return [cell for cell in cells if cell]
+
+
+def _looks_like_table_header(cells: list[str]) -> bool:
+    lowered = [cell.casefold() for cell in cells]
+    return any(token in cell for cell in lowered for token in ("status", "state", "start", "initial", "entity", "artefakt", "object"))
+
+
+def _extract_from_table_row(
+    *,
+    document: CollectedDocument,
+    line_no: int,
+    section: str,
+    headers: list[str],
+    cells: list[str],
+    raw_line: str,
+) -> list[ExtractedClaimRecord]:
+    records: list[ExtractedClaimRecord] = []
+    row_text = " | ".join(cells)
+    entities = _ENTITY_PATTERN.findall(row_text)
+    if not entities:
+        return records
+    header_map = {
+        headers[index].casefold(): cells[index]
+        for index in range(min(len(headers), len(cells)))
+    }
+    for entity in set(entities):
+        initial_value = next(
+            (
+                value
+                for header, value in header_map.items()
+                if any(token in header for token in ("initial", "start"))
+                and _STATUS_PATTERN.search(value)
+            ),
+            "",
+        )
+        if initial_value:
+            status_match = _STATUS_PATTERN.search(initial_value)
+            if status_match is not None:
+                records.append(
+                    _make_claim(
+                        document=document,
+                        line_no=line_no,
+                        line_text=raw_line,
+                        subject_key=f"{entity}.initial_state",
+                        predicate="initial_status",
+                        normalized_value=status_match.group(1).upper(),
+                        section_path=section,
+                    )
+                )
+        status_values = {
+            status.upper()
+            for status in _STATUS_PATTERN.findall(row_text)
+        }
+        for status in status_values:
+            records.append(
+                _make_claim(
+                    document=document,
+                    line_no=line_no,
+                    line_text=raw_line,
+                    subject_key=f"{entity}.status_canon",
+                    predicate="defined_status",
+                    normalized_value=status,
+                    section_path=section,
+                )
+            )
+    return records
+
+
+def _assertion_status(line_text: str) -> str:
+    if _DEPRECATED_PATTERN.search(line_text):
+        return "deprecated"
+    if _NOT_SSOT_PATTERN.search(line_text):
+        return "not_ssot"
+    if _NEGATION_PATTERN.search(line_text):
+        return "excluded"
+    return "asserted"
+
+
+def _source_authority(*, document: CollectedDocument) -> str:
+    descriptor = " ".join([str(document.title or ""), str(document.path_hint or ""), str(document.source_id or "")]).casefold()
+    if document.source_type == "metamodel":
+        return "ssot"
+    if any(token in descriptor for token in ("ssot", "target", "reference", "scope-matrix", "run-ssot", "contract")):
+        return "ssot"
+    if any(token in descriptor for token in ("architecture", "policy", "process", "guardrail")):
+        return "governed"
+    if any(token in descriptor for token in ("as_is", "legacy", "deprecated", "archive", "historic", "historical")):
+        return "historical"
+    if document.source_type == "github_file":
+        return "implementation"
+    return "working_doc"
+
+
+def _claim_operator(*, predicate: str, assertion_status: str, normalized_value: str) -> str:
+    lowered = predicate.casefold()
+    if assertion_status in {"excluded", "not_ssot"}:
+        return "forbids"
+    if "status" in lowered or "lifecycle" in lowered:
+        return "defines"
+    if "hierarchy" in lowered or "chain" in lowered or "role" in lowered:
+        return "describes"
+    return "states"

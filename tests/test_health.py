@@ -52,6 +52,10 @@ def test_bootstrap_returns_local_repo_defaults() -> None:
     assert "atlassian_oauth_ready" in body["capabilities"]
     assert "confluence_live_read_ready" in body["capabilities"]
     assert "jira_write_scope_ready" in body["capabilities"]
+    assert "atomic_fact_registry" in body
+    assert "quality_gate" in body
+    assert "gold_set" in body["quality_gate"]
+    assert "delta_recompute" in body["quality_gate"]
     assert body["atlassian_auth"]["redirect_uri"] == "http://localhost:8088/api/ingestion/atlassian/auth/callback"
 
 
@@ -101,6 +105,8 @@ def test_bootstrap_exposes_operational_readiness(monkeypatch, tmp_path: Path) ->
     assert "observability" in body
     assert "worker_recovery" in body
     assert "confluence_analysis_cache" in body
+    assert body["quality_gate"]["gold_set"]["passed"] is True
+    assert body["quality_gate"]["delta_recompute"]["passed"] is True
 
 
 def test_decision_comment_endpoint_returns_updated_run(tmp_path: Path) -> None:

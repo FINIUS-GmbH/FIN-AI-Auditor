@@ -24,6 +24,9 @@ from fin_ai_auditor.domain.models import (
 )
 from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
+from fin_ai_auditor.services.causal_attribution_service import attach_causal_attribution_to_findings
+from fin_ai_auditor.services.causal_graph_models import CausalGraph
+from fin_ai_auditor.services.causal_graph_service import build_causal_graph, expand_impacted_scope_keys
 from fin_ai_auditor.services.claim_extractor import extract_claim_records
 from fin_ai_auditor.services.claim_semantics import package_scope_key, semantic_values_aligned
 from fin_ai_auditor.services.connectors.confluence_connector import (
@@ -49,6 +52,7 @@ from fin_ai_auditor.services.retrieval_index_service import (
     build_retrieval_index,
 )
 from fin_ai_auditor.services.runtime_observability_service import RuntimeObservabilityService
+from fin_ai_auditor.services.schema_truth_registry_service import build_schema_truth_registry
 from fin_ai_auditor.services.semantic_graph_service import (
     attach_semantic_context_to_findings,
     build_semantic_graph,
@@ -111,6 +115,7 @@ class AuditPipelineService:
                 finding_links=analysis.finding_links,
                 claims=analysis.claims,
                 truths=analysis.truths,
+                schema_truths=analysis.schema_truths,
                 semantic_entities=analysis.semantic_entities,
                 semantic_relations=analysis.semantic_relations,
                 summary=analysis.summary,
@@ -226,12 +231,20 @@ class AuditPipelineService:
                 fallback_documents=fallback_documents,
             )
         )
+        inherited_truths = _inherit_truths(previous_run=previous_run)
         semantic_graph = build_semantic_graph(
             run_id=run.run_id,
             claim_records=claim_records,
-            truths=_inherit_truths(previous_run=previous_run),
+            truths=inherited_truths,
         )
         logger.info("pipeline_semantic_graph_built", extra={"event_name": "pipeline_semantic_graph_built", "event_payload": {"entities": len(semantic_graph.semantic_entities), "relations": len(semantic_graph.semantic_relations)}})
+        inherited_causal_graph = build_causal_graph(
+            run_id=run.run_id,
+            claims=semantic_graph.claims,
+            truths=inherited_truths,
+            semantic_entities=semantic_graph.semantic_entities,
+            semantic_relations=semantic_graph.semantic_relations,
+        )
         claims = _annotate_claim_deltas(
             current=semantic_graph.claims,
             previous=previous_run.claims if previous_run else [],
@@ -239,7 +252,8 @@ class AuditPipelineService:
         claim_records = _replace_claims_in_records(records=claim_records, claims=claims)
         impacted_scope_keys = _derive_impacted_scope_keys(
             claims=claims,
-            inherited_truths=_inherit_truths(previous_run=previous_run),
+            inherited_truths=inherited_truths,
+            causal_graph=inherited_causal_graph,
         )
         previous_segments = (
             self._audit_service.list_retrieval_segments(run_id=previous_run.run_id) if previous_run is not None else []
@@ -261,8 +275,15 @@ class AuditPipelineService:
             previous_segments=previous_segments,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
         )
-        inherited_truths = _inherit_truths(previous_run=previous_run)
         truths = derive_truths(inherited_truths=inherited_truths, claim_records=claim_records)
+        schema_truths = build_schema_truth_registry(claims=claims, truths=truths)
+        causal_graph = build_causal_graph(
+            run_id=run.run_id,
+            claims=claims,
+            truths=truths,
+            semantic_entities=semantic_graph.semantic_entities,
+            semantic_relations=semantic_graph.semantic_relations,
+        )
         self._audit_service.update_run_progress(
             run_id=run.run_id,
             step_key="finding_generation",
@@ -372,6 +393,13 @@ class AuditPipelineService:
             semantic_entities=semantic_graph.semantic_entities,
             semantic_relations=semantic_graph.semantic_relations,
         )
+        findings = attach_causal_attribution_to_findings(
+            findings=findings,
+            claims=claims,
+            semantic_entities=semantic_graph.semantic_entities,
+            semantic_relations=semantic_graph.semantic_relations,
+            causal_graph=causal_graph,
+        )
         findings = prioritize_findings(findings=findings)
         recommendation_contexts = build_recommendation_contexts(
             settings=self._settings,
@@ -458,6 +486,11 @@ class AuditPipelineService:
         notes.extend(semantic_graph.notes)
         notes.extend(retrieval_index.notes)
         notes.extend(_build_delta_notes(snapshots=source_snapshots, claims=claims, truths=truths))
+        if schema_truths:
+            notes.append(
+                f"Schema-Truth-Registry: {len(schema_truths)} registrierte Ziele "
+                f"mit Status {', '.join(sorted({entry.status for entry in schema_truths})[:4])}."
+            )
         if impacted_scope_keys:
             notes.append(
                 f"Neubewertung fokussiert auf {len(impacted_scope_keys)} betroffene Scope-Cluster: "
@@ -500,6 +533,7 @@ class AuditPipelineService:
             finding_links=finding_links,
             claims=claims,
             truths=truths,
+            schema_truths=schema_truths,
             semantic_entities=semantic_graph.semantic_entities,
             semantic_relations=semantic_graph.semantic_relations,
             retrieval_segments=retrieval_index.segments,
@@ -1246,6 +1280,7 @@ def _derive_impacted_scope_keys(
     *,
     claims: list[AuditClaimEntry],
     inherited_truths: list[TruthLedgerEntry],
+    causal_graph: CausalGraph | None = None,
 ) -> set[str]:
     changed_scope_keys = {
         scope_key
@@ -1269,6 +1304,12 @@ def _derive_impacted_scope_keys(
         ):
             impacted.add(truth_scope_key)
     expanded = _expand_impacted_scope_keys_transitively(claims=claims, seed_scope_keys=impacted)
+    if causal_graph is not None:
+        expanded = expand_impacted_scope_keys(
+            graph=causal_graph,
+            seed_scope_keys=expanded,
+            truths=inherited_truths,
+        )
     return {scope_key for scope_key in expanded if str(scope_key or "").strip()}
 
 

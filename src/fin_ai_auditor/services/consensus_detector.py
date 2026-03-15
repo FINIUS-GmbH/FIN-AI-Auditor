@@ -96,8 +96,6 @@ def detect_consensus_deviations(
         if len(entries) < _MIN_CLAIMS_FOR_CONSENSUS:
             continue
         consensus_stats["total_aspects"] += 1
-        doc_entries = [entry for entry in entries if entry[1] in _DOC_SOURCES]
-        target_entries = doc_entries or entries
 
         # 2. Determine target value:
         #    - If a confirmed truth exists → it IS the target (100% confidence)
@@ -118,35 +116,56 @@ def detect_consensus_deviations(
             consensus_ratio = 1.0  # 100% confidence — truth is absolute
             is_truth_fixed = True
             aspects_with_fixed_target += 1
+            value_counter: Counter[str] = Counter(
+                value.casefold() for value, _src_type, _record in entries
+            )
+            weighted_counter: dict[str, float] = {
+                normalized: sum(
+                    _entry_weight(record=record)
+                    for value, _src_type, record in entries
+                    if value.casefold() == normalized
+                )
+                for normalized in value_counter
+            }
         else:
-            # No explicit truth — determine by majority of documents if available.
-            value_counter: Counter[str] = Counter()
-            for value, _src_type, _rec in target_entries:
-                value_counter[value.casefold()] += 1
+            value_counter = Counter()
+            weighted_counter: dict[str, float] = defaultdict(float)
+            for value, _src_type, record in entries:
+                normalized = value.casefold()
+                value_counter[normalized] += 1
+                weighted_counter[normalized] += _entry_weight(record=record)
 
-            total_votes = sum(value_counter.values())
-            most_common_value, most_common_count = value_counter.most_common(1)[0]
-            consensus_ratio = most_common_count / total_votes
+            total_weight = sum(weighted_counter.values()) or 1.0
+            most_common_value = max(
+                weighted_counter,
+                key=lambda normalized: (
+                    weighted_counter[normalized],
+                    value_counter[normalized],
+                    normalized,
+                ),
+            )
+            consensus_ratio = weighted_counter[most_common_value] / total_weight
             is_truth_fixed = False
 
             # Find the original-case version of the consensus value
             consensus_display = next(
-                (v for v, _st, _r in target_entries if v.casefold() == most_common_value),
+                (v for v, _st, _r in entries if v.casefold() == most_common_value),
                 most_common_value,
             )
 
-        total_votes = len(target_entries)
+        total_votes = len(entries)
 
         # 3. Determine source coverage
         source_types_present = {src_type for _, src_type, _ in entries}
-        has_doc = bool(source_types_present & _DOC_SOURCES)
+        has_doc = any(
+            src_type in _DOC_SOURCES and _counts_as_target_documentation(record=record)
+            for _, src_type, record in entries
+        )
         has_code = bool(source_types_present & _CODE_SOURCES)
 
         # 4a. Clear target (consensus >50% OR confirmed truth) — flag all deviations
-        if consensus_ratio > 0.5:
+        if is_truth_fixed or consensus_ratio > 0.5:
             consensus_stats["with_consensus"] += 1
-            if is_truth_fixed:
-                continue
 
             # Find records that deviate from consensus
             deviating_by_source: dict[str, list[tuple[str, ExtractedClaimRecord]]] = defaultdict(list)
@@ -165,7 +184,11 @@ def detect_consensus_deviations(
 
                 # Truth-fixed targets are critical; majority-derived are high
                 severity = "critical" if is_truth_fixed else "high"
-                target_label = "bestaetigte Wahrheit" if is_truth_fixed else f"Mehrheitskonsens ({int(consensus_ratio * 100)}%)"
+                target_label = (
+                    "bestaetigte Wahrheit"
+                    if is_truth_fixed
+                    else f"gewichteter Mehrheitskonsens ({int(consensus_ratio * 100)}%)"
+                )
 
                 findings.append(AuditFinding(
                     severity=severity,
@@ -190,6 +213,9 @@ def detect_consensus_deviations(
                         "generated_by": "consensus_detector",
                         "consensus_value": consensus_display,
                         "consensus_ratio": round(consensus_ratio, 2),
+                        "consensus_weighted_distribution": {
+                            key: round(weighted_counter.get(key, 0.0), 3) for key in sorted(weighted_counter)
+                        },
                         "is_truth_fixed": is_truth_fixed,
                         "deviating_values": dev_values,
                         "source_type": dev_record.claim.source_type,
@@ -201,7 +227,10 @@ def detect_consensus_deviations(
         # 4b. No clear consensus — ambiguous, needs clarification
         elif len(value_counter) > 1 and consensus_ratio <= 0.5:
             consensus_stats["ambiguous"] += 1
-            top_2 = value_counter.most_common(2)
+            top_2 = sorted(
+                weighted_counter.items(),
+                key=lambda item: (-item[1], -value_counter[item[0]], item[0]),
+            )[:2]
             all_records = [r for _, _, r in entries]
 
             findings.append(AuditFinding(
@@ -210,8 +239,8 @@ def detect_consensus_deviations(
                 title=f"Kein Konsens: {subject_key}/{predicate}",
                 summary=(
                     f"Fuer '{subject_key}/{predicate}' gibt es keinen eindeutigen Konsens. "
-                    f"Die haeufigsten Werte sind: '{top_2[0][0]}' ({top_2[0][1]}x) "
-                    f"und '{top_2[1][0]}' ({top_2[1][1]}x) von insgesamt {total_votes} Quellen.\n\n"
+                    f"Die staerksten Werte sind: '{top_2[0][0]}' ({round(top_2[0][1], 2)} Gewicht) "
+                    f"und '{top_2[1][0]}' ({round(top_2[1][1], 2)} Gewicht) bei insgesamt {total_votes} Quellen.\n\n"
                     f"Eine explizite Entscheidung ist erforderlich, welcher Wert der richtige ist."
                 ),
                 recommendation=(
@@ -224,6 +253,7 @@ def detect_consensus_deviations(
                 metadata={
                     "generated_by": "consensus_detector",
                     "value_distribution": dict(value_counter.most_common(5)),
+                    "weighted_distribution": {key: round(weight, 3) for key, weight in weighted_counter.items()},
                     "total_sources": total_votes,
                 },
             ))
@@ -301,3 +331,59 @@ def detect_consensus_deviations(
 
 def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
     return truth.source_kind in {"user_specification", "user_acceptance"}
+
+
+def _entry_weight(*, record: ExtractedClaimRecord) -> float:
+    claim = record.claim
+    metadata = claim.metadata or {}
+    descriptor = " ".join(
+        [
+            claim.source_type,
+            str(metadata.get("title") or ""),
+            str(metadata.get("path_hint") or ""),
+            str(metadata.get("source_governance_level") or ""),
+            str(metadata.get("source_temporal_status") or ""),
+        ]
+    ).casefold()
+    weight = {
+        "metamodel": 1.1,
+        "confluence_page": 1.0,
+        "local_doc": 0.95,
+        "github_file": 0.78,
+    }.get(claim.source_type, 0.7)
+    if any(token in descriptor for token in ("ssot", "target", "reference", "scope-matrix", "run-ssot", "contract")):
+        weight += 0.35
+    if any(token in descriptor for token in ("architecture", "policy", "process", "guardrail", "governed")):
+        weight += 0.15
+    if any(token in descriptor for token in ("as_is", "legacy", "deprecated", "archive", "historic", "historical")):
+        weight -= 0.4
+    if any(token in descriptor for token in ("generated", "export", "dump")) and claim.source_type != "metamodel":
+        weight -= 0.1
+    if claim.source_type == "github_file" and any(token in descriptor for token in ("/tests/", "fixture", "mock")):
+        weight -= 0.25
+    authority = str(getattr(claim, "source_authority", "") or "").strip()
+    weight += {
+        "explicit_truth": 2.5,
+        "confirmed_decision": 1.6,
+        "ssot": 1.0,
+        "governed": 0.45,
+        "working_doc": 0.15,
+        "implementation": 0.0,
+        "runtime_observation": -0.05,
+        "historical": -0.55,
+        "heuristic": -0.1,
+    }.get(authority, 0.0)
+    assertion_status = str(getattr(claim, "assertion_status", "asserted") or "asserted").strip()
+    if assertion_status in {"deprecated", "secondary_only", "not_ssot"}:
+        weight -= 0.25
+    return max(weight, 0.2)
+
+
+def _counts_as_target_documentation(*, record: ExtractedClaimRecord) -> bool:
+    authority = str(getattr(record.claim, "source_authority", "") or "").strip()
+    assertion_status = str(getattr(record.claim, "assertion_status", "asserted") or "asserted").strip()
+    if authority == "historical":
+        return False
+    if assertion_status == "secondary_only":
+        return False
+    return True

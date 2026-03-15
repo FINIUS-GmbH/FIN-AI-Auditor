@@ -145,12 +145,13 @@ def _check_value_conflicts(
         aspect_part = subject_key.split(".")[-1] if "." in subject_key else concept
         aspect_label = _CONTRADICTION_LABELS.get(aspect_part, aspect_part)
 
-        # Frequency-based confidence: count sources per value, weight code double
+        # Docs-first weighting using explicit source authority; code is implementation evidence,
+        # not the primary target-state source.
         value_weights: dict[str, float] = {}
         for value, value_records in source_values.items():
             weight = 0.0
             for r in value_records:
-                weight += 2.0 if r.claim.source_type == "github_file" else 1.0
+                weight += _record_weight(record=r)
             value_weights[value] = weight
 
         # Sort by confidence (highest first)
@@ -197,6 +198,7 @@ def _check_value_conflicts(
             recommendation=recommendation,
             canonical_key=f"bsm_contradiction|{subject_key}|{concept}",
             locations=all_locations[:4],
+            proposed_jira_action=_proposed_jira_action(subject_key=subject_key, records=concept_records, target_value=majority_value),
             metadata={
                 "generated_by": "bsm_domain_contradiction_detector",
                 "subject_key": subject_key,
@@ -205,6 +207,7 @@ def _check_value_conflicts(
                 "majority_value": majority_value,
                 "majority_weight": majority_weight,
                 "source_count": len({r.claim.source_id for r in concept_records}),
+                "source_authorities": sorted({str(r.claim.source_authority) for r in concept_records}),
             },
         )
         findings.append(finding)
@@ -282,11 +285,13 @@ def _check_role_contradictions(
             ),
             canonical_key=f"bsm_role_contradiction|{subject_key}",
             locations=all_locations[:4],
+            proposed_jira_action=_proposed_jira_action(subject_key=subject_key, records=role_records, target_value="role_clarification_required"),
             metadata={
                 "generated_by": "bsm_domain_contradiction_detector",
                 "subject_key": subject_key,
                 "positive_count": len(positive_sources) + len(existence_sources),
                 "negative_count": len(negative_sources),
+                "source_authorities": sorted({str(r.claim.source_authority) for r in role_records}),
             },
         )
         findings.append(finding)
@@ -311,3 +316,37 @@ def _source_label(record: ExtractedClaimRecord) -> str:
     if record.evidence.location and record.evidence.location.position:
         section = f", {record.evidence.location.position.section_path or ''}"
     return f"{base} ({source_id}{section})"
+
+
+def _record_weight(*, record: ExtractedClaimRecord) -> float:
+    authority = str(record.claim.source_authority or "").strip()
+    status = str(record.claim.assertion_status or "asserted").strip()
+    weight = {
+        "explicit_truth": 5.0,
+        "confirmed_decision": 4.0,
+        "ssot": 3.5,
+        "governed": 2.8,
+        "working_doc": 2.0,
+        "implementation": 1.2,
+        "runtime_observation": 0.9,
+        "historical": 0.5,
+        "heuristic": 0.4,
+    }.get(authority, 1.0)
+    if status in {"deprecated", "secondary_only", "not_ssot"}:
+        weight *= 0.7
+    return weight
+
+
+def _proposed_jira_action(*, subject_key: str, records: Sequence[ExtractedClaimRecord], target_value: str) -> str | None:
+    external_sources = []
+    for record in records:
+        path_hint = str(record.evidence.location.path_hint or record.claim.source_id or "")
+        if path_hint.endswith((".puml", ".plantuml")) or record.claim.source_type == "metamodel":
+            external_sources.append(path_hint or record.claim.source_id)
+    if not external_sources:
+        return None
+    unique_sources = ", ".join(sorted({source for source in external_sources if source})[:3])
+    return (
+        f"Jira-Ticket erstellen: {unique_sources} auf den Zielwert '{target_value}' fuer '{subject_key}' angleichen "
+        "und alle widerspruechlichen Rollen-/Statusdefinitionen konsolidieren."
+    )

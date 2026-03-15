@@ -13,6 +13,7 @@ from fin_ai_auditor.domain.models import (
     RecordConfluencePageUpdateRequest,
     RecordJiraTicketCreatedRequest,
     ResolveWritebackApprovalRequest,
+    UpdateAtomicFactStatusRequest,
 )
 from fin_ai_auditor.services.audit_service import AuditService
 
@@ -68,6 +69,24 @@ def apply_package_decision(
             run_id=run_id,
             package_id=package_id,
             action=payload.action,
+            comment_text=payload.comment_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/atomic-facts/{atomic_fact_id}/status", response_model=AuditRun)
+def update_atomic_fact_status(
+    run_id: str,
+    atomic_fact_id: str,
+    payload: UpdateAtomicFactStatusRequest,
+    service: AuditService = Depends(get_audit_service),
+) -> AuditRun:
+    try:
+        return service.update_atomic_fact_status(
+            run_id=run_id,
+            atomic_fact_id=atomic_fact_id,
+            status=payload.status,
             comment_text=payload.comment_text,
         )
     except ValueError as exc:

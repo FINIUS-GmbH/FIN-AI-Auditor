@@ -116,6 +116,25 @@ export async function submitPackageDecision(
   return parseResponse<AuditRun>(response);
 }
 
+export async function updateAtomicFactStatus(
+  runId: string,
+  atomicFactId: string,
+  status: "open" | "confirmed" | "resolved" | "superseded",
+  commentText?: string,
+): Promise<AuditRun> {
+  const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/atomic-facts/${atomicFactId}/status`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      status,
+      comment_text: commentText ?? null,
+    }),
+  });
+  return parseResponse<AuditRun>(response);
+}
+
 export async function createWritebackApprovalRequest(
   runId: string,
   payload: {

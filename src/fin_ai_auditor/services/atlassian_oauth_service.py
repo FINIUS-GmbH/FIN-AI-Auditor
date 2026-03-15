@@ -218,6 +218,37 @@ class AtlassianOAuthService:
         granted = self.get_granted_scope_set()
         return granted or self.get_configured_scope_set()
 
+    def build_scope_verification(
+        self,
+        *,
+        required_scopes: set[str] | None = None,
+        target_url: str | None = None,
+        target_type: str | None = None,
+    ) -> dict[str, Any]:
+        required = {str(scope or "").strip().casefold() for scope in (required_scopes or set()) if str(scope or "").strip()}
+        granted = self.get_granted_scope_set()
+        configured = self.get_configured_scope_set()
+        effective = self.get_effective_scope_set()
+        auth_status = self.get_auth_status()
+        missing = sorted(scope for scope in required if scope not in granted) if required else []
+        return {
+            "target_type": str(target_type or "").strip() or None,
+            "target_url": str(target_url or "").strip() or None,
+            "required_scopes": sorted(required),
+            "granted_scopes": sorted(granted),
+            "configured_scopes": sorted(configured),
+            "effective_scopes": sorted(effective),
+            "missing_scopes": missing,
+            "token_valid": bool(auth_status.token_valid),
+            "needs_user_consent": bool(auth_status.needs_user_consent),
+            "redirect_uri_matches_local_api": bool(auth_status.redirect_uri_matches_local_api),
+            "oauth_ready": bool(
+                auth_status.enabled
+                and auth_status.client_configured
+                and auth_status.redirect_uri_matches_local_api
+            ),
+        }
+
     def verify_confluence_access(self, *, space_key: str, max_pages: int = 3) -> ConfluenceVerificationResponse:
         connector = ConfluenceKnowledgeBaseConnector(settings=self._settings).with_access_token_provider(
             access_token_provider=self.get_valid_access_token

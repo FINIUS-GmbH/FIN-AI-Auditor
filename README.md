@@ -36,6 +36,7 @@ Aktueller Stand dieses Scaffolds:
 - React/Vite-Frontend fuer Start, Uebersicht und Detailansicht von Audit-Runs
 - laufender Analysefortschritt mit Phasen wie Metamodell-Pruefung, FIN-AI Code-Pruefung, Confluence-Pruefung, Delta-Abgleich und LLM-Empfehlungen
 - atomare Entscheidungspakete mit Problemelementen, Empfehlungen und lokalen Paketentscheidungen
+- laufübergreifendes atomares Faktenregister mit Wiederauftreten, Reopen-Hinweisen und globaler Registry-Sicht
 - lokale SQLite-Tabellen fuer Claim-Index, Truth-Ledger, Entscheidungspakete, Entscheidungsprotokolle und Approval-Requests
 - lokale Retrieval-Indexierung mit Segmenten, Claim-Verknuepfungen, Delta-Markierung und optionalen Embeddings
 - KI-Statuslog fuer lokale User-Kommentare mit abgeleiteten Wahrheiten, Scope-Folgen und Neugewichtungs-Hinweisen
@@ -74,6 +75,7 @@ Aktueller Stand dieses Scaffolds:
 - Confluence-Extraktion erkennt neben Heading-/Block-Pfaden jetzt auch Tabellenzeilen, Makros, Attachments, Statusknoten, Cards und weitere ADF-Sonderknoten strukturierter
 - Restriktions- und Sensitivitaetsmetadaten aus Confluence werden jetzt konservativer und belastbarer hergeleitet: explizite Restriktionen, Properties und Labels werden ausgewertet, reine `operations`-Antworten gelten dagegen nicht mehr faelschlich als Beleg fuer fehlende Restriktionen
 - Bootstrap und UI unterscheiden jetzt klar zwischen konfigurierter Atlassian-Integration, lokal betriebsbereitem OAuth-Flow, aktuellem Confluence-Live-Read und echtem Jira-Write-Scope
+- Referenz-Gold-Set und Delta-Recompute-Gate messen jetzt produktiv Widersprueche, Policy-Konflikte, Doku-Gaps, Artefakt-Routing und Delta-Propagation
 - Architektur- und Produktdoku fuer die naechsten Ausbauschritte
 - Bootstrap-Defaults fuer den lokalen FIN-AI-Checkout unter `/Users/martinwaelter/GitHub/FIN-AI`
 - fixes Analyse- und Zielprofil:
@@ -91,6 +93,8 @@ Noch **nicht** implementiert:
 - voll inkrementeller Betrieb mit partieller Reanalyse geaenderter Quellbereiche; source-lokale Claim-/Finding-Wiederverwendung und erste section-level Claim-Regeneration stehen, die transitive Neubewertung ueber alle betroffenen Cluster ist aber noch nicht komplett minimal
 - tieferes Hybrid-Retrieval-Ranking und robustere semantische Clusterbildung ueber mehrere Quellen, Prozessketten und transitive Konflikte hinweg
 - betriebliche Haertung fuer produktiven Dauerbetrieb: weitergehendes Fehlertracing, Token-Lifecycle-Handling und staerkere Multi-Worker-Lease-/Recovery-Strategien
+
+Fachlich-analytisch ist der fokussierte Scope damit weitgehend abgeschlossen: Confluence-, Code-, lokale Doku- und Metamodell-Aussagen werden gegeneinandergestellt, in atomare Fakten zerlegt, ueber Wahrheiten und Delta propagiert und in Doku-/Code-/Artefakt-Folgeaktionen ueberfuehrt. Offene Restarbeit liegt jetzt vor allem bei echter E2E-Verifikation und Betriebshaertung.
 
 Aktuelle technische Hinweise:
 

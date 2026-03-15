@@ -190,8 +190,10 @@ def semantic_values_conflict(*, subject_key: str, left_values: set[str], right_v
     }
     if _has_direct_semantic_conflict(left_signatures=left_signatures, right_signatures=right_signatures):
         return True
-    if _has_meaningful_semantic_context(left_signatures=left_signatures, right_signatures=right_signatures):
+    if _has_meaningful_semantic_overlap(left_signatures=left_signatures, right_signatures=right_signatures):
         return False
+    if _has_meaningful_semantic_context(left_signatures=left_signatures, right_signatures=right_signatures):
+        return True
     return left_values.isdisjoint(right_values)
 
 
@@ -200,7 +202,7 @@ def semantic_values_aligned(*, subject_key: str, left_value: str, right_value: s
     right_signature = semantic_signature_for_claim(subject_key=subject_key, predicate=predicate, value=right_value)
     if _has_direct_semantic_conflict(left_signatures={left_signature}, right_signatures={right_signature}):
         return False
-    if _has_meaningful_semantic_context(left_signatures={left_signature}, right_signatures={right_signature}):
+    if _has_meaningful_semantic_overlap(left_signatures={left_signature}, right_signatures={right_signature}):
         return True
     return normalize_claim_value(left_value) == normalize_claim_value(right_value)
 
@@ -266,6 +268,24 @@ def _has_meaningful_semantic_context(
         if _meaningful_signature(signature)
     }
     return bool(left_meaningful and right_meaningful)
+
+
+def _has_meaningful_semantic_overlap(
+    *,
+    left_signatures: set[tuple[str, ...]],
+    right_signatures: set[tuple[str, ...]],
+) -> bool:
+    left_meaningful = [
+        set(_meaningful_signature(signature))
+        for signature in left_signatures
+        if _meaningful_signature(signature)
+    ]
+    right_meaningful = [
+        set(_meaningful_signature(signature))
+        for signature in right_signatures
+        if _meaningful_signature(signature)
+    ]
+    return any(left_tags.intersection(right_tags) for left_tags in left_meaningful for right_tags in right_meaningful)
 
 
 def _contains_any(value: str, patterns: tuple[str, ...]) -> bool:

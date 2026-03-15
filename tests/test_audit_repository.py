@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
+    AtomicFactEntry,
     AuditFinding,
     AuditFindingLink,
     AuditLocation,
@@ -10,7 +11,11 @@ from fin_ai_auditor.domain.models import (
     AuditSourceSnapshot,
     AuditTarget,
     CreateAuditRunRequest,
+    DecisionCommentAnalysis,
+    DecisionPackage,
+    DecisionProblemElement,
     RetrievalSegment,
+    SchemaTruthEntry,
 )
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.audit_service import AuditService
@@ -120,6 +125,155 @@ def test_repository_persists_findings_with_positions_and_links(tmp_path: Path) -
     assert finding_by_id["finding_1"].locations[0].position is not None
     assert finding_by_id["finding_1"].locations[0].position.anchor_value == "src/finai/example.py#L10-L18"
     assert loaded.finding_links[0].relation_type == "gap_hint"
+
+
+def test_repository_persists_schema_truth_registry(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    run = AuditRun(
+        target=AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI"),
+        schema_truths=[
+            SchemaTruthEntry(
+                schema_truth_id="schema_truth_1",
+                schema_key="Node:Statement",
+                schema_kind="node",
+                target_label="Node:Statement",
+                status="confirmed_ssot",
+                source_kind="metamodel",
+                source_authority="ssot",
+                source_ids=["current_dump"],
+                evidence_claim_ids=["claim_1"],
+                related_truth_ids=["truth_1"],
+                metadata={"status_candidates": ["confirmed_ssot", "code_only_inference"]},
+            )
+        ],
+    )
+
+    saved = repository.upsert_run(run=run)
+    loaded = repository.get_run(run_id=saved.run_id)
+
+    assert loaded is not None
+    assert len(loaded.schema_truths) == 1
+    assert loaded.schema_truths[0].schema_key == "Node:Statement"
+    assert loaded.schema_truths[0].status == "confirmed_ssot"
+    assert loaded.schema_truths[0].source_authority == "ssot"
+
+
+def test_repository_persists_atomic_fact_registry(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    run = AuditRun(
+        target=AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI"),
+        atomic_facts=[
+            AtomicFactEntry(
+                atomic_fact_id="atomic_fact_1",
+                fact_key="Statement.write_path",
+                summary="Statement.write_path: Confluence vs. Code widersprechen sich oder lassen denselben Sachverhalt unvollstaendig.",
+                status="open",
+                action_lane="confluence_and_jira",
+                primary_package_id="package_1",
+                primary_problem_id="problem_1",
+                related_package_ids=["package_1"],
+                related_problem_ids=["problem_1"],
+                related_finding_ids=["finding_1"],
+                source_types=["confluence_page", "github_file"],
+                source_ids=["page-1", "src/statement.py"],
+                subject_keys=["Statement.write_path"],
+                predicates=["documented_as", "implemented_as"],
+                claim_ids=["claim_1", "claim_2"],
+                truth_ids=["truth_1"],
+                metadata={"root_cause_bucket": "write_contract"},
+            )
+        ],
+    )
+
+    saved = repository.upsert_run(run=run)
+    loaded = repository.get_run(run_id=saved.run_id)
+
+    assert loaded is not None
+    assert len(loaded.atomic_facts) == 1
+    assert loaded.atomic_facts[0].fact_key == "Statement.write_path"
+    assert loaded.atomic_facts[0].action_lane == "confluence_and_jira"
+    assert loaded.atomic_facts[0].source_types == ["confluence_page", "github_file"]
+
+
+def test_repository_summarizes_global_atomic_fact_registry(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    target = AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI")
+    repository.upsert_run(
+        run=AuditRun(
+            run_id="run_a",
+            status="completed",
+            target=target,
+            atomic_facts=[
+                AtomicFactEntry(
+                    atomic_fact_id="atomic_fact_a",
+                    fact_key="Statement.write_path",
+                    summary="Statement.write_path driftet.",
+                    status="confirmed",
+                    action_lane="jira_code",
+                    metadata={"occurrence_count": 1},
+                )
+            ],
+        )
+    )
+    repository.upsert_run(
+        run=AuditRun(
+            run_id="run_b",
+            status="completed",
+            target=target,
+            atomic_facts=[
+                AtomicFactEntry(
+                    atomic_fact_id="atomic_fact_b",
+                    fact_key="Statement.write_path",
+                    summary="Statement.write_path driftet erneut.",
+                    status="open",
+                    action_lane="jira_code",
+                    related_package_ids=["package_write"],
+                    source_types=["github_file", "local_doc"],
+                    subject_keys=["Statement.write_path"],
+                    predicates=["implemented_as", "documented_as"],
+                    claim_ids=["claim_a", "claim_b"],
+                    truth_ids=["truth_a"],
+                    metadata={
+                        "occurrence_count": 2,
+                        "carry_over_mode": "reopened",
+                        "previous_run_id": "run_a",
+                        "root_cause_bucket": "write_contract",
+                        "scope_summary": "Statement · Write path",
+                        "last_status_comment": "Erneut offen wegen neuem Drift.",
+                        "seen_run_ids": ["run_a", "run_b"],
+                    },
+                ),
+                AtomicFactEntry(
+                    atomic_fact_id="atomic_fact_c",
+                    fact_key="Statement.policy",
+                    summary="Statement.policy kollidiert.",
+                    status="resolved",
+                    action_lane="confluence_doc",
+                    metadata={"occurrence_count": 1},
+                ),
+            ],
+        )
+    )
+
+    summary = repository.get_atomic_fact_registry_summary()
+
+    assert summary["total_entries"] == 3
+    assert summary["unique_fact_count"] == 2
+    assert summary["recurring_fact_count"] == 1
+    assert summary["reopened_fact_count"] == 1
+    assert summary["latest_status_counts"]["open"] == 1
+    assert summary["latest_status_counts"]["resolved"] == 1
+    write_path_entry = next(item for item in summary["latest_facts"] if item["fact_key"] == "Statement.write_path")
+    assert write_path_entry["previous_run_id"] == "run_a"
+    assert write_path_entry["root_cause_bucket"] == "write_contract"
+    assert write_path_entry["source_types"] == ["github_file", "local_doc"]
+    assert write_path_entry["subject_keys"] == ["Statement.write_path"]
+    assert write_path_entry["claim_count"] == 2
+    assert write_path_entry["truth_count"] == 1
+    assert write_path_entry["related_package_ids"] == ["package_write"]
+    assert write_path_entry["scope_summary"] == "Statement · Write path"
+    assert write_path_entry["last_status_comment"] == "Erneut offen wegen neuem Drift."
+    assert write_path_entry["seen_run_ids"] == ["run_a", "run_b"]
 
 
 def test_service_enforces_fixed_sources_and_metamodel_policy(tmp_path: Path) -> None:
@@ -616,3 +770,43 @@ def test_service_records_jira_ticket_with_ai_coding_brief(tmp_path: Path) -> Non
     assert len(change.jira_ticket.acceptance_criteria) >= 3
     assert len(change.jira_ticket.affected_parts) >= 1
     assert updated.approval_requests[0].status == "executed"
+
+
+def test_merge_truths_from_specification_never_uses_package_scope_summary_as_subject_key(tmp_path: Path) -> None:
+    settings = Settings(database_path=tmp_path / "auditor.db")
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+
+    package = DecisionPackage(
+        title="Statement · Policy konsolidieren",
+        category="contradiction",
+        severity_summary="high",
+        scope_summary="Statement · Policy · 2 Problemelemente",
+        recommendation_summary="Policy und Write-Contract angleichen.",
+        problem_elements=[
+            DecisionProblemElement(
+                category="contradiction",
+                severity="high",
+                scope_summary="Statement.policy",
+                short_explanation="Dokumentation und Code widersprechen sich.",
+                recommendation="Kanonischen Policy-Zustand festziehen.",
+            )
+        ],
+        metadata={},
+    )
+    analysis = DecisionCommentAnalysis(
+        normalized_truths=["User-Wahrheit: Statement bleibt review-pflichtig."],
+        related_scope_keys=["Statement"],
+    )
+
+    updated_truths, created_truths = service._merge_truths_from_specification(
+        truths=[],
+        package=package,
+        analysis=analysis,
+    )
+
+    assert len(updated_truths) == 1
+    assert len(created_truths) == 1
+    assert created_truths[0].subject_key == "Statement"
+    assert created_truths[0].canonical_key == "Statement|user_specification"
+    assert "Problemelemente" not in created_truths[0].subject_key

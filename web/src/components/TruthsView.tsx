@@ -24,6 +24,8 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
     [run?.truths]
   );
   const allTruths = run?.truths ?? [];
+  const schemaTruths = run?.schema_truths ?? [];
+  const atomicFacts = run?.atomic_facts ?? [];
   const claims = run?.claims ?? [];
 
   const claimsBySource = useMemo(() => {
@@ -111,6 +113,9 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
                   <span className="text-muted" style={{ marginLeft: 8 }}>
                     ({Math.round(claim.confidence * 100)}%)
                   </span>
+                  <div className="text-xs text-muted mt-xs">
+                    Assertion: {claim.assertion_status ?? "asserted"} · Authority: {claim.source_authority ?? "heuristic"}
+                  </div>
                 </div>
               );
             })}
@@ -152,6 +157,75 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
                 </div>
                 <div className="text-xs text-muted mt-xs">
                   Quelle: {truth.source_kind} · Scope: {truth.scope_kind}/{truth.scope_key}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="ledger-section mt-xl">
+        <div className="ledger-section-head">
+          <h3>Schema Truth Registry</h3>
+          <span className="ledger-count">{schemaTruths.length}</span>
+        </div>
+        {schemaTruths.length === 0 ? (
+          <div className="ledger-hint">
+            Noch keine Schema-Ziele registriert. Nach einem Lauf erscheinen hier bestaetigte, beobachtete
+            und nur aus Code inferierte Persistenzziele.
+          </div>
+        ) : (
+          <div className="ledger-list">
+            {schemaTruths.map((entry) => (
+              <div className="truth-item" key={entry.schema_truth_id}>
+                <div className="flex-row justify-between gap-sm" style={{ marginBottom: 4 }}>
+                  <strong style={{ fontSize: 13, color: "var(--text-primary)" }}>
+                    {entry.target_label}
+                  </strong>
+                  <span className={`badge badge-state badge-${entry.status === "confirmed_ssot" ? "accepted" : entry.status === "rejected_target" ? "rejected" : "open"}`}>
+                    {entry.status}
+                  </span>
+                </div>
+                <div>
+                  {entry.schema_kind} · {entry.source_kind} · <strong>{entry.source_authority}</strong>
+                </div>
+                <div className="text-xs text-muted mt-xs">
+                  Quellen: {entry.source_ids.slice(0, 3).join(", ") || "–"}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="ledger-section mt-xl">
+        <div className="ledger-section-head">
+          <h3>Atomare Fakten</h3>
+          <span className="ledger-count">{atomicFacts.length}</span>
+        </div>
+        {atomicFacts.length === 0 ? (
+          <div className="ledger-hint">
+            Noch keine atomaren Fakten persistiert. Nach einem Analyse-Lauf erscheinen hier die kleinsten
+            bewertbaren Sachverhalte inklusive Aktionsspur.
+          </div>
+        ) : (
+          <div className="ledger-list">
+            {atomicFacts.map((fact) => (
+              <div className="truth-item" key={fact.atomic_fact_id}>
+                <div className="flex-row justify-between gap-sm" style={{ marginBottom: 4 }}>
+                  <strong style={{ fontSize: 13, color: "var(--text-primary)" }}>
+                    {fact.fact_key}
+                  </strong>
+                  <span className={`badge badge-state badge-${fact.status === "confirmed" ? "accepted" : fact.status === "resolved" ? "superseded" : "open"}`}>
+                    {fact.status}
+                  </span>
+                </div>
+                <div>{fact.summary}</div>
+                <div className="text-xs text-muted mt-xs">
+                  Aktionsspur: <strong>{fact.action_lane}</strong> · Quellen: {fact.source_types.join(", ") || "–"}
+                </div>
+                <div className="text-xs text-muted mt-xs">
+                  Packages: {fact.related_package_ids.slice(0, 3).join(", ") || "–"} · Claims: {fact.claim_ids.length} · Truths: {fact.truth_ids.length}
                 </div>
               </div>
             ))}

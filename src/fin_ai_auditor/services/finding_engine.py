@@ -12,6 +12,12 @@ from fin_ai_auditor.services.claim_semantics import (
     semantic_signature_for_claim,
     semantic_values_conflict,
 )
+from fin_ai_auditor.services.finding_prioritization import (
+    SUPPORTING_DETAIL_CATEGORIES,
+    finding_root_cause_bucket,
+    is_core_root_cause_bucket,
+    severity_rank,
+)
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
 
 logger = logging.getLogger(__name__)
@@ -606,27 +612,148 @@ def _build_evidence_quotes(records: list[ExtractedClaimRecord]) -> str:
 def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
     links: list[AuditFindingLink] = []
     for index, left in enumerate(findings):
-        left_scope = _base_scope(left)
         for right in findings[index + 1 :]:
-            if left_scope != _base_scope(right):
+            classified = _classify_finding_link(left=left, right=right)
+            if classified is None:
                 continue
-            relation = "gap_hint" if left.category == "missing_definition" or right.category == "missing_definition" else "supports"
+            relation, rationale, confidence, source, target = classified
             links.append(
                 AuditFindingLink(
-                    from_finding_id=left.finding_id,
-                    to_finding_id=right.finding_id,
+                    from_finding_id=source.finding_id,
+                    to_finding_id=target.finding_id,
                     relation_type=relation,
-                    rationale="Beide Findings beziehen sich auf denselben Scope-Cluster und sollten gemeinsam bewertet werden.",
-                    confidence=0.74,
-                    metadata={"scope": left_scope},
+                    rationale=rationale,
+                    confidence=confidence,
+                    metadata={
+                        "scope_overlap": sorted(_finding_scope_keys(source).intersection(_finding_scope_keys(target))),
+                        "group_key": str(source.metadata.get("causal_group_key") or target.metadata.get("causal_group_key") or ""),
+                    },
                 )
             )
     return links
 
 
+def _classify_finding_link(
+    *,
+    left: AuditFinding,
+    right: AuditFinding,
+) -> tuple[str, str, float, AuditFinding, AuditFinding] | None:
+    left_scopes = _finding_scope_keys(left)
+    right_scopes = _finding_scope_keys(right)
+    shared_scopes = left_scopes.intersection(right_scopes)
+    left_group = str(left.metadata.get("causal_group_key") or "").strip()
+    right_group = str(right.metadata.get("causal_group_key") or "").strip()
+    shared_truths = set(_string_list(left.metadata.get("causal_related_truth_ids"))).intersection(
+        _string_list(right.metadata.get("causal_related_truth_ids"))
+    )
+
+    if (
+        left.canonical_key
+        and right.canonical_key
+        and left.canonical_key == right.canonical_key
+        and finding_root_cause_bucket(finding=left) == finding_root_cause_bucket(finding=right)
+    ):
+        return (
+            "duplicates",
+            "Beide Findings verweisen auf denselben kanonischen Kernkonflikt und sollten zusammengelegt oder gemeinsam bewertet werden.",
+            0.92,
+            left,
+            right,
+        )
+
+    if left_group and left_group == right_group:
+        detail_left = _is_supporting_detail_finding(finding=left)
+        detail_right = _is_supporting_detail_finding(finding=right)
+        if detail_left != detail_right:
+            detail = left if detail_left else right
+            root = right if detail_left else left
+            return (
+                "depends_on",
+                "Das Detail-Finding haengt kausal am selben Root-Cause-Cluster und sollte erst nach Klaerung des Kernproblems abgeschlossen werden.",
+                0.86,
+                detail,
+                root,
+            )
+        if finding_root_cause_bucket(finding=left) != finding_root_cause_bucket(finding=right):
+            source, target = _ordered_by_root_cause(left=left, right=right)
+            return (
+                "depends_on",
+                "Beide Findings teilen sich denselben kausalen Cluster, betreffen aber unterschiedliche Root-Cause-Ebenen in derselben Wirkungskette.",
+                0.82,
+                source,
+                target,
+            )
+        return (
+            "supports",
+            "Beide Findings werden durch denselben kausalen Cluster getragen und verdichten gemeinsam dasselbe Kernproblem.",
+            0.84,
+            left,
+            right,
+        )
+
+    if shared_truths:
+        source, target = _ordered_by_root_cause(left=left, right=right)
+        return (
+            "depends_on",
+            "Beide Findings haengen an derselben bestaetigten Wahrheit und sollten entlang derselben Delta-Kette bewertet werden.",
+            0.8,
+            source,
+            target,
+        )
+
+    if shared_scopes:
+        relation = "gap_hint" if left.category == "missing_definition" or right.category == "missing_definition" else "supports"
+        return (
+            relation,
+            "Beide Findings ueberlappen im selben fachlichen Scope und liefern gemeinsame Evidenz fuer denselben Bereich.",
+            0.72,
+            left,
+            right,
+        )
+    return None
+
+
 def _base_scope(finding: AuditFinding) -> str:
     canonical = str(finding.canonical_key or finding.title)
     return package_scope_key(canonical)
+
+
+def _finding_scope_keys(finding: AuditFinding) -> set[str]:
+    scope_keys = {
+        package_scope_key(str(scope_key))
+        for scope_key in _string_list(finding.metadata.get("causal_scope_keys"))
+        if str(scope_key).strip()
+    }
+    base_scope = _base_scope(finding)
+    if base_scope:
+        scope_keys.add(base_scope)
+    return {scope_key for scope_key in scope_keys if str(scope_key or "").strip()}
+
+
+def _is_supporting_detail_finding(*, finding: AuditFinding) -> bool:
+    return finding.category in SUPPORTING_DETAIL_CATEGORIES
+
+
+def _ordered_by_root_cause(*, left: AuditFinding, right: AuditFinding) -> tuple[AuditFinding, AuditFinding]:
+    left_key = (
+        0 if bool(left.metadata.get("truth_enforcement")) else 1,
+        severity_rank(severity=left.severity),
+        0 if is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=left)) else 1,
+        left.title,
+    )
+    right_key = (
+        0 if bool(right.metadata.get("truth_enforcement")) else 1,
+        severity_rank(severity=right.severity),
+        0 if is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=right)) else 1,
+        right.title,
+    )
+    return (left, right) if left_key <= right_key else (right, left)
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _is_subject_impacted(*, subject_key: str, impacted_scope_keys: set[str]) -> bool:

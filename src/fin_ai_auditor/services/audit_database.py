@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 
 def connect_database(*, db_path: Path) -> sqlite3.Connection:
@@ -150,6 +150,44 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
                 created_from_problem_id TEXT,
                 supersedes_truth_id TEXT,
                 valid_from_snapshot_id TEXT,
+                metadata_json TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES audit_runs(run_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_truth_entries (
+                schema_truth_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                schema_key TEXT NOT NULL,
+                schema_kind TEXT NOT NULL,
+                target_label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_authority TEXT NOT NULL,
+                source_ids_json TEXT NOT NULL,
+                evidence_claim_ids_json TEXT NOT NULL,
+                related_truth_ids_json TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES audit_runs(run_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS atomic_fact_entries (
+                atomic_fact_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                fact_key TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                status TEXT NOT NULL,
+                action_lane TEXT NOT NULL,
+                primary_package_id TEXT,
+                primary_problem_id TEXT,
+                related_package_ids_json TEXT NOT NULL,
+                related_problem_ids_json TEXT NOT NULL,
+                related_finding_ids_json TEXT NOT NULL,
+                source_types_json TEXT NOT NULL,
+                source_ids_json TEXT NOT NULL,
+                subject_keys_json TEXT NOT NULL,
+                predicates_json TEXT NOT NULL,
+                claim_ids_json TEXT NOT NULL,
+                truth_ids_json TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES audit_runs(run_id) ON DELETE CASCADE
             );
@@ -375,6 +413,10 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_claims_fingerprint ON audit_claims(fingerprint);
             CREATE INDEX IF NOT EXISTS idx_truths_run ON truth_entries(run_id);
             CREATE INDEX IF NOT EXISTS idx_truths_canonical_key ON truth_entries(canonical_key);
+            CREATE INDEX IF NOT EXISTS idx_schema_truths_run ON schema_truth_entries(run_id, status);
+            CREATE INDEX IF NOT EXISTS idx_schema_truths_key ON schema_truth_entries(schema_key);
+            CREATE INDEX IF NOT EXISTS idx_atomic_facts_run ON atomic_fact_entries(run_id, status);
+            CREATE INDEX IF NOT EXISTS idx_atomic_facts_key ON atomic_fact_entries(fact_key);
             CREATE INDEX IF NOT EXISTS idx_packages_run ON decision_packages(run_id);
             CREATE INDEX IF NOT EXISTS idx_problems_package ON decision_problems(package_id);
             CREATE INDEX IF NOT EXISTS idx_decisions_run ON decision_records(run_id, created_at DESC);
@@ -409,6 +451,10 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             _ensure_pipeline_cache_table(connection=connection)
         if current < 14:
             _ensure_llm_usage_column(connection=connection)
+        if current < 15:
+            _ensure_schema_truth_entries_table(connection=connection)
+        if current < 16:
+            _ensure_atomic_fact_entries_table(connection=connection)
         connection.execute(
             """
             INSERT INTO schema_meta(key, value)
@@ -476,6 +522,64 @@ def _ensure_llm_usage_column(*, connection: sqlite3.Connection) -> None:
     if _column_exists(connection=connection, table_name="audit_runs", column_name="llm_usage_json"):
         return
     connection.execute("ALTER TABLE audit_runs ADD COLUMN llm_usage_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _ensure_schema_truth_entries_table(*, connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_truth_entries (
+            schema_truth_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            schema_key TEXT NOT NULL,
+            schema_kind TEXT NOT NULL,
+            target_label TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_authority TEXT NOT NULL,
+            source_ids_json TEXT NOT NULL,
+            evidence_claim_ids_json TEXT NOT NULL,
+            related_truth_ids_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES audit_runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_schema_truths_run
+            ON schema_truth_entries(run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_schema_truths_key
+            ON schema_truth_entries(schema_key);
+        """
+    )
+
+
+def _ensure_atomic_fact_entries_table(*, connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS atomic_fact_entries (
+            atomic_fact_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            fact_key TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            action_lane TEXT NOT NULL,
+            primary_package_id TEXT,
+            primary_problem_id TEXT,
+            related_package_ids_json TEXT NOT NULL,
+            related_problem_ids_json TEXT NOT NULL,
+            related_finding_ids_json TEXT NOT NULL,
+            source_types_json TEXT NOT NULL,
+            source_ids_json TEXT NOT NULL,
+            subject_keys_json TEXT NOT NULL,
+            predicates_json TEXT NOT NULL,
+            claim_ids_json TEXT NOT NULL,
+            truth_ids_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES audit_runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_run
+            ON atomic_fact_entries(run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_key
+            ON atomic_fact_entries(fact_key);
+        """
+    )
 
 
 def _ensure_document_cache_table(*, connection: sqlite3.Connection) -> None:

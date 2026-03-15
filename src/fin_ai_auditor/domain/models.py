@@ -40,8 +40,30 @@ ImplementedChangeType = Literal["confluence_page_updated", "jira_ticket_created"
 ImplementedChangeStatus = Literal["applied", "failed"]
 ClaimSourceKind = Literal["github_file", "confluence_page", "jira_ticket", "metamodel", "local_doc", "user_truth"]
 ClaimStatus = Literal["active", "superseded", "rejected"]
+ClaimAssertionStatus = Literal["asserted", "excluded", "deprecated", "not_ssot", "secondary_only"]
+ClaimSourceAuthority = Literal[
+    "explicit_truth",
+    "confirmed_decision",
+    "ssot",
+    "governed",
+    "working_doc",
+    "historical",
+    "runtime_observation",
+    "implementation",
+    "heuristic",
+]
 TruthStatus = Literal["active", "superseded", "rejected"]
 TruthSourceKind = Literal["user_specification", "user_acceptance", "system_inference"]
+SchemaTruthStatus = Literal[
+    "confirmed_ssot",
+    "provisional_target",
+    "observed_only",
+    "code_only_inference",
+    "rejected_target",
+]
+SchemaTruthSourceKind = Literal["truth_ledger", "metamodel", "documentation", "runtime_observation", "implementation_inference"]
+AtomicFactStatus = Literal["open", "confirmed", "resolved", "superseded"]
+AtomicFactActionLane = Literal["confluence_doc", "jira_code", "jira_artifact", "confluence_and_jira"]
 DecisionPackageState = Literal["open", "accepted", "rejected", "specified", "superseded"]
 DecisionAction = Literal["accept", "reject", "specify"]
 ApprovalTargetType = Literal["confluence_page_update", "jira_ticket_create"]
@@ -118,6 +140,14 @@ def new_claim_id() -> str:
 
 def new_truth_id() -> str:
     return f"truth_{uuid4().hex}"
+
+
+def new_schema_truth_id() -> str:
+    return f"schema_truth_{uuid4().hex}"
+
+
+def new_atomic_fact_id() -> str:
+    return f"atomic_fact_{uuid4().hex}"
 
 
 def new_package_id() -> str:
@@ -447,6 +477,33 @@ class SemanticRelation(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+def _claim_authority_from_source(*, source_type: ClaimSourceKind, metadata: dict[str, object], truth_source_kind: TruthSourceKind | None = None) -> ClaimSourceAuthority:
+    if truth_source_kind in {"user_specification", "user_acceptance"}:
+        return "explicit_truth"
+    governance_level = str(metadata.get("source_governance_level") or "").strip().casefold()
+    temporal_status = str(metadata.get("source_temporal_status") or "").strip().casefold()
+    if source_type == "metamodel" or governance_level == "ssot":
+        return "ssot"
+    if governance_level == "governed":
+        return "governed"
+    if source_type == "github_file":
+        if "observed_only" in str(metadata.get("schema_validation_status") or "").strip().casefold():
+            return "runtime_observation"
+        return "implementation"
+    if temporal_status == "historical" or governance_level == "historical":
+        return "historical"
+    if source_type in {"confluence_page", "local_doc"}:
+        return "working_doc"
+    return "heuristic"
+
+
+def _claim_assertion_status_from_metadata(*, metadata: dict[str, object]) -> ClaimAssertionStatus:
+    raw = str(metadata.get("assertion_status") or "").strip().casefold()
+    if raw in {"excluded", "deprecated", "not_ssot", "secondary_only"}:
+        return raw  # type: ignore[return-value]
+    return "asserted"
+
+
 class AuditClaimEntry(BaseModel):
     claim_id: str = Field(default_factory=new_claim_id)
     source_snapshot_id: str | None = None
@@ -461,8 +518,31 @@ class AuditClaimEntry(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     fingerprint: str = Field(min_length=1)
     status: ClaimStatus = "active"
+    operator: str | None = None
+    constraint: str | None = None
+    focus_value: str | None = None
+    assertion_status: ClaimAssertionStatus = "asserted"
+    source_authority: ClaimSourceAuthority = "heuristic"
     evidence_location_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def hydrate_structured_fields(self) -> "AuditClaimEntry":
+        metadata = dict(self.metadata)
+        if self.operator is None:
+            self.operator = str(metadata.get("claim_operator") or "").strip() or None
+        if self.constraint is None:
+            self.constraint = str(metadata.get("claim_constraint") or "").strip() or None
+        if self.focus_value is None:
+            self.focus_value = str(metadata.get("claim_focus_value") or "").strip() or None
+        if self.assertion_status == "asserted":
+            self.assertion_status = _claim_assertion_status_from_metadata(metadata=metadata)
+        if self.source_authority == "heuristic":
+            self.source_authority = _claim_authority_from_source(
+                source_type=self.source_type,
+                metadata=metadata,
+            )
+        return self
 
 
 class TruthLedgerEntry(BaseModel):
@@ -479,7 +559,66 @@ class TruthLedgerEntry(BaseModel):
     created_from_problem_id: str | None = None
     supersedes_truth_id: str | None = None
     valid_from_snapshot_id: str | None = None
+    source_authority: ClaimSourceAuthority = "explicit_truth"
     metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def hydrate_truth_authority(self) -> "TruthLedgerEntry":
+        if self.source_authority != "explicit_truth":
+            return self
+        self.source_authority = _claim_authority_from_source(
+            source_type="user_truth",
+            metadata=self.metadata,
+            truth_source_kind=self.source_kind,
+        )
+        return self
+
+
+class SchemaTruthEntry(BaseModel):
+    schema_truth_id: str = Field(default_factory=new_schema_truth_id)
+    schema_key: str = Field(min_length=1)
+    schema_kind: Literal["node", "relationship", "property", "unknown"] = "unknown"
+    target_label: str = Field(min_length=1)
+    status: SchemaTruthStatus
+    source_kind: SchemaTruthSourceKind
+    source_authority: ClaimSourceAuthority = "heuristic"
+    source_ids: list[str] = Field(default_factory=list)
+    evidence_claim_ids: list[str] = Field(default_factory=list)
+    related_truth_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class AtomicFactEntry(BaseModel):
+    atomic_fact_id: str = Field(default_factory=new_atomic_fact_id)
+    fact_key: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    status: AtomicFactStatus = "open"
+    action_lane: AtomicFactActionLane
+    primary_package_id: str | None = None
+    primary_problem_id: str | None = None
+    related_package_ids: list[str] = Field(default_factory=list)
+    related_problem_ids: list[str] = Field(default_factory=list)
+    related_finding_ids: list[str] = Field(default_factory=list)
+    source_types: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    subject_keys: list[str] = Field(default_factory=list)
+    predicates: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    truth_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def normalize_lists(self) -> "AtomicFactEntry":
+        self.related_package_ids = _normalized_string_list(self.related_package_ids)
+        self.related_problem_ids = _normalized_string_list(self.related_problem_ids)
+        self.related_finding_ids = _normalized_string_list(self.related_finding_ids)
+        self.source_types = _normalized_string_list(self.source_types)
+        self.source_ids = _normalized_string_list(self.source_ids)
+        self.subject_keys = _normalized_string_list(self.subject_keys)
+        self.predicates = _normalized_string_list(self.predicates)
+        self.claim_ids = _normalized_string_list(self.claim_ids)
+        self.truth_ids = _normalized_string_list(self.truth_ids)
+        return self
 
 
 class DecisionProblemElement(BaseModel):
@@ -552,6 +691,8 @@ class AuditRun(BaseModel):
     analysis_log: list[AuditAnalysisLogEntry] = Field(default_factory=list)
     claims: list[AuditClaimEntry] = Field(default_factory=list)
     truths: list[TruthLedgerEntry] = Field(default_factory=list)
+    schema_truths: list[SchemaTruthEntry] = Field(default_factory=list)
+    atomic_facts: list[AtomicFactEntry] = Field(default_factory=list)
     decision_packages: list[DecisionPackage] = Field(default_factory=list)
     decision_records: list[DecisionRecord] = Field(default_factory=list)
     approval_requests: list[WritebackApprovalRequest] = Field(default_factory=list)
@@ -583,6 +724,11 @@ class DecisionCommentAnalysis(BaseModel):
 
 class DecisionPackageActionRequest(BaseModel):
     action: DecisionAction
+    comment_text: str | None = None
+
+
+class UpdateAtomicFactStatusRequest(BaseModel):
+    status: AtomicFactStatus
     comment_text: str | None = None
 
 

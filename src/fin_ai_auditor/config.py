@@ -191,12 +191,12 @@ class Settings(BaseSettings):
             return None
 
         source = get_value("FINAI_META_SOURCE", "FIN_AI_AUDITOR_META_SOURCE")
-        if str(source or "").strip().upper() != "DIRECT":
+        uri = get_value("FINAI_META_MODEL_URI", "FIN_AI_AUDITOR_META_MODEL_URI", "NEO4J_URI")
+        username = get_value("FINAI_META_MODEL_USERNAME", "FIN_AI_AUDITOR_META_MODEL_USERNAME", "NEO4J_USERNAME")
+        password = get_value("FINAI_META_MODEL_PASSWORD", "FIN_AI_AUDITOR_META_MODEL_PASSWORD", "NEO4J_PASSWORD")
+        database = get_value("FINAI_META_MODEL_DATABASE", "FIN_AI_AUDITOR_META_MODEL_DATABASE", "NEO4J_DATABASE") or "neo4j"
+        if str(source or "").strip().upper() != "DIRECT" and not (uri and username and password):
             return None
-        uri = get_value("FINAI_META_MODEL_URI", "FIN_AI_AUDITOR_META_MODEL_URI")
-        username = get_value("FINAI_META_MODEL_USERNAME", "FIN_AI_AUDITOR_META_MODEL_USERNAME")
-        password = get_value("FINAI_META_MODEL_PASSWORD", "FIN_AI_AUDITOR_META_MODEL_PASSWORD")
-        database = get_value("FINAI_META_MODEL_DATABASE", "FIN_AI_AUDITOR_META_MODEL_DATABASE") or "neo4j"
         if not uri or not username or not password:
             return None
         return DirectMetaModelConfig(

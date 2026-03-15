@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+import hashlib
+import json
 import re
 from typing import Final
 
+import httpx
+
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
+    AtomicFactEntry,
     AuditAnalysisLogEntry,
     AuditClaimEntry,
     AuditFinding,
@@ -28,6 +33,7 @@ from fin_ai_auditor.domain.models import (
     DecisionRecord,
     RetrievalSegment,
     RetrievalSegmentClaimLink,
+    SchemaTruthEntry,
     SemanticEntity,
     SemanticRelation,
     TruthLedgerEntry,
@@ -47,6 +53,17 @@ from fin_ai_auditor.services.connectors.confluence_connector import (
     ConfluencePageWriteConnector,
 )
 from fin_ai_auditor.services.connectors.jira_connector import JiraTicketTarget, JiraTicketingConnector
+from fin_ai_auditor.services.finding_prioritization import (
+    assigned_root_cause_bucket,
+    finding_root_cause_bucket,
+    is_core_root_cause_bucket,
+    order_package_findings,
+    prioritize_findings,
+    root_cause_label,
+    root_cause_priority,
+    select_primary_finding,
+    severity_rank,
+)
 from fin_ai_auditor.services.jira_ticket_writer import build_jira_issue_payload
 from fin_ai_auditor.services.pipeline_models import CachedCollectedDocument, CollectedDocument
 
@@ -419,6 +436,7 @@ class AuditService:
         finding_links: list[AuditFindingLink],
         claims: list[AuditClaimEntry],
         truths: list[TruthLedgerEntry],
+        schema_truths: list[SchemaTruthEntry],
         semantic_entities: list[SemanticEntity],
         semantic_relations: list[SemanticRelation],
         summary: str,
@@ -435,6 +453,12 @@ class AuditService:
             semantic_entities=semantic_entities,
             semantic_relations=semantic_relations,
         )
+        atomic_facts = self._build_atomic_facts(packages=packages)
+        atomic_facts, packages, atomic_fact_notes = self._apply_atomic_fact_history(
+            run=run,
+            atomic_facts=atomic_facts,
+            packages=packages,
+        )
         completed = run.model_copy(
             update={
                 "status": "completed",
@@ -447,7 +471,7 @@ class AuditService:
                     findings=findings,
                     claims=claims,
                     packages=packages,
-                    notes=analysis_notes,
+                    notes=[*analysis_notes, *atomic_fact_notes],
                 ),
                 "source_snapshots": source_snapshots,
                 "semantic_entities": semantic_entities,
@@ -456,6 +480,8 @@ class AuditService:
                 "finding_links": finding_links,
                 "claims": claims,
                 "truths": truths,
+                "schema_truths": schema_truths,
+                "atomic_facts": atomic_facts,
                 "decision_packages": packages,
                 "decision_records": [],
                 "approval_requests": [],
@@ -615,13 +641,79 @@ class AuditService:
             impacted_package_ids=impacted_package_ids,
             metadata={"package_title": package.title},
         )
+        updated_atomic_facts = self._sync_atomic_facts_from_package_decision(
+            atomic_facts=run.atomic_facts,
+            package=package,
+            action=decision_action,
+            comment_text=comment_text,
+        )
         updated = run.model_copy(
             update={
                 "updated_at": utc_now_iso(),
                 "truths": updated_truths,
+                "atomic_facts": updated_atomic_facts,
                 "analysis_log": next_log,
                 "decision_packages": updated_packages,
                 "decision_records": [*run.decision_records, decision_record],
+            }
+        )
+        return self._repository.upsert_run(run=updated)
+
+    def update_atomic_fact_status(
+        self,
+        *,
+        run_id: str,
+        atomic_fact_id: str,
+        status: str,
+        comment_text: str | None,
+    ) -> AuditRun:
+        run = self._require_run(run_id=run_id)
+        normalized_status = str(status or "").strip()
+        if normalized_status not in {"open", "confirmed", "resolved", "superseded"}:
+            raise ValueError(f"Unbekannter Atomic-Fact-Status: {status}")
+        target_fact: AtomicFactEntry | None = None
+        updated_facts: list[AtomicFactEntry] = []
+        for fact in run.atomic_facts:
+            if fact.atomic_fact_id != atomic_fact_id:
+                updated_facts.append(fact)
+                continue
+            metadata = dict(fact.metadata or {})
+            metadata["last_status_changed_at"] = utc_now_iso()
+            metadata["last_status_comment"] = str(comment_text or "").strip() or None
+            target_fact = fact.model_copy(update={"status": normalized_status, "metadata": metadata})
+            updated_facts.append(target_fact)
+        if target_fact is None:
+            raise ValueError(f"Atomic Fact nicht gefunden: {atomic_fact_id}")
+        updated_packages = self._sync_atomic_fact_status_into_packages(
+            packages=run.decision_packages,
+            target_fact=target_fact,
+        )
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "atomic_facts": updated_facts,
+                "decision_packages": updated_packages,
+                "analysis_log": self._append_log(
+                    analysis_log=run.analysis_log,
+                    entry=AuditAnalysisLogEntry(
+                        source_type="impact_analysis",
+                        title="Atomic Fact Status geaendert",
+                        message=f"{target_fact.fact_key} wurde auf {normalized_status} gesetzt.",
+                        related_finding_ids=list(target_fact.related_finding_ids),
+                        derived_changes=[
+                            f"Atomic Fact {target_fact.fact_key} hat jetzt den Status {normalized_status}.",
+                        ],
+                        impact_summary=[
+                            "Die Faktenansicht und die zugehoerigen Entscheidungspakete spiegeln jetzt denselben Bewertungsstand."
+                        ],
+                        metadata={
+                            "atomic_fact_id": target_fact.atomic_fact_id,
+                            "atomic_fact_key": target_fact.fact_key,
+                            "status": normalized_status,
+                            "comment_text": comment_text,
+                        },
+                    ),
+                ),
             }
         )
         return self._repository.upsert_run(run=updated)
@@ -676,6 +768,55 @@ class AuditService:
                 existing_preview=payload_preview,
                 brief=brief,
             )
+        approval_metadata["writeback_verification"] = self._build_writeback_verification_metadata(
+            target_type=target_type,
+            target_url=effective_target_url,
+            extra_metadata=approval_metadata,
+        )
+        approval_metadata["writeback_preflight"] = self._build_writeback_preflight(
+            target_type=target_type,
+            verification_metadata=approval_metadata["writeback_verification"],
+        )
+        approval_metadata["execution_token"] = self._build_writeback_execution_token(
+            run=run,
+            target_type=target_type,
+            target_url=effective_target_url,
+            related_findings=related_findings,
+        )
+        approval_metadata["atomic_facts"] = [
+            {
+                "fact_key": _atomic_fact_key(finding=finding),
+                "summary": _atomic_fact_summary(
+                    finding=finding,
+                    claims=_claims_for_finding_scope(finding=finding, claims=run.claims),
+                ),
+                "action_lane": _preferred_action_lane_for_finding(finding=finding),
+            }
+            for finding in related_findings[:6]
+        ]
+        effective_payload_preview = _dedupe_preserve_order(
+            [
+                *effective_payload_preview,
+                *[
+                    f"Fakt: {fact['summary']}"
+                    for fact in approval_metadata["atomic_facts"]
+                    if str(fact.get("summary") or "").strip()
+                ][:3],
+                *[
+                    f"Aktionsspur: {fact['action_lane']}"
+                    for fact in approval_metadata["atomic_facts"]
+                    if str(fact.get("action_lane") or "").strip()
+                ][:2],
+                *[
+                    f"Preflight: {risk}"
+                    for risk in list((approval_metadata.get("writeback_preflight") or {}).get("warnings") or [])[:2]
+                ],
+                *[
+                    f"Blocker: {risk}"
+                    for risk in list((approval_metadata.get("writeback_preflight") or {}).get("blockers") or [])[:2]
+                ],
+            ]
+        )
         approval = WritebackApprovalRequest(
             target_type=target_type,
             title=title,
@@ -902,6 +1043,14 @@ class AuditService:
         approval_request_id: str,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
+        existing = self._return_existing_writeback_execution(
+            run=run,
+            approval_request_id=approval_request_id,
+            target_type="jira_ticket_create",
+            expected_change_type="jira_ticket_created",
+        )
+        if existing is not None:
+            return existing
         approval = self._require_approved_request(
             run=run,
             approval_request_id=approval_request_id,
@@ -909,9 +1058,24 @@ class AuditService:
         )
         if self._atlassian_oauth_service is None or self._jira_ticketing_connector is None:
             raise ValueError("Jira-Writeback ist im aktuellen Auditor-Kontext noch nicht verdrahtet.")
-        access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
-            required_scopes={"write:jira-work"}
+        verification_metadata = self._build_writeback_verification_metadata(
+            target_type="jira_ticket_create",
+            target_url=approval.target_url,
+            extra_metadata=approval.metadata,
         )
+        try:
+            access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
+                required_scopes={"write:jira-work"}
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="jira_ticket_create",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         findings = self._select_related_findings(
             run=run,
             related_finding_ids=list(approval.related_finding_ids),
@@ -927,14 +1091,24 @@ class AuditService:
             brief=preview_brief,
             project_key=self._settings.fixed_jira_project_key,
         )
-        created_issue = self._jira_ticketing_connector.create_ticket(
-            target=JiraTicketTarget(
-                project_key=self._settings.fixed_jira_project_key,
-                board_url=self._settings.jira_board_url,
-            ),
-            issue_payload=jira_issue_payload,
-            access_token=access_token,
-        )
+        try:
+            created_issue = self._jira_ticketing_connector.create_ticket(
+                target=JiraTicketTarget(
+                    project_key=self._settings.fixed_jira_project_key,
+                    board_url=self._settings.jira_board_url,
+                ),
+                issue_payload=jira_issue_payload,
+                access_token=access_token,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="jira_ticket_create",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         resolved_brief = self._resolve_jira_brief_for_execution(
             run=run,
             approval=approval,
@@ -958,6 +1132,12 @@ class AuditService:
                 "jira_issue_payload": jira_issue_payload,
                 "jira_issue_response": created_issue.response_payload,
                 "execution_mode": "external_jira_api",
+                "execution_token": approval.metadata.get("execution_token"),
+                "writeback_verification": {
+                    **verification_metadata,
+                    **created_issue.verification_metadata,
+                    "verified": True,
+                },
             },
             jira_ticket=resolved_brief,
         )
@@ -990,7 +1170,14 @@ class AuditService:
                         impact_summary=[
                             "Das Ticket kann jetzt als konkreter AI-Coding-Auftrag ausserhalb des Auditors weiterverarbeitet werden."
                         ],
-                        metadata={"approval_request_id": approval.approval_request_id},
+                        metadata={
+                            "approval_request_id": approval.approval_request_id,
+                            "writeback_verification": {
+                                **verification_metadata,
+                                **created_issue.verification_metadata,
+                                "verified": True,
+                            },
+                        },
                     ),
                 ),
             }
@@ -1004,6 +1191,14 @@ class AuditService:
         approval_request_id: str,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
+        existing = self._return_existing_writeback_execution(
+            run=run,
+            approval_request_id=approval_request_id,
+            target_type="confluence_page_update",
+            expected_change_type="confluence_page_updated",
+        )
+        if existing is not None:
+            return existing
         approval = self._require_approved_request(
             run=run,
             approval_request_id=approval_request_id,
@@ -1011,9 +1206,24 @@ class AuditService:
         )
         if self._atlassian_oauth_service is None or self._confluence_page_write_connector is None:
             raise ValueError("Confluence-Writeback ist im aktuellen Auditor-Kontext noch nicht verdrahtet.")
-        access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
-            required_scopes={"write:page:confluence"}
+        verification_metadata = self._build_writeback_verification_metadata(
+            target_type="confluence_page_update",
+            target_url=approval.target_url,
+            extra_metadata=approval.metadata,
         )
+        try:
+            access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
+                required_scopes={"write:page:confluence"}
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="confluence_page_update",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         findings = self._select_related_findings(
             run=run,
             related_finding_ids=list(approval.related_finding_ids),
@@ -1024,19 +1234,37 @@ class AuditService:
             findings=findings,
         )
         if not patch_preview.page_id:
-            raise ValueError(
+            exc = ValueError(
                 "Der Confluence-Patch hat noch keinen konkreten Seitenanker und kann deshalb nicht extern ausgefuehrt werden."
             )
-        updated_page = self._confluence_page_write_connector.update_page(
-            target=ConfluencePageTarget(
-                page_id=patch_preview.page_id,
-                page_title=patch_preview.page_title,
-                page_url=patch_preview.page_url,
-                space_key=patch_preview.space_key,
-            ),
-            patch_preview=patch_preview,
-            access_token=access_token,
-        )
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="confluence_page_update",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise exc
+        try:
+            updated_page = self._confluence_page_write_connector.update_page(
+                target=ConfluencePageTarget(
+                    page_id=patch_preview.page_id,
+                    page_title=patch_preview.page_title,
+                    page_url=patch_preview.page_url,
+                    space_key=patch_preview.space_key,
+                ),
+                patch_preview=patch_preview,
+                access_token=access_token,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="confluence_page_update",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         details = build_confluence_update_details(
             page_title=updated_page.page_title,
             page_url=updated_page.page_url,
@@ -1067,6 +1295,12 @@ class AuditService:
                 "confluence_page_response": updated_page.response_payload,
                 "confluence_patch_preview": patch_preview.model_dump(mode="json"),
                 "execution_mode": "external_confluence_api",
+                "execution_token": approval.metadata.get("execution_token"),
+                "writeback_verification": {
+                    **verification_metadata,
+                    **updated_page.verification_metadata,
+                    "verified": True,
+                },
             },
             confluence_update=details,
         )
@@ -1099,12 +1333,208 @@ class AuditService:
                         impact_summary=[
                             "Die dokumentierte Wahrheit ist jetzt extern aktualisiert und kann in Folge-Laeufen als neuer Soll-Stand gelesen werden."
                         ],
-                        metadata={"approval_request_id": approval.approval_request_id},
+                        metadata={
+                            "approval_request_id": approval.approval_request_id,
+                            "writeback_verification": {
+                                **verification_metadata,
+                                **updated_page.verification_metadata,
+                                "verified": True,
+                            },
+                        },
                     ),
                 ),
             }
         )
         return self._repository.upsert_run(run=updated)
+
+    def _build_writeback_verification_metadata(
+        self,
+        *,
+        target_type: str,
+        target_url: str | None,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        required_scopes = {
+            "jira_ticket_create": {"write:jira-work"},
+            "confluence_page_update": {"write:page:confluence"},
+        }.get(target_type, set())
+        verification: dict[str, object] = {
+            "target_type": target_type,
+            "target_url": str(target_url or "").strip() or None,
+            "required_scopes": sorted(required_scopes),
+        }
+        if self._atlassian_oauth_service is not None:
+            verification.update(
+                self._atlassian_oauth_service.build_scope_verification(
+                    required_scopes=required_scopes,
+                    target_url=target_url,
+                    target_type=target_type,
+                )
+            )
+        if target_type == "confluence_page_update":
+            preview = (extra_metadata or {}).get("confluence_patch_preview")
+            if isinstance(preview, dict):
+                verification["page_id"] = str(preview.get("page_id") or "").strip() or None
+                verification["patch_execution_ready"] = bool(preview.get("execution_ready"))
+                verification["patch_blockers"] = list(preview.get("blockers") or [])
+        return verification
+
+    @staticmethod
+    def _build_writeback_preflight(
+        *,
+        target_type: str,
+        verification_metadata: dict[str, object],
+    ) -> dict[str, object]:
+        blockers: list[str] = []
+        warnings: list[str] = []
+        if not bool(verification_metadata.get("oauth_ready")):
+            blockers.append("OAuth-Kontext ist noch nicht betriebsbereit.")
+        if not bool(verification_metadata.get("token_valid", True)):
+            blockers.append("Kein gueltiger Atlassian-Token vorhanden.")
+        missing_scopes = [str(item).strip() for item in list(verification_metadata.get("missing_scopes") or []) if str(item).strip()]
+        if missing_scopes:
+            blockers.append(f"Fehlende Scopes: {', '.join(missing_scopes)}")
+        if target_type == "confluence_page_update":
+            if not bool(verification_metadata.get("patch_execution_ready", True)):
+                blockers.append("Confluence-Patch ist noch nicht ausfuehrbar.")
+            for blocker in list(verification_metadata.get("patch_blockers") or []):
+                text = str(blocker).strip()
+                if text:
+                    blockers.append(text)
+        if verification_metadata.get("target_url") in {None, ""}:
+            warnings.append("Ziel-URL ist noch nicht explizit gesetzt.")
+        if verification_metadata.get("redirect_uri_matches_local_api") is False:
+            warnings.append("OAuth-Redirect stimmt nicht sauber mit der lokalen API ueberein.")
+        return {
+            "status": "blocked" if blockers else ("warning" if warnings else "ready"),
+            "blockers": _dedupe_preserve_order(blockers),
+            "warnings": _dedupe_preserve_order(warnings),
+        }
+
+    @staticmethod
+    def _build_writeback_execution_token(
+        *,
+        run: AuditRun,
+        target_type: str,
+        target_url: str | None,
+        related_findings: list[AuditFinding],
+    ) -> str:
+        raw = "|".join(
+            [
+                run.run_id,
+                target_type,
+                str(target_url or "").strip(),
+                *sorted(finding.finding_id for finding in related_findings),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _return_existing_writeback_execution(
+        self,
+        *,
+        run: AuditRun,
+        approval_request_id: str,
+        target_type: str,
+        expected_change_type: str,
+    ) -> AuditRun | None:
+        request = next(
+            (item for item in run.approval_requests if item.approval_request_id == approval_request_id),
+            None,
+        )
+        if request is None or request.target_type != target_type or request.status != "executed":
+            return None
+        implemented_change_id = str((request.metadata or {}).get("implemented_change_id") or "").strip()
+        if not implemented_change_id:
+            raise ValueError("Freigabeanfrage ist bereits als ausgefuehrt markiert, aber der Vollzugsledger ist unvollstaendig.")
+        existing_change = next(
+            (
+                change
+                for change in run.implemented_changes
+                if change.change_id == implemented_change_id and change.change_type == expected_change_type
+            ),
+            None,
+        )
+        if existing_change is None:
+            raise ValueError("Writeback wurde bereits markiert, aber der zugehoerige Vollzugseintrag fehlt.")
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "analysis_log": self._append_log(
+                    analysis_log=run.analysis_log,
+                    entry=AuditAnalysisLogEntry(
+                        source_type="impact_analysis",
+                        title="Writeback bereits ausgefuehrt",
+                        message=(
+                            f"Die Freigabe {approval_request_id} wurde bereits extern ausgefuehrt; der bestehende Vollzugseintrag wird wiederverwendet."
+                        ),
+                        related_finding_ids=list(existing_change.related_finding_ids),
+                        derived_changes=[
+                            "Kein zweiter externer Writeback wurde ausgeloest.",
+                            f"Vorhandener Vollzugseintrag: {implemented_change_id}.",
+                        ],
+                        impact_summary=[
+                            "Die Ausfuehrung bleibt idempotent und erzeugt keine doppelten externen Artefakte."
+                        ],
+                        metadata={
+                            "approval_request_id": approval_request_id,
+                            "implemented_change_id": implemented_change_id,
+                            "idempotent_reuse": True,
+                        },
+                    ),
+                ),
+            }
+        )
+        return self._repository.upsert_run(run=updated)
+
+    def _persist_writeback_failure(
+        self,
+        *,
+        run: AuditRun,
+        approval_request_id: str,
+        target_type: str,
+        exc: Exception,
+        verification_metadata: dict[str, object],
+    ) -> None:
+        failure = _classify_writeback_exception(exc=exc)
+        updated_requests: list[WritebackApprovalRequest] = []
+        target_request: WritebackApprovalRequest | None = None
+        for request in run.approval_requests:
+            if request.approval_request_id != approval_request_id:
+                updated_requests.append(request)
+                continue
+            metadata = dict(request.metadata or {})
+            metadata["writeback_verification"] = verification_metadata
+            metadata["last_execution_error"] = failure
+            target_request = request.model_copy(update={"metadata": metadata})
+            updated_requests.append(target_request)
+        updated_run = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "approval_requests": updated_requests,
+                "analysis_log": self._append_log(
+                    analysis_log=run.analysis_log,
+                    entry=AuditAnalysisLogEntry(
+                        source_type="impact_analysis",
+                        title=f"{target_type} fehlgeschlagen",
+                        message=str(failure.get('message') or str(exc)),
+                        related_finding_ids=list(target_request.related_finding_ids if target_request else []),
+                        derived_changes=[
+                            "Der externe Writeback wurde nicht ausgefuehrt.",
+                            f"Fehlerklasse: {failure.get('failure_class')}",
+                        ],
+                        impact_summary=[
+                            "Die Freigabe bleibt bestehen, aber der Vollzug muss nach Fehlerbehebung erneut angestossen werden."
+                        ],
+                        metadata={
+                            "approval_request_id": approval_request_id,
+                            "writeback_verification": verification_metadata,
+                            "last_execution_error": failure,
+                        },
+                    ),
+                ),
+            }
+        )
+        self._repository.upsert_run(run=updated_run)
 
     def _require_run(self, *, run_id: str) -> AuditRun:
         run = self.get_run(run_id=run_id)
@@ -1329,166 +1759,507 @@ class AuditService:
         for truth in truths:
             truth_map.setdefault(truth.subject_key, []).append(truth)
         entities_by_id = {entity.entity_id: entity for entity in semantic_entities}
-        grouped_findings: dict[str, list[AuditFinding]] = defaultdict(list)
-        for finding in findings:
-            grouped_findings[_package_cluster_key(finding=finding)].append(finding)
+        findings_by_cluster: dict[str, list[AuditFinding]] = defaultdict(list)
+        for finding in prioritize_findings(findings=findings):
+            findings_by_cluster[_package_cluster_key(finding=finding)].append(finding)
         packages: list[DecisionPackage] = []
-        for cluster_key, cluster_findings in sorted(grouped_findings.items(), key=lambda item: item[0]):
-            dominant_category = _dominant_category(findings=cluster_findings)
-            severity_summary = _highest_severity(findings=cluster_findings)
-            related_claims = [
-                claim
-                for claim_key, claim_group in claim_map.items()
-                if _claim_belongs_to_cluster(claim_key=claim_key, cluster_key=cluster_key)
-                for claim in claim_group
-            ]
-            related_truths = [
-                truth
-                for truth_key, truth_group in truth_map.items()
-                if _claim_belongs_to_cluster(claim_key=truth_key, cluster_key=cluster_key)
-                for truth in truth_group
-            ] or truth_map.get("BSM.process", [])
-            cluster_claims = _dedupe_claims(
+        for cluster_key, cluster_findings in sorted(findings_by_cluster.items(), key=lambda item: item[0]):
+            cluster_scope_keys = _package_scope_keys_for_findings(findings=cluster_findings)
+            if not cluster_scope_keys:
+                cluster_scope_keys = {package_scope_key(cluster_key)}
+            display_label = _package_group_label(group_key=cluster_key, findings=cluster_findings)
+            primary_cluster_scope_key = _primary_scope_key_for_findings(
+                findings=cluster_findings,
+                fallback_scope_keys=cluster_scope_keys,
+            )
+            related_claims = _dedupe_claims(
                 [
                     claim
                     for claim_group in claim_map.values()
                     for claim in claim_group
-                    if _claim_is_semantically_attached_to_cluster(claim=claim, cluster_key=cluster_key)
+                    if _claim_matches_any_package_scope(claim=claim, package_scope_keys=cluster_scope_keys)
+                    or _claim_is_semantically_attached_to_cluster(claim=claim, cluster_key=primary_cluster_scope_key)
                 ]
             )
-            semantic_entity_ids = _dedupe_preserve_order(
-                [
-                    entity_id
-                    for claim in cluster_claims
-                    for entity_id in _string_list_from_metadata(claim.metadata.get("semantic_entity_ids"))
-                ]
-            )
-            related_entities = [entities_by_id[entity_id] for entity_id in semantic_entity_ids if entity_id in entities_by_id]
-            related_relations = _semantic_relations_for_entity_ids(
-                semantic_relations=semantic_relations,
-                entity_ids=set(semantic_entity_ids),
-            )
-            semantic_context = _dedupe_preserve_order(
-                [f"{entity.entity_type}:{entity.label}" for entity in related_entities]
-            )
-            semantic_relation_summaries = _dedupe_preserve_order(
-                [
-                    _semantic_relation_summary(
-                        relation=relation,
-                        entities_by_id=entities_by_id,
-                    )
-                    for relation in related_relations
-                ]
-            )
-            semantic_contract_paths = _dedupe_preserve_order(
-                [
-                    contract_path
-                    for finding in cluster_findings
-                    for contract_path in _string_list_from_metadata(finding.metadata.get("semantic_contract_paths"))
-                ]
-            )
-            semantic_section_paths = _dedupe_preserve_order(
-                [
-                    section_path
-                    for finding in cluster_findings
-                    for section_path in _string_list_from_metadata(finding.metadata.get("semantic_section_paths"))
-                ]
-            )
-
-            problems: list[DecisionProblemElement] = []
-            cluster_retrieval_context: list[str] = []
-            cluster_anchor_values: list[str] = []
-            cluster_delta_summary: list[str] = []
-            cluster_delta_statuses: list[str] = []
-            cluster_delta_reasons: list[str] = []
-            related_finding_ids: list[str] = []
+            related_truths = [
+                truth
+                for truth_group in truth_map.values()
+                for truth in truth_group
+                if _claim_matches_any_truth_scope(truth=truth, package_scope_keys=cluster_scope_keys)
+            ] or truth_map.get("BSM.process", [])
+            available_core_buckets = {
+                finding_root_cause_bucket(finding=finding)
+                for finding in cluster_findings
+                if is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+            }
+            package_findings_by_bucket: dict[str, list[AuditFinding]] = defaultdict(list)
             for finding in cluster_findings:
-                scope_key = str(finding.metadata.get("object_key") or finding.canonical_key or finding.title)
-                retrieval_context = _string_list_from_metadata(finding.metadata.get("retrieval_context"))
-                retrieval_anchor_values = _string_list_from_metadata(finding.metadata.get("retrieval_anchor_values"))
-                delta_summary = _string_list_from_metadata(finding.metadata.get("delta_summary"))
-                delta_statuses = _string_list_from_metadata(finding.metadata.get("delta_statuses"))
-                delta_reasons = _string_list_from_metadata(finding.metadata.get("delta_reasons"))
-                related_finding_ids.append(finding.finding_id)
-                cluster_retrieval_context.extend(retrieval_context)
-                cluster_anchor_values.extend(retrieval_anchor_values)
-                cluster_delta_summary.extend(delta_summary)
-                cluster_delta_statuses.extend(delta_statuses)
-                cluster_delta_reasons.extend(delta_reasons)
-                problems.append(
-                    DecisionProblemElement(
-                        finding_id=finding.finding_id,
-                        category=finding.category,
-                        severity=finding.severity,
-                        scope_summary=scope_key,
-                        short_explanation=finding.summary,
-                        recommendation=finding.recommendation,
-                        confidence=0.8 if finding.severity in {"critical", "high"} else 0.66,
-                        affected_claim_ids=[claim.claim_id for claim in related_claims],
-                        affected_truth_ids=[truth.truth_id for truth in related_truths],
-                        evidence_locations=list(finding.locations),
+                assigned_bucket = assigned_root_cause_bucket(
+                    finding=finding,
+                    available_core_buckets=available_core_buckets,
+                )
+                package_findings_by_bucket[assigned_bucket].append(finding)
+
+            for root_bucket, bucket_findings in sorted(
+                package_findings_by_bucket.items(),
+                key=lambda item: (
+                    root_cause_priority(bucket=item[0]),
+                    min(severity_rank(severity=finding.severity) for finding in item[1]),
+                    item[0],
+                ),
+            ):
+                ordered_bucket_findings = order_package_findings(
+                    findings=bucket_findings,
+                    package_bucket=root_bucket,
+                )
+                primary_finding = select_primary_finding(
+                    findings=ordered_bucket_findings,
+                    package_bucket=root_bucket,
+                )
+                dominant_category = primary_finding.category if primary_finding is not None else _dominant_category(findings=ordered_bucket_findings)
+                severity_summary = _highest_severity(findings=ordered_bucket_findings)
+                primary_finding_id = primary_finding.finding_id if primary_finding is not None else None
+                package_scope_keys = _package_scope_keys_for_findings(findings=ordered_bucket_findings) or set(cluster_scope_keys)
+                primary_scope_key = _primary_scope_key_for_findings(
+                    findings=ordered_bucket_findings,
+                    fallback_scope_keys=package_scope_keys,
+                )
+                package_related_claims = _dedupe_claims(
+                    [
+                        claim
+                        for claim in related_claims
+                        if _claim_matches_any_package_scope(claim=claim, package_scope_keys=package_scope_keys)
+                    ]
+                ) or related_claims
+                package_related_truths = [
+                    truth
+                    for truth in related_truths
+                    if _claim_matches_any_truth_scope(truth=truth, package_scope_keys=package_scope_keys)
+                ] or related_truths
+                package_semantic_entity_ids = _dedupe_preserve_order(
+                    [
+                        entity_id
+                        for claim in package_related_claims
+                        for entity_id in _string_list_from_metadata(claim.metadata.get("semantic_entity_ids"))
+                    ]
+                )
+                related_entities = [
+                    entities_by_id[entity_id] for entity_id in package_semantic_entity_ids if entity_id in entities_by_id
+                ]
+                related_relations = _semantic_relations_for_entity_ids(
+                    semantic_relations=semantic_relations,
+                    entity_ids=set(package_semantic_entity_ids),
+                )
+                semantic_context = _dedupe_preserve_order(
+                    [f"{entity.entity_type}:{entity.label}" for entity in related_entities]
+                )
+                semantic_relation_summaries = _dedupe_preserve_order(
+                    [
+                        _semantic_relation_summary(
+                            relation=relation,
+                            entities_by_id=entities_by_id,
+                        )
+                        for relation in related_relations
+                    ]
+                )
+                semantic_contract_paths = _dedupe_preserve_order(
+                    [
+                        contract_path
+                        for finding in ordered_bucket_findings
+                        for contract_path in _string_list_from_metadata(finding.metadata.get("semantic_contract_paths"))
+                    ]
+                )
+                semantic_section_paths = _dedupe_preserve_order(
+                    [
+                        section_path
+                        for finding in ordered_bucket_findings
+                        for section_path in _string_list_from_metadata(finding.metadata.get("semantic_section_paths"))
+                    ]
+                )
+                causal_write_deciders = _dedupe_preserve_order(
+                    [
+                        label
+                        for finding in ordered_bucket_findings
+                        for label in _string_list_from_metadata(finding.metadata.get("causal_write_decider_labels"))
+                    ]
+                )
+                causal_write_apis = _dedupe_preserve_order(
+                    [
+                        api
+                        for finding in ordered_bucket_findings
+                        for api in _string_list_from_metadata(finding.metadata.get("causal_write_apis"))
+                    ]
+                )
+                causal_repository_adapters = _dedupe_preserve_order(
+                    [
+                        adapter
+                        for finding in ordered_bucket_findings
+                        for adapter in _string_list_from_metadata(finding.metadata.get("causal_repository_adapters"))
+                    ]
+                )
+                causal_repository_adapter_symbols = _dedupe_preserve_order(
+                    [
+                        adapter
+                        for finding in ordered_bucket_findings
+                        for adapter in _string_list_from_metadata(finding.metadata.get("causal_repository_adapter_symbols"))
+                    ]
+                )
+                causal_driver_adapters = _dedupe_preserve_order(
+                    [
+                        adapter
+                        for finding in ordered_bucket_findings
+                        for adapter in _string_list_from_metadata(finding.metadata.get("causal_driver_adapters"))
+                    ]
+                )
+                causal_driver_adapter_symbols = _dedupe_preserve_order(
+                    [
+                        adapter
+                        for finding in ordered_bucket_findings
+                        for adapter in _string_list_from_metadata(finding.metadata.get("causal_driver_adapter_symbols"))
+                    ]
+                )
+                causal_transaction_boundaries = _dedupe_preserve_order(
+                    [
+                        boundary
+                        for finding in ordered_bucket_findings
+                        for boundary in _string_list_from_metadata(finding.metadata.get("causal_transaction_boundaries"))
+                    ]
+                )
+                causal_retry_paths = _dedupe_preserve_order(
+                    [
+                        retry_path
+                        for finding in ordered_bucket_findings
+                        for retry_path in _string_list_from_metadata(finding.metadata.get("causal_retry_paths"))
+                    ]
+                )
+                causal_batch_paths = _dedupe_preserve_order(
+                    [
+                        batch_path
+                        for finding in ordered_bucket_findings
+                        for batch_path in _string_list_from_metadata(finding.metadata.get("causal_batch_paths"))
+                    ]
+                )
+                causal_persistence_targets = _dedupe_preserve_order(
+                    [
+                        target
+                        for finding in ordered_bucket_findings
+                        for target in _string_list_from_metadata(finding.metadata.get("causal_persistence_targets"))
+                    ]
+                )
+                causal_persistence_sink_kinds = _dedupe_preserve_order(
+                    [
+                        sink_kind
+                        for finding in ordered_bucket_findings
+                        for sink_kind in _string_list_from_metadata(finding.metadata.get("causal_persistence_sink_kinds"))
+                    ]
+                )
+                causal_persistence_backends = _dedupe_preserve_order(
+                    [
+                        backend
+                        for finding in ordered_bucket_findings
+                        for backend in _string_list_from_metadata(finding.metadata.get("causal_persistence_backends"))
+                    ]
+                )
+                causal_persistence_operation_types = _dedupe_preserve_order(
+                    [
+                        operation_type
+                        for finding in ordered_bucket_findings
+                        for operation_type in _string_list_from_metadata(
+                            finding.metadata.get("causal_persistence_operation_types")
+                        )
+                    ]
+                )
+                causal_persistence_schema_targets = _dedupe_preserve_order(
+                    [
+                        schema_target
+                        for finding in ordered_bucket_findings
+                        for schema_target in _string_list_from_metadata(
+                            finding.metadata.get("causal_persistence_schema_targets")
+                        )
+                    ]
+                )
+                causal_schema_validated_targets = _dedupe_preserve_order(
+                    [
+                        target
+                        for finding in ordered_bucket_findings
+                        for target in _string_list_from_metadata(finding.metadata.get("causal_schema_validated_targets"))
+                    ]
+                )
+                causal_schema_observed_only_targets = _dedupe_preserve_order(
+                    [
+                        target
+                        for finding in ordered_bucket_findings
+                        for target in _string_list_from_metadata(finding.metadata.get("causal_schema_observed_only_targets"))
+                    ]
+                )
+                causal_schema_unconfirmed_targets = _dedupe_preserve_order(
+                    [
+                        target
+                        for finding in ordered_bucket_findings
+                        for target in _string_list_from_metadata(finding.metadata.get("causal_schema_unconfirmed_targets"))
+                    ]
+                )
+                causal_schema_validation_statuses = _dedupe_preserve_order(
+                    [
+                        status
+                        for finding in ordered_bucket_findings
+                        for status in _string_list_from_metadata(finding.metadata.get("causal_schema_validation_statuses"))
+                    ]
+                )
+
+                problems: list[DecisionProblemElement] = []
+                bucket_retrieval_context: list[str] = []
+                bucket_anchor_values: list[str] = []
+                bucket_delta_summary: list[str] = []
+                bucket_delta_statuses: list[str] = []
+                bucket_delta_reasons: list[str] = []
+                related_finding_ids: list[str] = []
+                for finding in ordered_bucket_findings:
+                    scope_key = str(finding.metadata.get("object_key") or finding.canonical_key or finding.title)
+                    atomic_fact_claims = _claims_for_finding_scope(
+                        finding=finding,
+                        claims=package_related_claims,
+                    )
+                    atomic_fact_summary = _atomic_fact_summary(
+                        finding=finding,
+                        claims=atomic_fact_claims,
+                    )
+                    action_lane = _preferred_action_lane_for_finding(finding=finding)
+                    retrieval_context = _string_list_from_metadata(finding.metadata.get("retrieval_context"))
+                    retrieval_anchor_values = _string_list_from_metadata(finding.metadata.get("retrieval_anchor_values"))
+                    delta_summary = _string_list_from_metadata(finding.metadata.get("delta_summary"))
+                    delta_statuses = _string_list_from_metadata(finding.metadata.get("delta_statuses"))
+                    delta_reasons = _string_list_from_metadata(finding.metadata.get("delta_reasons"))
+                    related_finding_ids.append(finding.finding_id)
+                    bucket_retrieval_context.extend(retrieval_context)
+                    bucket_anchor_values.extend(retrieval_anchor_values)
+                    bucket_delta_summary.extend(delta_summary)
+                    bucket_delta_statuses.extend(delta_statuses)
+                    bucket_delta_reasons.extend(delta_reasons)
+                    problems.append(
+                        DecisionProblemElement(
+                            finding_id=finding.finding_id,
+                            category=finding.category,
+                            severity=finding.severity,
+                            scope_summary=scope_key,
+                            short_explanation=finding.summary,
+                            recommendation=finding.recommendation,
+                            confidence=0.8 if finding.severity in {"critical", "high"} else 0.66,
+                            affected_claim_ids=[claim.claim_id for claim in atomic_fact_claims],
+                            affected_truth_ids=[truth.truth_id for truth in package_related_truths],
+                            evidence_locations=list(finding.locations),
+                            metadata={
+                                "origin_finding_id": finding.finding_id,
+                                "atomic_fact_key": _atomic_fact_key(finding=finding),
+                                "atomic_fact_summary": atomic_fact_summary,
+                                "atomic_fact_subject_keys": _dedupe_preserve_order(
+                                    [claim.subject_key for claim in atomic_fact_claims]
+                                ),
+                                "atomic_fact_predicates": _dedupe_preserve_order(
+                                    [claim.predicate for claim in atomic_fact_claims]
+                                ),
+                                "atomic_fact_source_types": _dedupe_preserve_order(
+                                    [claim.source_type for claim in atomic_fact_claims]
+                                ),
+                                "atomic_fact_source_ids": _dedupe_preserve_order(
+                                    [claim.source_id for claim in atomic_fact_claims]
+                                ),
+                                "action_lane": action_lane,
+                                "atomic_fact_status": "open",
+                                "retrieval_context": retrieval_context,
+                                "delta_summary": delta_summary,
+                                "delta_statuses": delta_statuses,
+                                "semantic_context": _string_list_from_metadata(finding.metadata.get("semantic_context")),
+                                "semantic_relation_summaries": _string_list_from_metadata(
+                                    finding.metadata.get("semantic_relation_summaries")
+                                ),
+                                "semantic_contract_paths": _string_list_from_metadata(
+                                    finding.metadata.get("semantic_contract_paths")
+                                ),
+                                "semantic_section_paths": _string_list_from_metadata(
+                                    finding.metadata.get("semantic_section_paths")
+                                ),
+                                "causal_write_decider_labels": _string_list_from_metadata(
+                                    finding.metadata.get("causal_write_decider_labels")
+                                ),
+                                "causal_write_apis": _string_list_from_metadata(
+                                    finding.metadata.get("causal_write_apis")
+                                ),
+                                "causal_repository_adapters": _string_list_from_metadata(
+                                    finding.metadata.get("causal_repository_adapters")
+                                ),
+                                "causal_repository_adapter_symbols": _string_list_from_metadata(
+                                    finding.metadata.get("causal_repository_adapter_symbols")
+                                ),
+                                "causal_driver_adapters": _string_list_from_metadata(
+                                    finding.metadata.get("causal_driver_adapters")
+                                ),
+                                "causal_driver_adapter_symbols": _string_list_from_metadata(
+                                    finding.metadata.get("causal_driver_adapter_symbols")
+                                ),
+                                "causal_transaction_boundaries": _string_list_from_metadata(
+                                    finding.metadata.get("causal_transaction_boundaries")
+                                ),
+                                "causal_retry_paths": _string_list_from_metadata(
+                                    finding.metadata.get("causal_retry_paths")
+                                ),
+                                "causal_batch_paths": _string_list_from_metadata(
+                                    finding.metadata.get("causal_batch_paths")
+                                ),
+                                "causal_persistence_targets": _string_list_from_metadata(
+                                    finding.metadata.get("causal_persistence_targets")
+                                ),
+                                "causal_persistence_sink_kinds": _string_list_from_metadata(
+                                    finding.metadata.get("causal_persistence_sink_kinds")
+                                ),
+                                "causal_persistence_backends": _string_list_from_metadata(
+                                    finding.metadata.get("causal_persistence_backends")
+                                ),
+                                "causal_persistence_operation_types": _string_list_from_metadata(
+                                    finding.metadata.get("causal_persistence_operation_types")
+                                ),
+                                "causal_persistence_schema_targets": _string_list_from_metadata(
+                                    finding.metadata.get("causal_persistence_schema_targets")
+                                ),
+                                "causal_schema_validated_targets": _string_list_from_metadata(
+                                    finding.metadata.get("causal_schema_validated_targets")
+                                ),
+                                "causal_schema_observed_only_targets": _string_list_from_metadata(
+                                    finding.metadata.get("causal_schema_observed_only_targets")
+                                ),
+                                "causal_schema_unconfirmed_targets": _string_list_from_metadata(
+                                    finding.metadata.get("causal_schema_unconfirmed_targets")
+                                ),
+                                "causal_schema_validation_statuses": _string_list_from_metadata(
+                                    finding.metadata.get("causal_schema_validation_statuses")
+                                ),
+                                "root_cause_bucket": finding_root_cause_bucket(finding=finding),
+                                "assigned_root_cause_bucket": root_bucket,
+                                "root_cause_role": "primary" if finding.finding_id == primary_finding_id else "supporting",
+                            },
+                        )
+                    )
+
+                packages.append(
+                    DecisionPackage(
+                        title=_package_title(
+                            cluster_key=display_label,
+                            root_cause_bucket=root_bucket,
+                            findings=ordered_bucket_findings,
+                        ),
+                        category=dominant_category,
+                        severity_summary=severity_summary,
+                        scope_summary=_package_scope_summary(
+                            cluster_key=display_label,
+                            root_cause_bucket=root_bucket,
+                            findings=ordered_bucket_findings,
+                            semantic_entities=related_entities,
+                            semantic_relations=related_relations,
+                        ),
+                        rerender_required_after_decision=bool(bucket_delta_statuses),
+                        recommendation_summary=_package_recommendation_summary(
+                            findings=ordered_bucket_findings,
+                            root_cause_bucket=root_bucket,
+                            semantic_context=semantic_context,
+                            semantic_relation_summaries=semantic_relation_summaries,
+                            semantic_contract_paths=semantic_contract_paths,
+                            causal_write_deciders=causal_write_deciders,
+                            causal_write_apis=causal_write_apis,
+                            causal_repository_adapters=causal_repository_adapters,
+                            causal_repository_adapter_symbols=causal_repository_adapter_symbols,
+                            causal_driver_adapters=causal_driver_adapters,
+                            causal_driver_adapter_symbols=causal_driver_adapter_symbols,
+                            causal_transaction_boundaries=causal_transaction_boundaries,
+                            causal_retry_paths=causal_retry_paths,
+                            causal_batch_paths=causal_batch_paths,
+                            causal_persistence_targets=causal_persistence_targets,
+                            causal_persistence_sink_kinds=causal_persistence_sink_kinds,
+                            causal_persistence_backends=causal_persistence_backends,
+                            causal_persistence_operation_types=causal_persistence_operation_types,
+                            causal_persistence_schema_targets=causal_persistence_schema_targets,
+                            causal_schema_validated_targets=causal_schema_validated_targets,
+                            causal_schema_observed_only_targets=causal_schema_observed_only_targets,
+                            causal_schema_unconfirmed_targets=causal_schema_unconfirmed_targets,
+                            causal_schema_validation_statuses=causal_schema_validation_statuses,
+                        ),
+                        related_finding_ids=_dedupe_preserve_order(related_finding_ids),
+                        problem_elements=problems,
                         metadata={
-                            "origin_finding_id": finding.finding_id,
-                            "retrieval_context": retrieval_context,
-                            "delta_summary": delta_summary,
-                            "delta_statuses": delta_statuses,
-                            "semantic_context": _string_list_from_metadata(finding.metadata.get("semantic_context")),
-                            "semantic_relation_summaries": _string_list_from_metadata(
-                                finding.metadata.get("semantic_relation_summaries")
+                            "origin": "analysis",
+                            "cluster_key": primary_scope_key,
+                            "group_key": cluster_key,
+                            "group_label": display_label,
+                            "primary_scope_key": primary_scope_key,
+                            "scope_keys": sorted(package_scope_keys),
+                            "cluster_categories": _dedupe_preserve_order([finding.category for finding in ordered_bucket_findings]),
+                            "retrieval_context": _dedupe_preserve_order(bucket_retrieval_context),
+                            "retrieval_anchor_values": _dedupe_preserve_order(bucket_anchor_values),
+                            "delta_summary": _dedupe_preserve_order(bucket_delta_summary),
+                            "delta_statuses": _dedupe_preserve_order(bucket_delta_statuses),
+                            "delta_reasons": _dedupe_preserve_order(bucket_delta_reasons),
+                            "truth_overlap_keys": [truth.canonical_key for truth in package_related_truths],
+                            "semantic_entity_ids": package_semantic_entity_ids,
+                            "semantic_context": semantic_context,
+                            "semantic_relation_summaries": semantic_relation_summaries,
+                            "semantic_contract_paths": semantic_contract_paths,
+                            "semantic_section_paths": semantic_section_paths,
+                            "causal_write_deciders": causal_write_deciders,
+                            "causal_write_apis": causal_write_apis,
+                            "causal_repository_adapters": causal_repository_adapters,
+                            "causal_repository_adapter_symbols": causal_repository_adapter_symbols,
+                            "causal_driver_adapters": causal_driver_adapters,
+                            "causal_driver_adapter_symbols": causal_driver_adapter_symbols,
+                            "causal_transaction_boundaries": causal_transaction_boundaries,
+                            "causal_retry_paths": causal_retry_paths,
+                            "causal_batch_paths": causal_batch_paths,
+                            "causal_persistence_targets": causal_persistence_targets,
+                            "causal_persistence_sink_kinds": causal_persistence_sink_kinds,
+                            "causal_persistence_backends": causal_persistence_backends,
+                            "causal_persistence_operation_types": causal_persistence_operation_types,
+                            "causal_persistence_schema_targets": causal_persistence_schema_targets,
+                            "causal_schema_validated_targets": causal_schema_validated_targets,
+                            "causal_schema_observed_only_targets": causal_schema_observed_only_targets,
+                            "causal_schema_unconfirmed_targets": causal_schema_unconfirmed_targets,
+                            "causal_schema_validation_statuses": causal_schema_validation_statuses,
+                            "root_cause_bucket": root_bucket,
+                            "root_cause_label": root_cause_label(bucket=root_bucket),
+                            "root_cause_priority": root_cause_priority(bucket=root_bucket),
+                            "primary_finding_id": primary_finding_id,
+                            "supporting_problem_count": max(len(problems) - 1, 0),
+                            "action_lanes": _dedupe_preserve_order(
+                                [
+                                    str(problem.metadata.get("action_lane") or "").strip()
+                                    for problem in problems
+                                    if str(problem.metadata.get("action_lane") or "").strip()
+                                ]
                             ),
-                            "semantic_contract_paths": _string_list_from_metadata(
-                                finding.metadata.get("semantic_contract_paths")
+                            "atomic_facts": [
+                                {
+                                    "fact_key": str(problem.metadata.get("atomic_fact_key") or "").strip(),
+                                    "summary": str(problem.metadata.get("atomic_fact_summary") or "").strip(),
+                                    "action_lane": str(problem.metadata.get("action_lane") or "").strip(),
+                                    "status": str(problem.metadata.get("atomic_fact_status") or "open"),
+                                    "source_types": list(problem.metadata.get("atomic_fact_source_types") or []),
+                                    "source_ids": list(problem.metadata.get("atomic_fact_source_ids") or []),
+                                }
+                                for problem in problems
+                            ],
+                            "package_sort_rank": (
+                                root_cause_priority(bucket=root_bucket) * 10
+                                + severity_rank(severity=severity_summary)
                             ),
-                            "semantic_section_paths": _string_list_from_metadata(
-                                finding.metadata.get("semantic_section_paths")
+                            "causal_group_key": str(
+                                (primary_finding.metadata.get("causal_group_key") if primary_finding is not None else "")
+                                or cluster_key
                             ),
                         },
                     )
                 )
-
-            packages.append(
-                DecisionPackage(
-                    title=_package_title(cluster_key=cluster_key, findings=cluster_findings),
-                    category=dominant_category,
-                    severity_summary=severity_summary,
-                    scope_summary=_package_scope_summary(
-                        cluster_key=cluster_key,
-                        findings=cluster_findings,
-                        semantic_entities=related_entities,
-                        semantic_relations=related_relations,
-                    ),
-                    rerender_required_after_decision=bool(cluster_delta_statuses),
-                    recommendation_summary=_package_recommendation_summary(
-                        findings=cluster_findings,
-                        semantic_context=semantic_context,
-                        semantic_relation_summaries=semantic_relation_summaries,
-                        semantic_contract_paths=semantic_contract_paths,
-                    ),
-                    related_finding_ids=_dedupe_preserve_order(related_finding_ids),
-                    problem_elements=problems,
-                    metadata={
-                        "origin": "analysis",
-                        "cluster_key": cluster_key,
-                        "cluster_categories": _dedupe_preserve_order([finding.category for finding in cluster_findings]),
-                        "retrieval_context": _dedupe_preserve_order(cluster_retrieval_context),
-                        "retrieval_anchor_values": _dedupe_preserve_order(cluster_anchor_values),
-                        "delta_summary": _dedupe_preserve_order(cluster_delta_summary),
-                        "delta_statuses": _dedupe_preserve_order(cluster_delta_statuses),
-                        "delta_reasons": _dedupe_preserve_order(cluster_delta_reasons),
-                        "truth_overlap_keys": [truth.canonical_key for truth in related_truths],
-                        "semantic_entity_ids": semantic_entity_ids,
-                        "semantic_context": semantic_context,
-                        "semantic_relation_summaries": semantic_relation_summaries,
-                        "semantic_contract_paths": semantic_contract_paths,
-                        "semantic_section_paths": semantic_section_paths,
-                    },
-                )
-            )
         return sorted(
             packages,
             key=lambda package: (
-                _severity_rank(package.severity_summary),
-                package.category,
+                int(package.metadata.get("package_sort_rank") or 999),
+                severity_rank(severity=package.severity_summary),
                 package.title,
             ),
         )
@@ -1507,6 +2278,247 @@ class AuditService:
             semantic_entities=[],
             semantic_relations=[],
         )
+
+    @staticmethod
+    def _build_atomic_facts(*, packages: list[DecisionPackage]) -> list[AtomicFactEntry]:
+        facts_by_key: dict[str, AtomicFactEntry] = {}
+        for package in packages:
+            for problem in package.problem_elements:
+                metadata = dict(problem.metadata or {})
+                fact_key = str(metadata.get("atomic_fact_key") or "").strip()
+                summary = str(metadata.get("atomic_fact_summary") or "").strip()
+                action_lane = str(metadata.get("action_lane") or "").strip()
+                if not fact_key or not summary or not action_lane:
+                    continue
+                current = facts_by_key.get(fact_key)
+                if current is None:
+                    facts_by_key[fact_key] = AtomicFactEntry(
+                        fact_key=fact_key,
+                        summary=summary,
+                        action_lane=action_lane,
+                        primary_package_id=package.package_id,
+                        primary_problem_id=problem.problem_id,
+                        related_package_ids=[package.package_id],
+                        related_problem_ids=[problem.problem_id],
+                        related_finding_ids=[problem.finding_id] if problem.finding_id else [],
+                        source_types=list(metadata.get("atomic_fact_source_types") or []),
+                        source_ids=list(metadata.get("atomic_fact_source_ids") or []),
+                        subject_keys=list(metadata.get("atomic_fact_subject_keys") or []),
+                        predicates=list(metadata.get("atomic_fact_predicates") or []),
+                        claim_ids=list(problem.affected_claim_ids),
+                        truth_ids=list(problem.affected_truth_ids),
+                        metadata={
+                            "root_cause_bucket": metadata.get("assigned_root_cause_bucket") or metadata.get("root_cause_bucket"),
+                            "root_cause_role": metadata.get("root_cause_role"),
+                            "scope_summary": problem.scope_summary,
+                        },
+                    )
+                    continue
+                current.related_package_ids = _dedupe_preserve_order([*current.related_package_ids, package.package_id])
+                current.related_problem_ids = _dedupe_preserve_order([*current.related_problem_ids, problem.problem_id])
+                current.related_finding_ids = _dedupe_preserve_order(
+                    [*current.related_finding_ids, *([problem.finding_id] if problem.finding_id else [])]
+                )
+                current.source_types = _dedupe_preserve_order([*current.source_types, *list(metadata.get("atomic_fact_source_types") or [])])
+                current.source_ids = _dedupe_preserve_order([*current.source_ids, *list(metadata.get("atomic_fact_source_ids") or [])])
+                current.subject_keys = _dedupe_preserve_order([*current.subject_keys, *list(metadata.get("atomic_fact_subject_keys") or [])])
+                current.predicates = _dedupe_preserve_order([*current.predicates, *list(metadata.get("atomic_fact_predicates") or [])])
+                current.claim_ids = _dedupe_preserve_order([*current.claim_ids, *problem.affected_claim_ids])
+                current.truth_ids = _dedupe_preserve_order([*current.truth_ids, *problem.affected_truth_ids])
+        return sorted(facts_by_key.values(), key=lambda fact: (fact.fact_key, fact.atomic_fact_id))
+
+    def _apply_atomic_fact_history(
+        self,
+        *,
+        run: AuditRun,
+        atomic_facts: list[AtomicFactEntry],
+        packages: list[DecisionPackage],
+    ) -> tuple[list[AtomicFactEntry], list[DecisionPackage], list[str]]:
+        previous_by_key = self._latest_previous_atomic_facts_by_key(run=run)
+        carried_forward = 0
+        reopened = 0
+        updated_facts: list[AtomicFactEntry] = []
+        next_packages = list(packages)
+        for fact in atomic_facts:
+            metadata = dict(fact.metadata or {})
+            metadata["first_seen_run_id"] = run.run_id
+            metadata["last_seen_run_id"] = run.run_id
+            metadata["seen_run_ids"] = [run.run_id]
+            metadata["occurrence_count"] = 1
+            next_status = fact.status
+            previous_entry = previous_by_key.get(fact.fact_key)
+            if previous_entry is not None:
+                previous_run_id, previous_fact = previous_entry
+                previous_metadata = dict(previous_fact.metadata or {})
+                previous_seen_run_ids = [
+                    str(item).strip()
+                    for item in list(previous_metadata.get("seen_run_ids") or [])
+                    if str(item).strip()
+                ]
+                seen_run_ids = _dedupe_preserve_order([*previous_seen_run_ids, run.run_id])
+                metadata["first_seen_run_id"] = (
+                    str(previous_metadata.get("first_seen_run_id") or previous_run_id).strip()
+                    or previous_run_id
+                )
+                metadata["previous_atomic_fact_id"] = previous_fact.atomic_fact_id
+                metadata["previous_run_id"] = previous_run_id
+                metadata["last_seen_run_id"] = run.run_id
+                metadata["seen_run_ids"] = seen_run_ids
+                metadata["occurrence_count"] = max(
+                    len(seen_run_ids),
+                    int(previous_metadata.get("occurrence_count") or 1) + 1,
+                )
+                if previous_fact.status in {"open", "confirmed"}:
+                    next_status = previous_fact.status
+                    metadata["carry_over_mode"] = "continued"
+                    metadata["carry_over_status"] = previous_fact.status
+                    metadata["last_status_changed_at"] = previous_metadata.get("last_status_changed_at")
+                    metadata["last_status_comment"] = previous_metadata.get("last_status_comment")
+                    metadata["last_status_source"] = previous_metadata.get("last_status_source")
+                    carried_forward += 1
+                else:
+                    next_status = "open"
+                    metadata["carry_over_mode"] = "reopened"
+                    metadata["reopened_from_status"] = previous_fact.status
+                    metadata["reopened_from_atomic_fact_id"] = previous_fact.atomic_fact_id
+                    metadata["reopened_from_run_id"] = previous_run_id
+                    reopened += 1
+            updated_fact = fact.model_copy(update={"status": next_status, "metadata": metadata})
+            updated_facts.append(updated_fact)
+            next_packages = self._sync_atomic_fact_status_into_packages(
+                packages=next_packages,
+                target_fact=updated_fact,
+            )
+        notes: list[str] = []
+        if carried_forward:
+            notes.append(
+                f"{carried_forward} atomare Fakten wurden aus dem letzten passenden Audit-Lauf mit ihrem offenen Bewertungsstand uebernommen."
+            )
+        if reopened:
+            notes.append(
+                f"{reopened} zuvor erledigte oder ersetzte atomare Fakten sind erneut aufgetreten und wurden wieder auf 'open' gesetzt."
+            )
+        return updated_facts, next_packages, notes
+
+    def _latest_previous_atomic_facts_by_key(
+        self,
+        *,
+        run: AuditRun,
+    ) -> dict[str, tuple[str, AtomicFactEntry]]:
+        target_signature = self._target_signature(run.target)
+        previous_by_key: dict[str, tuple[str, AtomicFactEntry]] = {}
+        for candidate in self._repository.list_runs():
+            if candidate.run_id == run.run_id or candidate.status != "completed":
+                continue
+            if self._target_signature(candidate.target) != target_signature:
+                continue
+            for fact in candidate.atomic_facts:
+                if fact.fact_key not in previous_by_key:
+                    previous_by_key[fact.fact_key] = (candidate.run_id, fact)
+        return previous_by_key
+
+    @staticmethod
+    def _target_signature(target: AuditTarget) -> str:
+        return json.dumps(
+            {
+                "github_repo_url": str(target.github_repo_url or "").strip(),
+                "local_repo_path": str(target.local_repo_path or "").strip(),
+                "github_ref": str(target.github_ref or "").strip(),
+                "confluence_space_keys": sorted(
+                    str(item).strip()
+                    for item in list(target.confluence_space_keys or [])
+                    if str(item).strip()
+                ),
+                "confluence_page_ids": sorted(
+                    str(item).strip()
+                    for item in list(target.confluence_page_ids or [])
+                    if str(item).strip()
+                ),
+                "jira_project_keys": sorted(
+                    str(item).strip()
+                    for item in list(target.jira_project_keys or [])
+                    if str(item).strip()
+                ),
+                "include_metamodel": bool(target.include_metamodel),
+                "include_local_docs": bool(target.include_local_docs),
+            },
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def _sync_atomic_facts_from_package_decision(
+        *,
+        atomic_facts: list[AtomicFactEntry],
+        package: DecisionPackage,
+        action: str,
+        comment_text: str | None,
+    ) -> list[AtomicFactEntry]:
+        next_status = {
+            "accept": "confirmed",
+            "reject": "superseded",
+            "specify": "confirmed",
+        }.get(str(action or "").strip())
+        if next_status is None:
+            return list(atomic_facts)
+        package_fact_keys = {
+            str(item.get("fact_key") or "").strip()
+            for item in package.metadata.get("atomic_facts", [])
+            if isinstance(item, dict) and str(item.get("fact_key") or "").strip()
+        }
+        if not package_fact_keys:
+            return list(atomic_facts)
+        updated: list[AtomicFactEntry] = []
+        for fact in atomic_facts:
+            if fact.fact_key not in package_fact_keys:
+                updated.append(fact)
+                continue
+            metadata = dict(fact.metadata or {})
+            metadata["last_status_changed_at"] = utc_now_iso()
+            metadata["last_status_source"] = "package_decision"
+            metadata["last_status_comment"] = str(comment_text or "").strip() or None
+            updated.append(fact.model_copy(update={"status": next_status, "metadata": metadata}))
+        return updated
+
+    @staticmethod
+    def _sync_atomic_fact_status_into_packages(
+        *,
+        packages: list[DecisionPackage],
+        target_fact: AtomicFactEntry,
+    ) -> list[DecisionPackage]:
+        updated_packages: list[DecisionPackage] = []
+        for package in packages:
+            package_changed = False
+            next_problems: list[DecisionProblemElement] = []
+            for problem in package.problem_elements:
+                if str(problem.metadata.get("atomic_fact_key") or "").strip() != target_fact.fact_key:
+                    next_problems.append(problem)
+                    continue
+                metadata = dict(problem.metadata or {})
+                metadata["atomic_fact_status"] = target_fact.status
+                metadata["atomic_fact_status_comment"] = target_fact.metadata.get("last_status_comment")
+                next_problems.append(problem.model_copy(update={"metadata": metadata}))
+                package_changed = True
+            next_metadata = dict(package.metadata or {})
+            atomic_facts_payload: list[dict[str, object]] = []
+            for item in next_metadata.get("atomic_facts", []):
+                if not isinstance(item, dict):
+                    continue
+                entry = dict(item)
+                if str(entry.get("fact_key") or "").strip() == target_fact.fact_key:
+                    entry["status"] = target_fact.status
+                    entry["comment_text"] = target_fact.metadata.get("last_status_comment")
+                    package_changed = True
+                atomic_facts_payload.append(entry)
+            next_metadata["atomic_facts"] = atomic_facts_payload
+            updated_packages.append(
+                package.model_copy(
+                    update={
+                        "problem_elements": next_problems if package_changed else package.problem_elements,
+                        "metadata": next_metadata if package_changed else package.metadata,
+                    }
+                )
+            )
+        return updated_packages
 
     @staticmethod
     def _append_implemented_change(
@@ -1729,15 +2741,20 @@ class AuditService:
         problem_id = package.problem_elements[0].problem_id if package.problem_elements else None
         for index, normalized_truth in enumerate(analysis.normalized_truths):
             scope_key = analysis.related_scope_keys[min(index, len(analysis.related_scope_keys) - 1)]
-            subject_key = scope_key if "." in scope_key else package.scope_summary
+            subject_key = scope_key if "." in scope_key else _canonical_package_scope_key(
+                package=package,
+                fallback_scope_key=scope_key,
+            )
             subject_kind = "object_property" if "." in subject_key else "scope"
             predicate = "user_specification"
             canonical_key = f"{subject_key}|{predicate}"
             superseded_truth_id: str | None = None
+            truth_delta_status = "added"
             next_truths: list[TruthLedgerEntry] = []
             for existing in updated_truths:
                 if existing.canonical_key == canonical_key and existing.truth_status == "active":
                     superseded_truth_id = existing.truth_id
+                    truth_delta_status = "changed"
                     next_truths.append(existing.model_copy(update={"truth_status": "superseded"}))
                 else:
                     next_truths.append(existing)
@@ -1753,7 +2770,12 @@ class AuditService:
                 source_kind="user_specification",
                 created_from_problem_id=problem_id,
                 supersedes_truth_id=superseded_truth_id,
-                metadata={"package_id": package.package_id, "scope_key": scope_key},
+                metadata={
+                    "package_id": package.package_id,
+                    "scope_key": scope_key,
+                    "truth_delta_status": truth_delta_status,
+                    "pending_delta_recalculation": True,
+                },
             )
             updated_truths.append(created)
             created_truths.append(created)
@@ -1764,7 +2786,13 @@ class AuditService:
         current_claim_ids = {claim_id for problem in package.problem_elements for claim_id in problem.affected_claim_ids}
         current_truth_ids = {truth_id for problem in package.problem_elements for truth_id in problem.affected_truth_ids}
         current_anchor_values = set(_string_list_from_metadata(package.metadata.get("retrieval_anchor_values")))
-        current_cluster_key = str(package.metadata.get("cluster_key") or package.scope_summary).strip()
+        current_cluster_key = _canonical_package_scope_key(package=package)
+        current_group_key = str(package.metadata.get("group_key") or package.metadata.get("causal_group_key") or "").strip()
+        current_scope_keys = {
+            str(scope_key).strip()
+            for scope_key in package.metadata.get("scope_keys", [])
+            if str(scope_key).strip()
+        }
         impacted: list[str] = []
         for candidate in run.decision_packages:
             candidate_claim_ids = {
@@ -1774,12 +2802,20 @@ class AuditService:
                 truth_id for problem in candidate.problem_elements for truth_id in problem.affected_truth_ids
             }
             candidate_anchor_values = set(_string_list_from_metadata(candidate.metadata.get("retrieval_anchor_values")))
-            candidate_cluster_key = str(candidate.metadata.get("cluster_key") or candidate.scope_summary).strip()
+            candidate_cluster_key = _canonical_package_scope_key(package=candidate)
+            candidate_group_key = str(candidate.metadata.get("group_key") or candidate.metadata.get("causal_group_key") or "").strip()
+            candidate_scope_keys = {
+                str(scope_key).strip()
+                for scope_key in candidate.metadata.get("scope_keys", [])
+                if str(scope_key).strip()
+            }
             if (
                 candidate.package_id == package.package_id
                 or current_claim_ids.intersection(candidate_claim_ids)
                 or current_truth_ids.intersection(candidate_truth_ids)
                 or (current_anchor_values and current_anchor_values.intersection(candidate_anchor_values))
+                or (current_group_key and current_group_key == candidate_group_key)
+                or (current_scope_keys and candidate_scope_keys and current_scope_keys.intersection(candidate_scope_keys))
                 or candidate_cluster_key == current_cluster_key
             ):
                 impacted.append(candidate.package_id)
@@ -1943,6 +2979,7 @@ class AuditService:
                 f"Grund: {brief.reason}",
                 *[f"Abnahme: {item}" for item in brief.acceptance_criteria[:3]],
                 *[f"Teil: {item}" for item in brief.affected_parts[:3]],
+                *[f"Fakt: {item}" for item in brief.evidence[:2] if item.startswith("Atomarer Fakt:")],
                 "Vollstaendiger AI-Coding-Prompt und Jira-ADF-Payload sind im lokalen Approval-Ledger gespeichert.",
             ]
         )
@@ -2240,10 +3277,79 @@ def _prioritize_pipeline_notes(*, notes: list[str]) -> list[str]:
 
 
 def _package_cluster_key(*, finding: AuditFinding) -> str:
+    causal_group_key = str(finding.metadata.get("causal_group_key") or "").strip()
+    if causal_group_key:
+        return causal_group_key
     raw_key = str(finding.metadata.get("object_key") or finding.canonical_key or finding.title).strip()
     if not raw_key:
         return finding.title
     return package_scope_key(raw_key)
+
+
+def _canonical_package_scope_key(
+    *,
+    package: DecisionPackage,
+    fallback_scope_key: str | None = None,
+) -> str:
+    primary_scope_key = str(package.metadata.get("primary_scope_key") or "").strip()
+    if primary_scope_key:
+        return primary_scope_key
+    scope_keys = [
+        str(scope_key).strip()
+        for scope_key in package.metadata.get("scope_keys", [])
+        if str(scope_key).strip()
+    ]
+    if scope_keys:
+        return scope_keys[0]
+    cluster_key = str(package.metadata.get("cluster_key") or "").strip()
+    if cluster_key and ":" not in cluster_key and " · " not in cluster_key:
+        return cluster_key
+    normalized_fallback = str(fallback_scope_key or "").strip()
+    if normalized_fallback:
+        return normalized_fallback
+    return "General.decision_context"
+
+
+def _package_group_label(*, group_key: str, findings: list[AuditFinding]) -> str:
+    for finding in findings:
+        label = str(finding.metadata.get("causal_group_label") or "").strip()
+        if label:
+            return label
+    if ":" in group_key:
+        return group_key.split(":", 1)[1]
+    return group_key
+
+
+def _package_scope_keys_for_findings(*, findings: list[AuditFinding]) -> set[str]:
+    scope_keys: set[str] = set()
+    for finding in findings:
+        causal_scope_keys = _string_list_from_metadata(finding.metadata.get("causal_scope_keys"))
+        for scope_key in causal_scope_keys:
+            normalized = package_scope_key(scope_key)
+            if normalized:
+                scope_keys.add(normalized)
+        object_key = str(finding.metadata.get("object_key") or finding.canonical_key or "").strip()
+        if object_key and not causal_scope_keys:
+            scope_keys.add(package_scope_key(object_key))
+    return {scope_key for scope_key in scope_keys if str(scope_key or "").strip()}
+
+
+def _primary_scope_key_for_findings(
+    *,
+    findings: list[AuditFinding],
+    fallback_scope_keys: set[str],
+) -> str:
+    for finding in findings:
+        primary_scope_key = str(finding.metadata.get("causal_primary_scope_key") or "").strip()
+        if primary_scope_key:
+            return package_scope_key(primary_scope_key)
+        object_key = str(finding.metadata.get("object_key") or finding.canonical_key or "").strip()
+        if object_key:
+            return package_scope_key(object_key)
+    ordered_fallbacks = sorted(
+        {package_scope_key(scope_key) for scope_key in fallback_scope_keys if str(scope_key or "").strip()}
+    )
+    return ordered_fallbacks[0] if ordered_fallbacks else "General.decision_context"
 
 
 def _claim_belongs_to_cluster(*, claim_key: str, cluster_key: str) -> bool:
@@ -2259,56 +3365,133 @@ def _claim_is_semantically_attached_to_cluster(*, claim: AuditClaimEntry, cluste
     return cluster_key in semantic_cluster_keys
 
 
+def _claim_matches_any_package_scope(*, claim: AuditClaimEntry, package_scope_keys: set[str]) -> bool:
+    if not package_scope_keys:
+        return False
+    if any(_claim_belongs_to_cluster(claim_key=claim.subject_key, cluster_key=scope_key) for scope_key in package_scope_keys):
+        return True
+    semantic_cluster_keys = set(_string_list_from_metadata(claim.metadata.get("semantic_cluster_keys")))
+    return bool(package_scope_keys & semantic_cluster_keys)
+
+
+def _claim_matches_any_truth_scope(*, truth: TruthLedgerEntry, package_scope_keys: set[str]) -> bool:
+    if not package_scope_keys:
+        return False
+    return any(_claim_belongs_to_cluster(claim_key=truth.subject_key, cluster_key=scope_key) for scope_key in package_scope_keys)
+
+
 def _dominant_category(*, findings: list[AuditFinding]) -> str:
     category_counts: dict[str, tuple[int, int]] = {}
     for finding in findings:
         count, current_rank = category_counts.get(finding.category, (0, 99))
-        category_counts[finding.category] = (count + 1, min(current_rank, _severity_rank(finding.severity)))
+        category_counts[finding.category] = (count + 1, min(current_rank, severity_rank(severity=finding.severity)))
     return min(category_counts.items(), key=lambda item: (item[1][1], -item[1][0], item[0]))[0]
 
 
 def _highest_severity(*, findings: list[AuditFinding]) -> str:
-    return min((finding.severity for finding in findings), key=_severity_rank)
+    return min((finding.severity for finding in findings), key=lambda severity: severity_rank(severity=severity))
 
 
 def _severity_rank(severity: str) -> int:
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    return order.get(str(severity), 9)
+    return severity_rank(severity=severity)
 
 
-def _package_title(*, cluster_key: str, findings: list[AuditFinding]) -> str:
+def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[AuditFinding]) -> str:
+    root_label = root_cause_label(bucket=root_cause_bucket)
     if len(findings) == 1:
-        return f"{cluster_key} klaeren"
-    return f"{cluster_key} konsolidieren"
+        return f"{cluster_key} · {root_label} klaeren"
+    return f"{cluster_key} · {root_label} konsolidieren"
 
 
 def _package_scope_summary(
     *,
     cluster_key: str,
+    root_cause_bucket: str,
     findings: list[AuditFinding],
     semantic_entities: list[SemanticEntity],
     semantic_relations: list[SemanticRelation],
 ) -> str:
     categories = _dedupe_preserve_order([finding.category for finding in findings])
+    root_label = root_cause_label(bucket=root_cause_bucket)
     semantic_suffix = ""
     if semantic_entities or semantic_relations:
         semantic_suffix = f" · {len(semantic_entities)} Knoten · {len(semantic_relations)} Relationen"
     if len(findings) == 1:
-        return f"{cluster_key}{semantic_suffix}"
-    return f"{cluster_key} · {len(findings)} Problemelemente · {', '.join(categories)}{semantic_suffix}"
+        return f"{cluster_key} · {root_label}{semantic_suffix}"
+    return f"{cluster_key} · {root_label} · {len(findings)} Problemelemente · {', '.join(categories)}{semantic_suffix}"
 
 
 def _package_recommendation_summary(
     *,
     findings: list[AuditFinding],
+    root_cause_bucket: str,
     semantic_context: list[str],
     semantic_relation_summaries: list[str],
     semantic_contract_paths: list[str],
+    causal_write_deciders: list[str],
+    causal_write_apis: list[str],
+    causal_repository_adapters: list[str],
+    causal_repository_adapter_symbols: list[str],
+    causal_driver_adapters: list[str],
+    causal_driver_adapter_symbols: list[str],
+    causal_transaction_boundaries: list[str],
+    causal_retry_paths: list[str],
+    causal_batch_paths: list[str],
+    causal_persistence_targets: list[str],
+    causal_persistence_sink_kinds: list[str],
+    causal_persistence_backends: list[str],
+    causal_persistence_operation_types: list[str],
+    causal_persistence_schema_targets: list[str],
+    causal_schema_validated_targets: list[str],
+    causal_schema_observed_only_targets: list[str],
+    causal_schema_unconfirmed_targets: list[str],
+    causal_schema_validation_statuses: list[str],
 ) -> str:
-    recommendations = _dedupe_preserve_order([finding.recommendation for finding in findings])
+    ordered_findings = order_package_findings(findings=findings, package_bucket=root_cause_bucket)
+    recommendations = _dedupe_preserve_order([finding.recommendation for finding in ordered_findings])
     semantic_prefix_parts: list[str] = []
+    semantic_prefix_parts.append(f"Root Cause zuerst: {root_cause_label(bucket=root_cause_bucket)}")
     if semantic_contract_paths:
         semantic_prefix_parts.append(f"Vertragskette: {semantic_contract_paths[0]}")
+    if causal_write_deciders:
+        semantic_prefix_parts.append(f"Write-Decider: {causal_write_deciders[0]}")
+    if causal_write_apis:
+        semantic_prefix_parts.append(f"DB-Write-API: {causal_write_apis[0]}")
+    if causal_repository_adapters:
+        semantic_prefix_parts.append(f"Repository-Adapter: {causal_repository_adapters[0]}")
+    if causal_repository_adapter_symbols:
+        semantic_prefix_parts.append(f"Repository-Symbol: {causal_repository_adapter_symbols[0]}")
+    if causal_driver_adapters:
+        semantic_prefix_parts.append(f"Driver-Adapter: {causal_driver_adapters[0]}")
+    if causal_driver_adapter_symbols:
+        semantic_prefix_parts.append(f"Driver-Symbol: {causal_driver_adapter_symbols[0]}")
+    if causal_transaction_boundaries:
+        semantic_prefix_parts.append(f"Transaktion: {causal_transaction_boundaries[0]}")
+    if causal_retry_paths:
+        semantic_prefix_parts.append(f"Retry-Pfad: {causal_retry_paths[0]}")
+    if causal_batch_paths:
+        semantic_prefix_parts.append(f"Batch-Pfad: {causal_batch_paths[0]}")
+    if causal_persistence_targets:
+        sink_prefix = (
+            f"{_persistence_sink_kind_label(causal_persistence_sink_kinds[0])} -> "
+            if causal_persistence_sink_kinds
+            else ""
+        )
+        semantic_prefix_parts.append(f"Sink: {sink_prefix}{causal_persistence_targets[0]}")
+    if causal_persistence_backends:
+        semantic_prefix_parts.append(f"Backend: {causal_persistence_backends[0]}")
+    if causal_persistence_operation_types:
+        semantic_prefix_parts.append(f"Persistenz-Op: {causal_persistence_operation_types[0]}")
+    if causal_persistence_schema_targets:
+        semantic_prefix_parts.append(f"Schema-Ziel: {causal_persistence_schema_targets[0]}")
+    if causal_schema_validation_statuses:
+        semantic_prefix_parts.append(f"Schema-Status: {causal_schema_validation_statuses[0]}")
+    if causal_schema_validated_targets:
+        semantic_prefix_parts.append(f"SSOT-bestaetigt: {causal_schema_validated_targets[0]}")
+    elif causal_schema_observed_only_targets:
+        semantic_prefix_parts.append(f"Nur beobachtet: {causal_schema_observed_only_targets[0]}")
+    elif causal_schema_unconfirmed_targets:
+        semantic_prefix_parts.append(f"Nicht bestaetigt: {causal_schema_unconfirmed_targets[0]}")
     if semantic_context:
         semantic_prefix_parts.append(f"Semantikfokus: {', '.join(semantic_context[:3])}")
     if semantic_relation_summaries:
@@ -2319,7 +3502,12 @@ def _package_recommendation_summary(
         return f"{semantic_prefix} | {base}" if semantic_prefix else base
     if len(recommendations) == 1:
         return f"{semantic_prefix} | {recommendations[0]}" if semantic_prefix else recommendations[0]
-    base = " / ".join(recommendations[:2])
+    base = recommendations[0]
+    supporting_count = max(len(ordered_findings) - 1, 0)
+    if supporting_count:
+        base = f"{base} Danach {supporting_count} Supporting-Finding(s) angleichen."
+    elif len(recommendations) > 1:
+        base = " / ".join(recommendations[:2])
     return f"{semantic_prefix} | {base}" if semantic_prefix else base
 
 
@@ -2335,6 +3523,14 @@ def _semantic_relations_for_entity_ids(
     ]
 
 
+def _persistence_sink_kind_label(value: str) -> str:
+    return {
+        "node_sink": "Node-Sink",
+        "relationship_sink": "Relationship-Sink",
+        "history_sink": "History-Sink",
+    }.get(str(value or "").strip(), str(value or "").strip())
+
+
 def _semantic_relation_summary(
     *,
     relation: SemanticRelation,
@@ -2343,6 +3539,136 @@ def _semantic_relation_summary(
     source_label = entities_by_id.get(relation.source_entity_id).label if relation.source_entity_id in entities_by_id else relation.source_entity_id
     target_label = entities_by_id.get(relation.target_entity_id).label if relation.target_entity_id in entities_by_id else relation.target_entity_id
     return f"{source_label} -> {relation.relation_type} -> {target_label}"
+
+
+def _classify_writeback_exception(*, exc: Exception) -> dict[str, object]:
+    if isinstance(exc, httpx.TimeoutException):
+        return {
+            "failure_class": "timeout",
+            "status_code": None,
+            "message": "Der externe Writeback ist in ein Timeout gelaufen.",
+        }
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = int(exc.response.status_code)
+        failure_class = {
+            401: "unauthorized",
+            403: "forbidden",
+            429: "rate_limited",
+        }.get(status_code, "http_error")
+        message = {
+            401: "Der externe Writeback wurde mit 401 abgewiesen. Token oder Consent-Kontext sind ungueltig.",
+            403: "Der externe Writeback wurde mit 403 abgewiesen. Berechtigungen oder Zielzugriff reichen nicht aus.",
+            429: "Der externe Writeback wurde rate-limitiert.",
+        }.get(status_code, f"Der externe Writeback scheiterte mit HTTP {status_code}.")
+        return {
+            "failure_class": failure_class,
+            "status_code": status_code,
+            "message": message,
+        }
+    normalized_message = str(exc).strip()
+    lowered = normalized_message.casefold()
+    failure_class = "validation_error"
+    if "redirect" in lowered or "callback" in lowered:
+        failure_class = "oauth_redirect_mismatch"
+    elif "scope" in lowered or "consent" in lowered:
+        failure_class = "scope_mismatch"
+    elif "freigabe" in lowered or "approval" in lowered:
+        failure_class = "approval_blocked"
+    elif "seite" in lowered or "page" in lowered or "ticket" in lowered or "target" in lowered:
+        failure_class = "target_resolution_failed"
+    return {
+        "failure_class": failure_class,
+        "status_code": None,
+        "message": normalized_message,
+    }
+
+
+def _claims_for_finding_scope(*, finding: AuditFinding, claims: list[AuditClaimEntry]) -> list[AuditClaimEntry]:
+    canonical_key = str(finding.canonical_key or "").strip()
+    object_key = str(finding.metadata.get("object_key") or "").strip()
+    target_keys = {
+        key
+        for key in (canonical_key, object_key)
+        if key
+    }
+    if not target_keys:
+        return list(claims)
+    matching = [
+        claim
+        for claim in claims
+        if claim.subject_key in target_keys
+        or any(package_scope_key(claim.subject_key) == package_scope_key(target_key) for target_key in target_keys)
+    ]
+    return matching or list(claims)
+
+
+def _atomic_fact_key(*, finding: AuditFinding) -> str:
+    return (
+        str(finding.canonical_key or "").strip()
+        or str(finding.metadata.get("object_key") or "").strip()
+        or str(finding.title or "").strip()
+    )
+
+
+def _atomic_fact_summary(*, finding: AuditFinding, claims: list[AuditClaimEntry]) -> str:
+    source_labels = _dedupe_preserve_order(
+        [
+            _source_label_for_claim_type(claim.source_type)
+            for claim in claims
+        ]
+    )
+    for location in finding.locations:
+        label = _source_label_for_claim_type(location.source_type)
+        if label not in source_labels:
+            source_labels.append(label)
+    source_labels = sorted(
+        source_labels,
+        key=lambda label: _atomic_source_priority(label=label),
+    )
+    fact_key = _atomic_fact_key(finding=finding)
+    comparison = " vs. ".join(source_labels[:4]) if source_labels else "mehrere Quellen"
+    return f"{fact_key}: {comparison} widersprechen sich oder lassen denselben Sachverhalt unvollstaendig."
+
+
+def _preferred_action_lane_for_finding(*, finding: AuditFinding) -> str:
+    has_doc = any(location.source_type in {"confluence_page", "local_doc"} for location in finding.locations)
+    has_code = any(location.source_type == "github_file" for location in finding.locations)
+    has_model_artifact = any(
+        location.source_type == "metamodel"
+        or str(location.path_hint or location.source_id or "").strip().endswith((".puml", ".plantuml", ".json"))
+        for location in finding.locations
+    )
+    if has_doc and has_code:
+        return "confluence_and_jira"
+    if has_model_artifact:
+        return "jira_artifact"
+    if has_doc:
+        return "confluence_doc"
+    return "jira_code"
+
+
+def _source_label_for_claim_type(source_type: str) -> str:
+    return {
+        "confluence_page": "Confluence",
+        "local_doc": "Lokale Doku",
+        "github_file": "Code",
+        "metamodel": "Metamodell",
+        "jira_ticket": "Jira",
+        "user_truth": "Bestaetigte Wahrheit",
+    }.get(str(source_type or "").strip(), str(source_type or "").strip())
+
+
+def _atomic_source_priority(*, label: str) -> tuple[int, str]:
+    priority = {
+        "Bestaetigte Wahrheit": 0,
+        "Confluence": 1,
+        "Lokale Doku": 2,
+        "Code": 3,
+        "Metamodell": 4,
+        "Jira": 5,
+    }
+    normalized = str(label or "").strip()
+    return (priority.get(normalized, 99), normalized)
 
 
 def _dedupe_claims(claims: list[AuditClaimEntry]) -> list[AuditClaimEntry]:

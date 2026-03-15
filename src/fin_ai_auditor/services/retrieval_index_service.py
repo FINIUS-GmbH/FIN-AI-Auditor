@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import AuditFinding, RetrievalSegment, RetrievalSegmentClaimLink
 from fin_ai_auditor.llm import get_embeddings_from_llm_slot, select_embedding_slot
+from fin_ai_auditor.services.finding_prioritization import (
+    finding_root_cause_bucket,
+    is_core_root_cause_bucket,
+    select_findings_for_retrieval,
+)
 from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimRecord
 
 
@@ -91,8 +96,13 @@ def build_recommendation_contexts(
     lexical_search: Callable[[str, int], list[tuple[str, float]]] | None = None,
     limit_per_finding: int = 3,
     max_findings: int = 12,
+    hard_cap_findings: int = 24,
 ) -> dict[str, list[str]]:
-    target_findings = findings[: max(1, int(max_findings))]
+    target_findings = select_findings_for_retrieval(
+        findings=findings,
+        base_max_findings=max_findings,
+        hard_cap_findings=hard_cap_findings,
+    )
     if not target_findings or not segments:
         return {}
 
@@ -114,6 +124,7 @@ def build_recommendation_contexts(
     for finding in target_findings:
         query_text = _query_text_for_finding(finding=finding)
         query_keywords = _keywords(query_text, limit=10)
+        snippet_budget = _snippet_budget_for_finding(finding=finding, default_limit=limit_per_finding)
         lexical_hits = (
             lexical_search(query_text, 14)
             if lexical_search is not None and query_text
@@ -144,7 +155,7 @@ def build_recommendation_contexts(
             snippets.append(
                 f"{segment.source_type}:{segment.title}:{segment.anchor_value} :: {_truncate(segment.content, limit=260)}"
             )
-            if len(snippets) >= int(limit_per_finding):
+            if len(snippets) >= snippet_budget:
                 break
         if snippets:
             contexts[_finding_key(finding)] = snippets
@@ -258,6 +269,15 @@ def _dedupe_segments(segments: list[RetrievalSegment]) -> list[RetrievalSegment]
         seen.add(segment.segment_id)
         deduped.append(segment)
     return deduped
+
+
+def _snippet_budget_for_finding(*, finding: AuditFinding, default_limit: int) -> int:
+    bucket = finding_root_cause_bucket(finding=finding)
+    if bool(finding.metadata.get("truth_enforcement")) or bucket == "truth":
+        return max(int(default_limit), 5)
+    if is_core_root_cause_bucket(bucket=bucket) and finding.severity in {"critical", "high"}:
+        return max(int(default_limit), 4)
+    return max(1, int(default_limit))
 
 
 def _segment_code_document(*, run_id: str, document: CollectedDocument) -> list[RetrievalSegment]:

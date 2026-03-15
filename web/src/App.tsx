@@ -5,11 +5,13 @@ import {
   getAtlassianAuthStatus, getBootstrapData, listAuditRuns,
   recordConfluencePageUpdate, recordJiraTicketCreated, resetAuditDatabase,
   resolveWritebackApprovalRequest, startAtlassianAuthorization,
-  submitDecisionComment, submitPackageDecision, verifyConfluenceAccess,
+  submitDecisionComment, submitPackageDecision, updateAtomicFactStatus,
+  verifyConfluenceAccess,
 } from "./api";
 import RunModal from "./components/RunModal";
 import type {
   AtlassianAuthStatus, AuditLocation, AuditRun, AuditTarget,
+  AtomicFactEntry,
   BootstrapData, DecisionPackage, SourceProfile, WritebackApprovalRequest,
   ConfluencePatchPreview,
 } from "./types";
@@ -26,6 +28,7 @@ function ts(v?: string | null): string {
 const STATUS_DE: Record<string, string> = {
   planned: "Geplant", running: "Läuft", completed: "Abgeschlossen", failed: "Fehlgeschlagen",
   open: "Offen", pending: "Ausstehend", approved: "Genehmigt", rejected: "Abgelehnt",
+  confirmed: "Bestätigt", resolved: "Aufgelöst",
   applied: "Umgesetzt", accepted: "Akzeptiert", specified: "Präzisiert",
   superseded: "Ersetzt", dismissed: "Verworfen", executed: "Ausgeführt", cancelled: "Storniert",
 };
@@ -45,6 +48,17 @@ const CATEGORY_DE: Record<string, string> = {
   obsolete_documentation: "🗃️ Obsolete Doku", open_decision: "🧩 Offene Entscheidung",
 };
 function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? v; }
+
+const ACTION_LANE_DE: Record<AtomicFactEntry["action_lane"], string> = {
+  confluence_doc: "Confluence-Doku",
+  jira_code: "Jira-Code",
+  jira_artifact: "Jira-Artefakt",
+  confluence_and_jira: "Confluence + Jira",
+};
+
+function actionLaneDe(v: AtomicFactEntry["action_lane"]): string {
+  return ACTION_LANE_DE[v] ?? v;
+}
 
 function clusterScopeKey(item: { kind: "pkg"; pkg: DecisionPackage } | { kind: "finding"; f: AuditRun["findings"][number] }): string {
   const rawScope = item.kind === "pkg"
@@ -77,6 +91,10 @@ function SrcBadge({ t }: { t: string }): ReactNode {
   return <span className={`src-badge ${s.cls}`}>{s.icon} {s.label}</span>;
 }
 
+function sourceTypeLabel(sourceType: string): string {
+  return SRC_CFG[sourceType]?.label ?? sourceType;
+}
+
 function locStr(l: AuditLocation): string {
   const p = [l.title];
   if (l.path_hint) p.push(l.path_hint);
@@ -91,6 +109,64 @@ function strs(v: unknown): string[] {
 function patch(r: WritebackApprovalRequest): ConfluencePatchPreview | null {
   const v = r.metadata?.confluence_patch_preview;
   return v && typeof v === "object" ? (v as ConfluencePatchPreview) : null;
+}
+
+function packageContextLines(pkg: DecisionPackage): string[] {
+  const meta = pkg.metadata ?? {};
+  const lines: string[] = [];
+  const rootCauseLabel = typeof meta.root_cause_label === "string" ? meta.root_cause_label : "";
+  if (rootCauseLabel) lines.push(`Primärursache: ${rootCauseLabel}`);
+  const truthOverlap = strs(meta.truth_overlap_keys).slice(0, 3);
+  if (truthOverlap.length > 0) lines.push(`Betroffene Wahrheiten: ${truthOverlap.join(", ")}`);
+  const actionLanes = strs(meta.action_lanes).map((lane) => actionLaneDe(lane as AtomicFactEntry["action_lane"]));
+  if (actionLanes.length > 0) lines.push(`Aktionsspuren: ${actionLanes.join(", ")}`);
+  const writeDeciders = strs(meta.causal_write_deciders).slice(0, 2);
+  if (writeDeciders.length > 0) lines.push(`Write-Decider: ${writeDeciders.join(", ")}`);
+  const repoSymbols = strs(meta.causal_repository_adapter_symbols).slice(0, 2);
+  if (repoSymbols.length > 0) lines.push(`Repository-Symbole: ${repoSymbols.join(", ")}`);
+  const driverSymbols = strs(meta.causal_driver_adapter_symbols).slice(0, 2);
+  if (driverSymbols.length > 0) lines.push(`Driver-Symbole: ${driverSymbols.join(", ")}`);
+  const sinks = strs(meta.causal_persistence_targets).slice(0, 2);
+  const sinkKinds = strs(meta.causal_persistence_sink_kinds);
+  if (sinks.length > 0) {
+    const formatted = sinks.map((sink, index) => `${sinkKinds[index] ? `${sinkKinds[index]} -> ` : ""}${sink}`);
+    lines.push(`Persistenz-Sinks: ${formatted.join(", ")}`);
+  }
+  const schemaTargets = strs(meta.causal_persistence_schema_targets).slice(0, 2);
+  if (schemaTargets.length > 0) lines.push(`Schema-Ziele: ${schemaTargets.join(", ")}`);
+  const validatedTargets = strs(meta.causal_schema_validated_targets).slice(0, 2);
+  if (validatedTargets.length > 0) lines.push(`SSOT-bestätigt: ${validatedTargets.join(", ")}`);
+  const unconfirmedTargets = strs(meta.causal_schema_unconfirmed_targets).slice(0, 2);
+  if (unconfirmedTargets.length > 0) lines.push(`Noch unbestätigt: ${unconfirmedTargets.join(", ")}`);
+  return lines;
+}
+
+function packageNextActions(pkg: DecisionPackage): string[] {
+  const actionLanes = new Set(strs(pkg.metadata?.action_lanes));
+  const actions: string[] = [];
+  if (actionLanes.has("confluence_doc") || actionLanes.has("confluence_and_jira")) {
+    actions.push("Confluence-Doku geradeziehen oder Patch-Preview freigeben");
+  }
+  if (actionLanes.has("jira_code")) {
+    actions.push("Jira-Code-Ticket mit qualifiziertem Write-Pfad erzeugen");
+  }
+  if (actionLanes.has("jira_artifact") || actionLanes.has("confluence_and_jira")) {
+    actions.push("Artefaktkorrektur per Jira gegen PUML/Metamodell/Dump anstoßen");
+  }
+  if (actions.length === 0) {
+    actions.push("Paket fachlich bewerten und bei Bedarf spezifizieren");
+  }
+  return actions;
+}
+
+function approvalPreflight(req: WritebackApprovalRequest): { blockers: string[]; warnings: string[] } {
+  const raw = req.metadata?.writeback_preflight;
+  if (!raw || typeof raw !== "object") return { blockers: [], warnings: [] };
+  const value = raw as Record<string, unknown>;
+  return {
+    blockers: strs(value.blockers),
+    warnings: strs(value.warnings),
+  };
 }
 
 /* Empty defaults used only while bootstrap is loading */
@@ -125,6 +201,8 @@ export default function App(): ReactNode {
   const [commentErr, setCommentErr] = useState("");
   const [pkgBusy, setPkgBusy] = useState("");
   const [pkgErr, setPkgErr] = useState("");
+  const [factBusy, setFactBusy] = useState("");
+  const [factErr, setFactErr] = useState("");
   const [appBusy, setAppBusy] = useState("");
   const [appErr, setAppErr] = useState("");
   const [exBusy, setExBusy] = useState("");
@@ -148,6 +226,10 @@ export default function App(): ReactNode {
   const openPkgs = useMemo(() => (run?.decision_packages ?? []).filter((p) => p.decision_state === "open"), [run]);
   const pendApps = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "pending"), [run]);
   const apprvd = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "approved"), [run]);
+  const activeFacts = useMemo(
+    () => (run?.atomic_facts ?? []).filter((fact) => fact.status === "open" || fact.status === "confirmed"),
+    [run],
+  );
   const pkgFids = useMemo(() => { const s = new Set<string>(); openPkgs.forEach((p) => p.related_finding_ids.forEach((id) => s.add(id))); return s; }, [openPkgs]);
   const soloFindings = useMemo(() => (run?.findings ?? []).filter((f) => (!f.resolution_state || f.resolution_state === "open") && !pkgFids.has(f.finding_id)), [run, pkgFids]);
   const openCount = openPkgs.length + soloFindings.length;
@@ -222,6 +304,19 @@ export default function App(): ReactNode {
     try { upd(await submitPackageDecision(run.run_id, id, a, c)); /* card list will shrink, cardIdx stays → shows next */ }
     catch (e) { setPkgErr(String(e)); }
     finally { setPkgBusy(""); }
+  }
+
+  async function doAtomicFact(
+    atomicFactId: string,
+    status: AtomicFactEntry["status"],
+    commentText?: string,
+  ) {
+    if (!run) return;
+    setFactBusy(atomicFactId);
+    setFactErr("");
+    try { upd(await updateAtomicFactStatus(run.run_id, atomicFactId, status, commentText)); }
+    catch (e) { setFactErr(String(e)); }
+    finally { setFactBusy(""); }
   }
 
   async function doCreateApp(p: Parameters<typeof createWritebackApprovalRequest>[1]) {
@@ -371,7 +466,7 @@ export default function App(): ReactNode {
           <div className="header-left">
             <h1>{view === "work" ? "Arbeitsfläche" : "Verlauf"}</h1>
             {view === "work" && run && (
-              <p className="header-sub">{openCount} offene Bewertungen · {pendCount} ausstehende Freigaben</p>
+              <p className="header-sub">{openCount} offene Bewertungen · {activeFacts.length} aktive Fakten · {pendCount} ausstehende Freigaben</p>
             )}
           </div>
           <div className="header-right">
@@ -463,6 +558,42 @@ export default function App(): ReactNode {
                     <span className="metric-sub">{run?.llm_usage?.by_model ? Object.entries(run.llm_usage.by_model).map(([m, d]) => `${m.split("/").pop()}: ${d.calls}x ${d.cost_eur.toFixed(4)}€`).join(" · ") : "–"}</span>
                   </div>
                 </div>
+                <div className="metric-card mc-purple">
+                  <div className="metric-icon">🧩</div>
+                  <div className="metric-body">
+                    <span className="metric-label">Faktenregister</span>
+                    <span className="metric-value">{boot?.atomic_fact_registry?.unique_fact_count ?? 0}</span>
+                    <span className="metric-sub">
+                      {boot?.atomic_fact_registry
+                        ? `${boot.atomic_fact_registry.recurring_fact_count} wiederkehrend · ${boot.atomic_fact_registry.reopened_fact_count} reopened`
+                        : "–"}
+                    </span>
+                  </div>
+                </div>
+                <div className="metric-card mc-green">
+                  <div className="metric-icon">🎯</div>
+                  <div className="metric-body">
+                    <span className="metric-label">Gold-Set</span>
+                    <span className="metric-value">{boot?.quality_gate?.gold_set ? `${Math.round((boot.quality_gate.gold_set.precision ?? 0) * 100)}%` : "–"}</span>
+                    <span className="metric-sub">
+                      {boot?.quality_gate?.gold_set
+                        ? `${Math.round((boot.quality_gate.gold_set.recall ?? 0) * 100)}% Recall · ${boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}`
+                        : "–"}
+                    </span>
+                  </div>
+                </div>
+                <div className="metric-card mc-green">
+                  <div className="metric-icon">Δ</div>
+                  <div className="metric-body">
+                    <span className="metric-label">Delta-Gate</span>
+                    <span className="metric-value">{boot?.quality_gate?.delta_recompute ? `${Math.round((boot.quality_gate.delta_recompute.precision ?? 0) * 100)}%` : "–"}</span>
+                    <span className="metric-sub">
+                      {boot?.quality_gate?.delta_recompute
+                        ? `${Math.round((boot.quality_gate.delta_recompute.recall ?? 0) * 100)}% Recall · ${boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}`
+                        : "–"}
+                    </span>
+                  </div>
+                </div>
               </div>
 
               {/* Pipeline — horizontal under KPIs */}
@@ -524,6 +655,7 @@ export default function App(): ReactNode {
 
               {pkgErr && <div className="error-box">{pkgErr}</div>}
               {commentErr && <div className="error-box">{commentErr}</div>}
+              {factErr && <div className="error-box">{factErr}</div>}
               {appErr && <div className="error-box">{appErr}</div>}
               {exErr && <div className="error-box">{exErr}</div>}
 
@@ -587,6 +719,8 @@ export default function App(): ReactNode {
                                 title={item.pkg.title} scope={item.pkg.scope_summary}
                                 recommendation={item.pkg.recommendation_summary}
                                 deltaHints={strs(item.pkg.metadata?.delta_summary)}
+                                analysisContext={packageContextLines(item.pkg)}
+                                nextActions={packageNextActions(item.pkg)}
                                 elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
                                 feedback={draft(item.pkg.package_id)} onFeedback={v => setDraft(item.pkg.package_id, v)}
                                 busy={pkgBusy === item.pkg.package_id || commentBusy}
@@ -602,6 +736,11 @@ export default function App(): ReactNode {
                                 severity={item.f.severity} category={item.f.category}
                                 title={item.f.title} scope={item.f.summary}
                                 recommendation={item.f.recommendation}
+                                analysisContext={[
+                                  ...strs(item.f.metadata?.semantic_context).slice(0, 2),
+                                  ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
+                                  ...strs(item.f.metadata?.causal_persistence_schema_targets).slice(0, 1).map((v) => `Schema-Ziel: ${v}`),
+                                ]}
                                 proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
                                 proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
                                 metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
@@ -636,6 +775,15 @@ export default function App(): ReactNode {
                       </div>
                       <h3 className="wc-title">{req.title}</h3>
                       <p className="wc-scope">{req.summary}</p>
+                      {(approvalPreflight(req).blockers.length > 0 || approvalPreflight(req).warnings.length > 0) && (
+                        <div className="wc-context">
+                          <div className="wc-label">Preflight</div>
+                          <ul>
+                            {approvalPreflight(req).blockers.map((item) => <li key={`b:${item}`}>Blocker: {item}</li>)}
+                            {approvalPreflight(req).warnings.map((item) => <li key={`w:${item}`}>Warnung: {item}</li>)}
+                          </ul>
+                        </div>
+                      )}
                       <div className="wc-actions">
                         <textarea value={draft(req.approval_request_id)} onChange={(e) => setDraft(req.approval_request_id, e.target.value)} placeholder="Optionaler Kommentar…" />
                         <div className="wc-btns">
@@ -666,6 +814,15 @@ export default function App(): ReactNode {
                           <span className="badge badge-approved">genehmigt</span>
                         </div>
                         <h3 className="wc-title">{req.title}</h3>
+                        {(approvalPreflight(req).blockers.length > 0 || approvalPreflight(req).warnings.length > 0) && (
+                          <div className="wc-context">
+                            <div className="wc-label">Preflight</div>
+                            <ul>
+                              {approvalPreflight(req).blockers.map((item) => <li key={`b:${item}`}>Blocker: {item}</li>)}
+                              {approvalPreflight(req).warnings.map((item) => <li key={`w:${item}`}>Warnung: {item}</li>)}
+                            </ul>
+                          </div>
+                        )}
                         <div className="wc-actions">
                           <div className="wc-btns">
                             <button className="btn btn-primary" disabled={exBusy === req.approval_request_id} onClick={() => void (isC ? doExConf : doExJira)(req.approval_request_id)}>Extern ausführen</button>
@@ -680,10 +837,164 @@ export default function App(): ReactNode {
                   })}
                 </section>
               )}
+
+              {run && run.atomic_facts.length > 0 && (
+                <section>
+                  <div className="section-head">
+                    <h2>Atomare Fakten</h2>
+                    <span className="section-count">{activeFacts.length} aktiv · {run.atomic_facts.length} gesamt</span>
+                  </div>
+                  {[...run.atomic_facts]
+                    .sort((left, right) => {
+                      const order: Record<AtomicFactEntry["status"], number> = {
+                        open: 0,
+                        confirmed: 1,
+                        resolved: 2,
+                        superseded: 3,
+                      };
+                      return (order[left.status] ?? 9) - (order[right.status] ?? 9);
+                    })
+                    .map((fact) => {
+                      const lastComment = typeof fact.metadata?.last_status_comment === "string"
+                        ? fact.metadata.last_status_comment
+                        : "";
+                      return (
+                        <article className="wc" key={fact.atomic_fact_id}>
+                          <div className="wc-badges">
+                            <span className={`badge badge-${fact.status === "confirmed" ? "approved" : fact.status === "resolved" ? "completed" : fact.status === "superseded" ? "rejected" : "pending"}`}>
+                              {de(fact.status)}
+                            </span>
+                            <span className="badge badge-cat">{actionLaneDe(fact.action_lane)}</span>
+                          </div>
+                          <h3 className="wc-title">{fact.summary}</h3>
+                          <p className="wc-scope">{fact.fact_key}</p>
+                          <div className="wc-context">
+                            <div className="wc-label">Faktenbild</div>
+                            <ul>
+                              {fact.subject_keys.length > 0 && <li>Subjekte: {fact.subject_keys.join(", ")}</li>}
+                              {fact.predicates.length > 0 && <li>Prädikate: {fact.predicates.join(", ")}</li>}
+                              {fact.source_types.length > 0 && <li>Quellen: {fact.source_types.map((sourceType) => sourceTypeLabel(sourceType)).join(", ")}</li>}
+                              <li>Pakete/Probleme: {fact.related_package_ids.length}/{fact.related_problem_ids.length}</li>
+                              {typeof fact.metadata?.occurrence_count === "number" && <li>Auftreten: {String(fact.metadata.occurrence_count)} Lauf/Läufe</li>}
+                              {typeof fact.metadata?.previous_run_id === "string" && fact.metadata.previous_run_id && <li>Vorläufer-Run: {fact.metadata.previous_run_id}</li>}
+                              {typeof fact.metadata?.reopened_from_status === "string" && fact.metadata.reopened_from_status && <li>Wiederaufgetreten nach: {String(fact.metadata.reopened_from_status)}</li>}
+                            </ul>
+                          </div>
+                          {lastComment && (
+                            <div className="wc-rec">
+                              <div className="wc-label">Letzte Statusbegründung</div>
+                              <div className="rec-text">{lastComment}</div>
+                            </div>
+                          )}
+                          <div className="wc-actions">
+                            <textarea
+                              value={draft(`fact:${fact.atomic_fact_id}`)}
+                              onChange={(e) => setDraft(`fact:${fact.atomic_fact_id}`, e.target.value)}
+                              placeholder="Begründung für Faktenstatus oder Folgeaktion…"
+                            />
+                            <div className="wc-btns">
+                              <button
+                                className="btn btn-accept"
+                                disabled={factBusy === fact.atomic_fact_id}
+                                onClick={() => void doAtomicFact(fact.atomic_fact_id, "confirmed", draft(`fact:${fact.atomic_fact_id}`) || undefined)}
+                              >
+                                ✓ Bestätigen
+                              </button>
+                              <button
+                                className="btn btn-specify"
+                                disabled={factBusy === fact.atomic_fact_id}
+                                onClick={() => void doAtomicFact(fact.atomic_fact_id, "resolved", draft(`fact:${fact.atomic_fact_id}`) || undefined)}
+                              >
+                                Erledigt
+                              </button>
+                              <button
+                                className="btn btn-reject"
+                                disabled={factBusy === fact.atomic_fact_id}
+                                onClick={() => void doAtomicFact(fact.atomic_fact_id, "superseded", draft(`fact:${fact.atomic_fact_id}`) || undefined)}
+                              >
+                                Ersetzt
+                              </button>
+                              {fact.status !== "open" && (
+                                <button
+                                  className="btn btn-outline"
+                                  disabled={factBusy === fact.atomic_fact_id}
+                                  onClick={() => void doAtomicFact(fact.atomic_fact_id, "open", draft(`fact:${fact.atomic_fact_id}`) || undefined)}
+                                >
+                                  Zurück auf offen
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                </section>
+              )}
+
+              {boot?.quality_gate?.gold_set && boot?.quality_gate?.delta_recompute && (
+                <section>
+                  <div className="section-head">
+                    <h2>Qualitäts-Gate</h2>
+                    <span className="section-count">
+                      {boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute.passed ? "Gates grün" : "Gate offen"}
+                    </span>
+                  </div>
+                  <article className="wc">
+                    <div className="wc-badges">
+                      <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
+                        {boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}
+                      </span>
+                      <span className="badge badge-cat">
+                        {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer
+                      </span>
+                    </div>
+                    <h3 className="wc-title">Referenz-Gold-Set</h3>
+                    <div className="wc-context">
+                      <div className="wc-label">Qualitätsstand</div>
+                      <ul>
+                        <li>Recall: {Math.round(boot.quality_gate.gold_set.recall * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%</li>
+                        <li>Precision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%</li>
+                        <li>False Positives: {boot.quality_gate.gold_set.false_positives} von maximal {boot.quality_gate.gold_set.max_false_positives}</li>
+                      </ul>
+                    </div>
+                    {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
+                      <div className="wc-rec">
+                        <div className="wc-label">Offene Gate-Gründe</div>
+                        <div className="rec-text">{boot.quality_gate.gold_set.failure_reasons.join(" · ")}</div>
+                      </div>
+                    )}
+                  </article>
+                  <article className="wc">
+                    <div className="wc-badges">
+                      <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
+                        {boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}
+                      </span>
+                      <span className="badge badge-cat">
+                        {boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Treffer
+                      </span>
+                    </div>
+                    <h3 className="wc-title">Delta-Recompute</h3>
+                    <div className="wc-context">
+                      <div className="wc-label">Neubewertungs-Qualität</div>
+                      <ul>
+                        <li>Recall: {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% von geforderten {Math.round(boot.quality_gate.delta_recompute.required_recall * 100)}%</li>
+                        <li>Precision: {Math.round(boot.quality_gate.delta_recompute.precision * 100)}% von geforderten {Math.round(boot.quality_gate.delta_recompute.required_precision * 100)}%</li>
+                        <li>False Positives: {boot.quality_gate.delta_recompute.false_positives} von maximal {boot.quality_gate.delta_recompute.max_false_positives}</li>
+                      </ul>
+                    </div>
+                    {boot.quality_gate.delta_recompute.failure_reasons.length > 0 && (
+                      <div className="wc-rec">
+                        <div className="wc-label">Offene Gate-Gründe</div>
+                        <div className="rec-text">{boot.quality_gate.delta_recompute.failure_reasons.join(" · ")}</div>
+                      </div>
+                    )}
+                  </article>
+                </section>
+              )}
             </>
           ) : (
             /* ═══════════════ HISTORY PANEL ═══════════════ */
-            <HistoryView run={run} />
+            <HistoryView run={run} boot={boot} />
           )}
         </div>
       </main>
@@ -710,6 +1021,8 @@ function WorkCard(props: {
   recommendation: string; deltaHints?: string[];
   proposedPageMd?: string; proposedPageTitle?: string;
   elements: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
+  analysisContext?: string[];
+  nextActions?: string[];
   feedback: string; onFeedback: (v: string) => void; busy: boolean;
   onAccept: () => void; onReject: () => void; onSpecify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
@@ -774,6 +1087,20 @@ function WorkCard(props: {
         </div>
       )}
 
+      {props.analysisContext && props.analysisContext.length > 0 && (
+        <div className="wc-context">
+          <div className="wc-label">Entscheidungskontext</div>
+          <ul>{props.analysisContext.map((h, i) => <li key={i}>{h}</li>)}</ul>
+        </div>
+      )}
+
+      {props.nextActions && props.nextActions.length > 0 && (
+        <div className="wc-context">
+          <div className="wc-label">Naechste Folgeschritte</div>
+          <ul>{props.nextActions.map((h, i) => <li key={i}>{h}</li>)}</ul>
+        </div>
+      )}
+
       {/* Proposed Confluence Page (MD preview) */}
       {props.proposedPageMd && (
         <div className="wc-md-proposal">
@@ -815,12 +1142,14 @@ function WorkCard(props: {
    HISTORY VIEW (inline)
    ============================================================ */
 
-function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
+function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData | null }): ReactNode {
   if (!run) return <div className="empty"><div className="empty-icon">📋</div><strong>Kein Run ausgewählt</strong></div>;
 
   const decided = run.decision_packages.filter((p) => p.decision_state !== "open");
   const resolved = run.findings.filter((f) => f.resolution_state && f.resolution_state !== "open");
   const truths = run.truths.filter((t) => t.truth_status === "active");
+  const atomicFacts = [...run.atomic_facts].sort((left, right) => left.fact_key.localeCompare(right.fact_key));
+  const globalAtomicFacts = boot?.atomic_fact_registry?.latest_facts ?? [];
   const changes = [...run.implemented_changes].reverse();
   const log = [...run.analysis_log].reverse().slice(0, 30);
   const claimGroups: [string, number][] = [];
@@ -897,6 +1226,97 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
               <span className="truth-detail">{t.subject_key} · {t.predicate} = {t.normalized_value}</span>
             </div>
           ))}
+        </section>
+      )}
+
+      {atomicFacts.length > 0 && (
+        <section className="hsection">
+          <h2 className="hsection-title">Atomare Fakten <span className="hsection-count">{atomicFacts.length}</span></h2>
+          {atomicFacts.map((fact) => (
+            <div className="hitem" key={fact.atomic_fact_id}>
+              <div className="hitem-head">
+                <span className={`badge badge-${fact.status === "confirmed" ? "approved" : fact.status === "resolved" ? "completed" : fact.status === "superseded" ? "rejected" : "pending"}`}>{de(fact.status)}</span>
+                <span className="badge badge-cat">{actionLaneDe(fact.action_lane)}</span>
+              </div>
+              <strong>{fact.summary}</strong>
+              <p>
+                {fact.fact_key}
+                {typeof fact.metadata?.occurrence_count === "number" ? ` · ${String(fact.metadata.occurrence_count)} Lauf/Läufe` : ""}
+                {typeof fact.metadata?.previous_run_id === "string" && fact.metadata.previous_run_id ? ` · Vorläufer ${fact.metadata.previous_run_id}` : ""}
+              </p>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {globalAtomicFacts.length > 0 && (
+        <section className="hsection">
+          <h2 className="hsection-title">
+            Globales Faktenregister
+            <span className="hsection-count">{boot?.atomic_fact_registry?.unique_fact_count ?? globalAtomicFacts.length}</span>
+          </h2>
+          {globalAtomicFacts.map((fact) => (
+            <div className="hitem" key={`${fact.fact_key}:${fact.run_id}`}>
+              <div className="hitem-head">
+                <span className={`badge badge-${fact.status === "confirmed" ? "approved" : fact.status === "resolved" ? "completed" : fact.status === "superseded" ? "rejected" : "pending"}`}>{de(fact.status)}</span>
+                <span className="badge badge-cat">{actionLaneDe(fact.action_lane)}</span>
+              </div>
+              <strong>{fact.summary}</strong>
+              <p>
+                {fact.fact_key} · Run {fact.run_id} · {fact.occurrence_count} Lauf/Läufe
+                {fact.carry_over_mode ? ` · ${fact.carry_over_mode}` : ""}
+                {fact.previous_run_id ? ` · Vorläufer ${fact.previous_run_id}` : ""}
+              </p>
+              <p className="text-secondary">
+                {(fact.scope_summary ? `${fact.scope_summary} · ` : "")}
+                {fact.root_cause_bucket ? `Root Cause ${fact.root_cause_bucket} · ` : ""}
+                Claims {fact.claim_count} · Truths {fact.truth_count}
+              </p>
+              {(fact.subject_keys.length > 0 || fact.source_types.length > 0) && (
+                <p className="text-secondary">
+                  {fact.subject_keys.slice(0, 2).join(", ") || "–"} · {fact.source_types.map(sourceTypeLabel).join(", ") || "–"}
+                </p>
+              )}
+              {fact.last_status_comment && <p className="text-secondary">{fact.last_status_comment}</p>}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {boot?.quality_gate?.gold_set && boot?.quality_gate?.delta_recompute && (
+        <section className="hsection">
+          <h2 className="hsection-title">
+            Qualitäts-Gate
+            <span className="hsection-count">
+              {boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute.passed ? "grün" : "offen"}
+            </span>
+          </h2>
+          <div className="hitem">
+            <div className="hitem-head">
+              <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
+                {boot.quality_gate.gold_set.passed ? "Gold-Set grün" : "Gold-Set offen"}
+              </span>
+            </div>
+            <strong>Referenz-Benchmark</strong>
+            <p>
+              {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Erwartungen erfüllt ·
+              {" "}Recall {Math.round(boot.quality_gate.gold_set.recall * 100)}% ·
+              {" "}Precision {Math.round(boot.quality_gate.gold_set.precision * 100)}%
+            </p>
+          </div>
+          <div className="hitem">
+            <div className="hitem-head">
+              <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
+                {boot.quality_gate.delta_recompute.passed ? "Delta grün" : "Delta offen"}
+              </span>
+            </div>
+            <strong>Delta-Recompute</strong>
+            <p>
+              {boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Erwartungen erfüllt ·
+              {" "}Recall {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% ·
+              {" "}Precision {Math.round(boot.quality_gate.delta_recompute.precision * 100)}%
+            </p>
+          </div>
         </section>
       )}
 

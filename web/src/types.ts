@@ -55,6 +55,53 @@ export type OperationalReadinessItem = {
   notes: string[];
 };
 
+export type AtomicFactRegistrySummary = {
+  total_entries: number;
+  unique_fact_count: number;
+  recurring_fact_count: number;
+  reopened_fact_count: number;
+  latest_status_counts: Record<string, number>;
+  latest_facts: Array<{
+    fact_key: string;
+    summary: string;
+    status: "open" | "confirmed" | "resolved" | "superseded";
+    action_lane: "confluence_doc" | "jira_code" | "jira_artifact" | "confluence_and_jira";
+    run_id: string;
+    updated_at: string;
+    occurrence_count: number;
+    carry_over_mode?: "continued" | "reopened" | null;
+    previous_run_id?: string | null;
+    source_types: string[];
+    source_ids: string[];
+    subject_keys: string[];
+    predicates: string[];
+    related_package_ids: string[];
+    related_problem_ids: string[];
+    related_finding_ids: string[];
+    claim_count: number;
+    truth_count: number;
+    root_cause_bucket?: string | null;
+    scope_summary?: string | null;
+    last_status_comment?: string | null;
+    seen_run_ids: string[];
+  }>;
+};
+
+export type GoldSetQualityGate = {
+  passed: boolean;
+  required_recall: number;
+  required_precision: number;
+  max_false_positives: number;
+  recall: number;
+  precision: number;
+  false_positives: number;
+  matched_expectations: number;
+  total_expectations: number;
+  missing_expectation_labels: string[];
+  false_positive_labels: string[];
+  failure_reasons: string[];
+};
+
 export type AtlassianAuthStatus = {
   enabled: boolean;
   client_configured: boolean;
@@ -103,6 +150,11 @@ export type BootstrapData = {
     atlassian_oauth: OperationalReadinessItem;
     confluence_live_read: OperationalReadinessItem;
     jira_writeback: OperationalReadinessItem;
+  };
+  atomic_fact_registry: AtomicFactRegistrySummary;
+  quality_gate: {
+    gold_set: GoldSetQualityGate;
+    delta_recompute: GoldSetQualityGate;
   };
   atlassian_auth: AtlassianAuthStatus;
 };
@@ -282,6 +334,11 @@ export type AuditClaimEntry = {
   confidence: number;
   fingerprint: string;
   status: "active" | "superseded" | "rejected";
+  operator?: string | null;
+  constraint?: string | null;
+  focus_value?: string | null;
+  assertion_status?: "asserted" | "excluded" | "deprecated" | "not_ssot" | "secondary_only";
+  source_authority?: "explicit_truth" | "confirmed_decision" | "ssot" | "governed" | "working_doc" | "historical" | "runtime_observation" | "implementation" | "heuristic";
   evidence_location_ids: string[];
   metadata?: Record<string, unknown>;
 };
@@ -300,6 +357,41 @@ export type TruthLedgerEntry = {
   created_from_problem_id?: string | null;
   supersedes_truth_id?: string | null;
   valid_from_snapshot_id?: string | null;
+  source_authority?: "explicit_truth" | "confirmed_decision" | "ssot" | "governed" | "working_doc" | "historical" | "runtime_observation" | "implementation" | "heuristic";
+  metadata?: Record<string, unknown>;
+};
+
+export type SchemaTruthEntry = {
+  schema_truth_id: string;
+  schema_key: string;
+  schema_kind: "node" | "relationship" | "property" | "unknown";
+  target_label: string;
+  status: "confirmed_ssot" | "provisional_target" | "observed_only" | "code_only_inference" | "rejected_target";
+  source_kind: "truth_ledger" | "metamodel" | "documentation" | "runtime_observation" | "implementation_inference";
+  source_authority: "explicit_truth" | "confirmed_decision" | "ssot" | "governed" | "working_doc" | "historical" | "runtime_observation" | "implementation" | "heuristic";
+  source_ids: string[];
+  evidence_claim_ids: string[];
+  related_truth_ids: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type AtomicFactEntry = {
+  atomic_fact_id: string;
+  fact_key: string;
+  summary: string;
+  status: "open" | "confirmed" | "resolved" | "superseded";
+  action_lane: "confluence_doc" | "jira_code" | "jira_artifact" | "confluence_and_jira";
+  primary_package_id?: string | null;
+  primary_problem_id?: string | null;
+  related_package_ids: string[];
+  related_problem_ids: string[];
+  related_finding_ids: string[];
+  source_types: string[];
+  source_ids: string[];
+  subject_keys: string[];
+  predicates: string[];
+  claim_ids: string[];
+  truth_ids: string[];
   metadata?: Record<string, unknown>;
 };
 
@@ -418,6 +510,8 @@ export type AuditRun = {
   analysis_log: AuditAnalysisLogEntry[];
   claims: AuditClaimEntry[];
   truths: TruthLedgerEntry[];
+  schema_truths: SchemaTruthEntry[];
+  atomic_facts: AtomicFactEntry[];
   decision_packages: DecisionPackage[];
   decision_records: DecisionRecord[];
   approval_requests: WritebackApprovalRequest[];

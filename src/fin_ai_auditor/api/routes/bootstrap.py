@@ -8,6 +8,10 @@ from fin_ai_auditor.domain.models import utc_now_iso
 from fin_ai_auditor.llm import is_embedding_slot_configured
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
+from fin_ai_auditor.services.gold_set_benchmark import (
+    evaluate_reference_delta_gold_set,
+    evaluate_reference_gold_set,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -41,6 +45,8 @@ def bootstrap(
     jira_write_scope_ready = bool(
         atlassian_status.token_valid and jira_write_scopes.issubset(granted_scopes)
     )
+    gold_set_gate = evaluate_reference_gold_set()
+    delta_gate = evaluate_reference_delta_gold_set()
     return {
         "app_name": settings.app_name,
         "defaults": {
@@ -142,6 +148,37 @@ def bootstrap(
             },
         },
         "observability": repository.get_runtime_observability_summary(),
+        "atomic_fact_registry": repository.get_atomic_fact_registry_summary(),
+        "quality_gate": {
+            "gold_set": {
+                "passed": gold_set_gate.passed,
+                "required_recall": gold_set_gate.required_recall,
+                "required_precision": gold_set_gate.required_precision,
+                "max_false_positives": gold_set_gate.max_false_positives,
+                "recall": gold_set_gate.evaluation.recall,
+                "precision": gold_set_gate.evaluation.precision,
+                "false_positives": gold_set_gate.evaluation.false_positives,
+                "matched_expectations": gold_set_gate.evaluation.matched_expectations,
+                "total_expectations": gold_set_gate.evaluation.total_expectations,
+                "missing_expectation_labels": gold_set_gate.evaluation.missing_expectation_labels,
+                "false_positive_labels": gold_set_gate.evaluation.false_positive_labels,
+                "failure_reasons": gold_set_gate.failure_reasons,
+            },
+            "delta_recompute": {
+                "passed": delta_gate.passed,
+                "required_recall": delta_gate.required_recall,
+                "required_precision": delta_gate.required_precision,
+                "max_false_positives": delta_gate.max_false_positives,
+                "recall": delta_gate.evaluation.recall,
+                "precision": delta_gate.evaluation.precision,
+                "false_positives": delta_gate.evaluation.false_positives,
+                "matched_expectations": delta_gate.evaluation.matched_expectations,
+                "total_expectations": delta_gate.evaluation.total_expectations,
+                "missing_expectation_labels": delta_gate.evaluation.missing_expectation_labels,
+                "false_positive_labels": delta_gate.evaluation.false_positive_labels,
+                "failure_reasons": delta_gate.failure_reasons,
+            },
+        },
         "worker_recovery": repository.get_stale_run_recovery_summary(now_iso=utc_now_iso()),
         "confluence_analysis_cache": repository.get_confluence_analysis_cache_summary(),
         "atlassian_auth": atlassian_status.model_dump(mode="json"),

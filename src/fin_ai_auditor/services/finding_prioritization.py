@@ -19,7 +19,7 @@ ROOT_CAUSE_LABELS: dict[str, str] = {
     "write_contract": "Write-Contract",
     "policy": "Policy",
     "lifecycle": "Lifecycle",
-    "process": "Prozessbruch",
+    "process": "BSM-Prozess",
     "implementation": "Implementierung",
     "documentation": "Dokumentation",
     "clarification": "Klaerung",
@@ -62,6 +62,13 @@ def is_core_root_cause_bucket(*, bucket: str) -> bool:
 
 
 def finding_root_cause_bucket(*, finding: AuditFinding) -> str:
+    causal_bucket = str(finding.metadata.get("causal_root_cause_bucket") or "").strip()
+    if causal_bucket:
+        return causal_bucket
+    return _heuristic_root_cause_bucket(finding=finding)
+
+
+def _heuristic_root_cause_bucket(*, finding: AuditFinding) -> str:
     metadata = finding.metadata or {}
     object_key = str(metadata.get("object_key") or finding.canonical_key or "").strip()
     normalized_text = " ".join(
@@ -103,7 +110,7 @@ def finding_root_cause_bucket(*, finding: AuditFinding) -> str:
         object_key == "BSM.process"
         or object_key.startswith("BSM.phase.")
         or object_key.startswith("BSM.process.")
-        or any(token in normalized_text for token in ("bsm.process", "bsm process", "prozess", "phase"))
+        or any(token in normalized_text for token in ("bsm.process", "bsm process", "bsm phase", "phase count", "phase source", "phasenmodell"))
     ):
         return "process"
     if finding.category in {"implementation_drift"}:
@@ -141,6 +148,80 @@ def prioritize_findings(*, findings: list[AuditFinding]) -> list[AuditFinding]:
     return sorted(findings, key=_global_finding_sort_key)
 
 
+def retrieval_priority_score(*, finding: AuditFinding) -> tuple[int, int, int, int, float, str, str]:
+    bucket = finding_root_cause_bucket(finding=finding)
+    causal_confidence = float(finding.metadata.get("causal_root_cause_confidence") or 0.0)
+    return (
+        0 if bool(finding.metadata.get("truth_enforcement")) else 1,
+        root_cause_priority(bucket=bucket),
+        severity_rank(severity=finding.severity),
+        0 if bool(finding.metadata.get("delta_scope_affected")) else 1,
+        -causal_confidence,
+        str(finding.metadata.get("object_key") or finding.canonical_key or finding.title or ""),
+        finding.title,
+    )
+
+
+def select_findings_for_retrieval(
+    *,
+    findings: list[AuditFinding],
+    base_max_findings: int = 12,
+    hard_cap_findings: int = 24,
+) -> list[AuditFinding]:
+    if not findings:
+        return []
+    prioritized = prioritize_findings(findings=findings)
+    base_limit = max(1, int(base_max_findings))
+    hard_cap = max(base_limit, int(hard_cap_findings))
+    selected = prioritized[:base_limit]
+    selected_ids = {finding.finding_id for finding in selected}
+    selected_core_buckets = {
+        finding_root_cause_bucket(finding=finding)
+        for finding in selected
+        if is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+    }
+    selected_core_groups = {
+        _retrieval_group_key(finding=finding)
+        for finding in selected
+        if is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+    }
+
+    expansion_candidates = sorted(
+        (
+            finding
+            for finding in prioritized
+            if finding.finding_id not in selected_ids
+            and (
+                bool(finding.metadata.get("truth_enforcement"))
+                or (
+                    is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+                    and severity_rank(severity=finding.severity) <= 1
+                )
+                or (
+                    is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+                    and finding_root_cause_bucket(finding=finding) not in selected_core_buckets
+                )
+                or (
+                    is_core_root_cause_bucket(bucket=finding_root_cause_bucket(finding=finding))
+                    and severity_rank(severity=finding.severity) <= 1
+                    and _retrieval_group_key(finding=finding) not in selected_core_groups
+                )
+            )
+        ),
+        key=lambda finding: retrieval_priority_score(finding=finding),
+    )
+    for finding in expansion_candidates:
+        if len(selected) >= hard_cap:
+            break
+        selected.append(finding)
+        selected_ids.add(finding.finding_id)
+        bucket = finding_root_cause_bucket(finding=finding)
+        if is_core_root_cause_bucket(bucket=bucket):
+            selected_core_buckets.add(bucket)
+            selected_core_groups.add(_retrieval_group_key(finding=finding))
+    return selected
+
+
 def select_primary_finding(
     *,
     findings: list[AuditFinding],
@@ -175,6 +256,7 @@ def _global_finding_sort_key(finding: AuditFinding) -> tuple[int, int, int, int,
     bucket = finding_root_cause_bucket(finding=finding)
     return (
         root_cause_priority(bucket=bucket),
+        _primary_conflict_priority(finding=finding),
         severity_rank(severity=finding.severity),
         _detail_penalty(finding=finding),
         0 if bool(finding.metadata.get("delta_scope_affected")) else 1,
@@ -187,6 +269,7 @@ def _package_finding_sort_key(*, finding: AuditFinding, package_bucket: str) -> 
     return (
         0 if finding_root_cause_bucket(finding=finding) == package_bucket else 1,
         0 if bool(finding.metadata.get("truth_enforcement")) else 1,
+        _primary_conflict_priority(finding=finding),
         _detail_penalty(finding=finding),
         severity_rank(severity=finding.severity),
         finding.title,
@@ -197,9 +280,29 @@ def _detail_penalty(*, finding: AuditFinding) -> int:
     return 1 if finding.category in SUPPORTING_DETAIL_CATEGORIES else 0
 
 
+def _primary_conflict_priority(*, finding: AuditFinding) -> int:
+    if finding.category in {"contradiction", "policy_conflict"}:
+        return 0
+    if finding.category in {"implementation_drift", "missing_implementation"}:
+        return 1
+    if finding.category in SUPPORTING_DETAIL_CATEGORIES:
+        return 2
+    return 1
+
+
 def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, tuple):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _retrieval_group_key(*, finding: AuditFinding) -> str:
+    return str(
+        finding.metadata.get("causal_group_key")
+        or finding.metadata.get("causal_root_cause_entity_label")
+        or finding.metadata.get("object_key")
+        or finding.canonical_key
+        or finding.title
+    ).strip()

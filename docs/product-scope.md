@@ -44,9 +44,9 @@ Das Produkt soll Spezifikations-, Dokumentations- und Implementierungsdrift sich
 
 Die naechste inhaltliche Prioritaet ist:
 
-- Confluence-Live-Read mit sauberem OAuth-Consent robust produktiv nutzbar machen
-- semantische Claim-, Konflikt- und Delta-Logik weiter vertiefen
-- kontrollierten Jira-Writeback hinter expliziter Freigabe technisch sauber ausbauen
+- echte Jira-/Confluence-E2E-Verifikation gegen kontrollierte Testziele
+- Last-, Recovery- und Wiederanlauf-Haertung fuer den Dauerbetrieb
+- abschliessende Pilot- und Go-Live-Gates fuer produktive Nutzung
 
 ## Nicht-Ziele fuer den Start
 

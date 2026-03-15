@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fin_ai_auditor.domain.models import (
+    AtomicFactEntry,
     AuditClaimEntry,
     AuditFinding,
     AuditFindingLink,
@@ -22,6 +23,7 @@ from fin_ai_auditor.domain.models import (
     DecisionRecord,
     RetrievalSegment,
     RetrievalSegmentClaimLink,
+    SchemaTruthEntry,
     SemanticEntity,
     SemanticRelation,
     TruthLedgerEntry,
@@ -115,6 +117,8 @@ class SQLiteAuditRepository:
             connection.execute("DELETE FROM decision_records WHERE run_id = ?", (run.run_id,))
             connection.execute("DELETE FROM writeback_approval_requests WHERE run_id = ?", (run.run_id,))
             connection.execute("DELETE FROM decision_packages WHERE run_id = ?", (run.run_id,))
+            connection.execute("DELETE FROM atomic_fact_entries WHERE run_id = ?", (run.run_id,))
+            connection.execute("DELETE FROM schema_truth_entries WHERE run_id = ?", (run.run_id,))
             connection.execute("DELETE FROM truth_entries WHERE run_id = ?", (run.run_id,))
             connection.execute("DELETE FROM audit_claims WHERE run_id = ?", (run.run_id,))
             connection.execute("DELETE FROM semantic_relations WHERE run_id = ?", (run.run_id,))
@@ -147,6 +151,14 @@ class SQLiteAuditRepository:
                 )
 
             for claim in run.claims:
+                claim_metadata = {
+                    **claim.metadata,
+                    "claim_operator": claim.operator,
+                    "claim_constraint": claim.constraint,
+                    "claim_focus_value": claim.focus_value,
+                    "assertion_status": claim.assertion_status,
+                    "source_authority": claim.source_authority,
+                }
                 connection.execute(
                     """
                     INSERT INTO audit_claims(
@@ -172,11 +184,15 @@ class SQLiteAuditRepository:
                         claim.fingerprint,
                         claim.status,
                         _dump_json(claim.evidence_location_ids),
-                        _dump_json(claim.metadata),
+                        _dump_json(claim_metadata),
                     ),
                 )
 
             for truth in run.truths:
+                truth_metadata = {
+                    **truth.metadata,
+                    "source_authority": truth.source_authority,
+                }
                 connection.execute(
                     """
                     INSERT INTO truth_entries(
@@ -201,7 +217,67 @@ class SQLiteAuditRepository:
                         truth.created_from_problem_id,
                         truth.supersedes_truth_id,
                         truth.valid_from_snapshot_id,
-                        _dump_json(truth.metadata),
+                        _dump_json(truth_metadata),
+                    ),
+                )
+
+            for schema_truth in run.schema_truths:
+                connection.execute(
+                    """
+                    INSERT INTO schema_truth_entries(
+                        schema_truth_id, run_id, schema_key, schema_kind, target_label, status,
+                        source_kind, source_authority, source_ids_json, evidence_claim_ids_json,
+                        related_truth_ids_json, metadata_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        schema_truth.schema_truth_id,
+                        run.run_id,
+                        schema_truth.schema_key,
+                        schema_truth.schema_kind,
+                        schema_truth.target_label,
+                        schema_truth.status,
+                        schema_truth.source_kind,
+                        schema_truth.source_authority,
+                        _dump_json(schema_truth.source_ids),
+                        _dump_json(schema_truth.evidence_claim_ids),
+                        _dump_json(schema_truth.related_truth_ids),
+                        _dump_json(schema_truth.metadata),
+                    ),
+                )
+
+            for atomic_fact in run.atomic_facts:
+                connection.execute(
+                    """
+                    INSERT INTO atomic_fact_entries(
+                        atomic_fact_id, run_id, fact_key, summary, status, action_lane,
+                        primary_package_id, primary_problem_id, related_package_ids_json,
+                        related_problem_ids_json, related_finding_ids_json, source_types_json,
+                        source_ids_json, subject_keys_json, predicates_json, claim_ids_json,
+                        truth_ids_json, metadata_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        atomic_fact.atomic_fact_id,
+                        run.run_id,
+                        atomic_fact.fact_key,
+                        atomic_fact.summary,
+                        atomic_fact.status,
+                        atomic_fact.action_lane,
+                        atomic_fact.primary_package_id,
+                        atomic_fact.primary_problem_id,
+                        _dump_json(atomic_fact.related_package_ids),
+                        _dump_json(atomic_fact.related_problem_ids),
+                        _dump_json(atomic_fact.related_finding_ids),
+                        _dump_json(atomic_fact.source_types),
+                        _dump_json(atomic_fact.source_ids),
+                        _dump_json(atomic_fact.subject_keys),
+                        _dump_json(atomic_fact.predicates),
+                        _dump_json(atomic_fact.claim_ids),
+                        _dump_json(atomic_fact.truth_ids),
+                        _dump_json(atomic_fact.metadata),
                     ),
                 )
 
@@ -442,6 +518,8 @@ class SQLiteAuditRepository:
             connection.execute("DELETE FROM decision_records")
             connection.execute("DELETE FROM writeback_approval_requests")
             connection.execute("DELETE FROM decision_packages")
+            connection.execute("DELETE FROM atomic_fact_entries")
+            connection.execute("DELETE FROM schema_truth_entries")
             connection.execute("DELETE FROM truth_entries")
             connection.execute("DELETE FROM audit_claims")
             connection.execute("DELETE FROM semantic_relations")
@@ -1002,6 +1080,72 @@ class SQLiteAuditRepository:
             ],
         }
 
+    def get_atomic_fact_registry_summary(self) -> dict[str, object]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT af.atomic_fact_id, af.fact_key, af.summary, af.status, af.action_lane, af.metadata_json,
+                       af.related_package_ids_json, af.related_problem_ids_json, af.related_finding_ids_json,
+                       af.source_types_json, af.source_ids_json, af.subject_keys_json, af.predicates_json,
+                       af.claim_ids_json, af.truth_ids_json,
+                       ar.run_id, ar.updated_at
+                FROM atomic_fact_entries af
+                JOIN audit_runs ar ON ar.run_id = af.run_id
+                WHERE ar.status = 'completed'
+                ORDER BY ar.updated_at DESC, af.fact_key ASC, af.atomic_fact_id ASC
+                """
+            ).fetchall()
+        total_entries = len(rows)
+        latest_by_key: dict[str, dict[str, object]] = {}
+        run_ids_by_key: dict[str, set[str]] = {}
+        reopened_count = 0
+        for row in rows:
+            fact_key = str(row["fact_key"])
+            metadata = json.loads(row["metadata_json"] or "{}")
+            run_ids_by_key.setdefault(fact_key, set()).add(str(row["run_id"]))
+            if fact_key in latest_by_key:
+                continue
+            latest_by_key[fact_key] = {
+                "fact_key": fact_key,
+                "summary": row["summary"],
+                "status": row["status"],
+                "action_lane": row["action_lane"],
+                "run_id": row["run_id"],
+                "updated_at": row["updated_at"],
+                "occurrence_count": int(metadata.get("occurrence_count") or 1),
+                "carry_over_mode": str(metadata.get("carry_over_mode") or "").strip() or None,
+                "previous_run_id": str(metadata.get("previous_run_id") or "").strip() or None,
+                "source_types": json.loads(row["source_types_json"] or "[]"),
+                "source_ids": json.loads(row["source_ids_json"] or "[]"),
+                "subject_keys": json.loads(row["subject_keys_json"] or "[]"),
+                "predicates": json.loads(row["predicates_json"] or "[]"),
+                "related_package_ids": json.loads(row["related_package_ids_json"] or "[]"),
+                "related_problem_ids": json.loads(row["related_problem_ids_json"] or "[]"),
+                "related_finding_ids": json.loads(row["related_finding_ids_json"] or "[]"),
+                "claim_count": len(json.loads(row["claim_ids_json"] or "[]")),
+                "truth_count": len(json.loads(row["truth_ids_json"] or "[]")),
+                "root_cause_bucket": str(metadata.get("root_cause_bucket") or "").strip() or None,
+                "scope_summary": str(metadata.get("scope_summary") or "").strip() or None,
+                "last_status_comment": str(metadata.get("last_status_comment") or "").strip() or None,
+                "seen_run_ids": list(metadata.get("seen_run_ids") or []),
+            }
+            if str(metadata.get("carry_over_mode") or "").strip() == "reopened":
+                reopened_count += 1
+        latest_entries = list(latest_by_key.values())
+        latest_status_counts: dict[str, int] = {}
+        for entry in latest_entries:
+            status = str(entry["status"])
+            latest_status_counts[status] = latest_status_counts.get(status, 0) + 1
+        recurring_count = sum(1 for run_ids in run_ids_by_key.values() if len(run_ids) > 1)
+        return {
+            "total_entries": total_entries,
+            "unique_fact_count": len(latest_entries),
+            "recurring_fact_count": recurring_count,
+            "reopened_fact_count": reopened_count,
+            "latest_status_counts": latest_status_counts,
+            "latest_facts": latest_entries[:12],
+        }
+
     def _upsert_confluence_page_registry(
         self,
         *,
@@ -1289,6 +1433,8 @@ class SQLiteAuditRepository:
                 "implemented_changes": json.loads(row["implemented_changes_json"] or "[]"),
                 "claims": self._load_claims(connection=connection, run_id=run_id),
                 "truths": self._load_truths(connection=connection, run_id=run_id),
+                "schema_truths": self._load_schema_truths(connection=connection, run_id=run_id),
+                "atomic_facts": self._load_atomic_facts(connection=connection, run_id=run_id),
                 "semantic_entities": self._load_semantic_entities(connection=connection, run_id=run_id),
                 "semantic_relations": self._load_semantic_relations(connection=connection, run_id=run_id),
                 "decision_packages": self._load_decision_packages(connection=connection, run_id=run_id),
@@ -1368,6 +1514,70 @@ class SQLiteAuditRepository:
             for row in rows
         ]
 
+    def _load_schema_truths(self, *, connection: sqlite3.Connection, run_id: str) -> list[SchemaTruthEntry]:
+        rows = connection.execute(
+            """
+            SELECT schema_truth_id, schema_key, schema_kind, target_label, status, source_kind,
+                   source_authority, source_ids_json, evidence_claim_ids_json, related_truth_ids_json, metadata_json
+            FROM schema_truth_entries
+            WHERE run_id = ?
+            ORDER BY schema_key ASC, status ASC, schema_truth_id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        return [
+            SchemaTruthEntry(
+                schema_truth_id=row["schema_truth_id"],
+                schema_key=row["schema_key"],
+                schema_kind=row["schema_kind"],
+                target_label=row["target_label"],
+                status=row["status"],
+                source_kind=row["source_kind"],
+                source_authority=row["source_authority"],
+                source_ids=json.loads(row["source_ids_json"] or "[]"),
+                evidence_claim_ids=json.loads(row["evidence_claim_ids_json"] or "[]"),
+                related_truth_ids=json.loads(row["related_truth_ids_json"] or "[]"),
+                metadata=json.loads(row["metadata_json"] or "{}"),
+            )
+            for row in rows
+        ]
+
+    def _load_atomic_facts(self, *, connection: sqlite3.Connection, run_id: str) -> list[AtomicFactEntry]:
+        rows = connection.execute(
+            """
+            SELECT atomic_fact_id, fact_key, summary, status, action_lane, primary_package_id,
+                   primary_problem_id, related_package_ids_json, related_problem_ids_json,
+                   related_finding_ids_json, source_types_json, source_ids_json, subject_keys_json,
+                   predicates_json, claim_ids_json, truth_ids_json, metadata_json
+            FROM atomic_fact_entries
+            WHERE run_id = ?
+            ORDER BY fact_key ASC, atomic_fact_id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        return [
+            AtomicFactEntry(
+                atomic_fact_id=row["atomic_fact_id"],
+                fact_key=row["fact_key"],
+                summary=row["summary"],
+                status=row["status"],
+                action_lane=row["action_lane"],
+                primary_package_id=row["primary_package_id"],
+                primary_problem_id=row["primary_problem_id"],
+                related_package_ids=json.loads(row["related_package_ids_json"] or "[]"),
+                related_problem_ids=json.loads(row["related_problem_ids_json"] or "[]"),
+                related_finding_ids=json.loads(row["related_finding_ids_json"] or "[]"),
+                source_types=json.loads(row["source_types_json"] or "[]"),
+                source_ids=json.loads(row["source_ids_json"] or "[]"),
+                subject_keys=json.loads(row["subject_keys_json"] or "[]"),
+                predicates=json.loads(row["predicates_json"] or "[]"),
+                claim_ids=json.loads(row["claim_ids_json"] or "[]"),
+                truth_ids=json.loads(row["truth_ids_json"] or "[]"),
+                metadata=json.loads(row["metadata_json"] or "{}"),
+            )
+            for row in rows
+        ]
+
     def _load_semantic_entities(self, *, connection: sqlite3.Connection, run_id: str) -> list[SemanticEntity]:
         rows = connection.execute(
             """
@@ -1416,6 +1626,9 @@ class SQLiteAuditRepository:
         ]
 
     def _load_decision_packages(self, *, connection: sqlite3.Connection, run_id: str) -> list[DecisionPackage]:
+        def _severity_order(value: str) -> int:
+            return {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(str(value), 9)
+
         package_rows = connection.execute(
             """
             SELECT package_id, title, category, severity_summary, scope_summary, decision_state,
@@ -1484,7 +1697,25 @@ class SQLiteAuditRepository:
                 )
             )
 
-        return [DecisionPackage.model_validate(payload) for payload in packages.values()]
+        loaded_packages: list[DecisionPackage] = []
+        for payload in packages.values():
+            payload["problem_elements"].sort(
+                key=lambda problem: (
+                    0 if str(problem.metadata.get("root_cause_role") or "") == "primary" else 1,
+                    _severity_order(str(problem.severity)),
+                    str(problem.scope_summary),
+                    str(problem.problem_id),
+                )
+            )
+            loaded_packages.append(DecisionPackage.model_validate(payload))
+        return sorted(
+            loaded_packages,
+            key=lambda package: (
+                int(package.metadata.get("package_sort_rank") or 999),
+                _severity_order(str(package.severity_summary)),
+                package.title,
+            ),
+        )
 
     def _load_decision_records(self, *, connection: sqlite3.Connection, run_id: str) -> list[DecisionRecord]:
         rows = connection.execute(

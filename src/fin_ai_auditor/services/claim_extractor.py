@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass, field
 import json
 import logging
 import re
-from typing import Final
+from typing import Callable, Final
 
 from fin_ai_auditor.domain.models import AuditClaimEntry, AuditLocation, AuditPosition
+from fin_ai_auditor.services.claim_semantics import package_scope_key
 from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimEvidence, ExtractedClaimRecord
 
 logger = logging.getLogger(__name__)
@@ -108,18 +110,166 @@ REFERENCE_STOP_MARKERS: Final[tuple[str, ...]] = (
     " wobei ",
 )
 REFERENCE_STOP_CHARS: Final[tuple[str, ...]] = (".", ";", ",", "(", ")", "[", "]")
+DB_WRITE_CALL_HINTS: Final[tuple[str, ...]] = (
+    "save",
+    "persist",
+    "upsert",
+    "merge",
+    "patch",
+    "write",
+    "create",
+    "create_node",
+    "create_relationship",
+    "merge_relationship",
+    "execute_query",
+    "execute_write",
+    "write_transaction",
+    "run",
+    "executemany",
+    "bulk_write",
+)
+REPOSITORY_ADAPTER_HINTS: Final[tuple[str, ...]] = ("repo", "repository", "dao", "store", "adapter")
+DRIVER_ADAPTER_HINTS: Final[tuple[str, ...]] = ("driver", "session", "tx", "transaction", "neo4j", "graph", "client")
+TRANSACTION_HINTS: Final[tuple[str, ...]] = ("session", "transaction", "tx", "execute_write", "write_transaction", "begin_transaction")
+RETRY_HINTS: Final[tuple[str, ...]] = ("retry", "backoff", "tenacity")
+BATCH_HINTS: Final[tuple[str, ...]] = ("batch", "bulk", "chunk", "chunks", "records", "items", "executemany")
+PYTHON_BUILTIN_TYPE_HINTS: Final[tuple[str, ...]] = (
+    "Any",
+    "Annotated",
+    "AsyncIterator",
+    "Awaitable",
+    "Callable",
+    "Dict",
+    "Final",
+    "Generic",
+    "Iterable",
+    "Iterator",
+    "List",
+    "Literal",
+    "Mapping",
+    "Optional",
+    "Protocol",
+    "Sequence",
+    "Self",
+    "Set",
+    "Tuple",
+    "Type",
+    "TypeAlias",
+    "TypeGuard",
+    "TypeVar",
+    "Union",
+    "bool",
+    "bytes",
+    "dict",
+    "float",
+    "frozenset",
+    "int",
+    "list",
+    "object",
+    "set",
+    "str",
+    "tuple",
+)
+
+
+@dataclass(slots=True)
+class _PythonFunctionDescriptor:
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    class_stack: list[str]
+    section_path: str
+    decorator_labels: list[str]
+    docstring: str
+    source_id: str = ""
+    module_name: str = ""
+    descriptor_key: str = ""
+    qualified_symbol: str = ""
+    class_symbol: str = ""
+    import_aliases: dict[str, str] = field(default_factory=dict)
+    parameter_type_bindings: dict[str, str] = field(default_factory=dict)
+    local_symbol_bindings: dict[str, str] = field(default_factory=dict)
+    local_binding_expressions: dict[str, str] = field(default_factory=dict)
+    direct_call_chains: list[str] = field(default_factory=list)
+    local_callee_keys: list[str] = field(default_factory=list)
+    string_literals: list[str] = field(default_factory=list)
+    with_context_calls: list[str] = field(default_factory=list)
+    loop_contexts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PythonFunctionStaticAnalysis:
+    section_path: str
+    static_call_graph_paths: list[str] = field(default_factory=list)
+    static_call_graph_qualified_paths: list[str] = field(default_factory=list)
+    repository_adapters: list[str] = field(default_factory=list)
+    repository_adapter_symbols: list[str] = field(default_factory=list)
+    driver_adapters: list[str] = field(default_factory=list)
+    driver_adapter_symbols: list[str] = field(default_factory=list)
+    transaction_boundaries: list[str] = field(default_factory=list)
+    retry_paths: list[str] = field(default_factory=list)
+    batch_paths: list[str] = field(default_factory=list)
+    db_write_api_calls: list[str] = field(default_factory=list)
+    db_write_api_symbols: list[str] = field(default_factory=list)
+    persistence_operation_types: list[str] = field(default_factory=list)
+    persistence_schema_targets: list[str] = field(default_factory=list)
+    persistence_backends: list[str] = field(default_factory=list)
+    constructor_injection_bindings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _SchemaCatalog:
+    allowed_node_labels: set[str] = field(default_factory=set)
+    observed_node_labels: set[str] = field(default_factory=set)
+    allowed_relationship_types: set[str] = field(default_factory=set)
+    observed_relationship_types: set[str] = field(default_factory=set)
+
+
+@dataclass(slots=True)
+class _PythonModuleContext:
+    document: CollectedDocument
+    tree: ast.AST
+    module_name: str
+    import_aliases: dict[str, str]
+    class_symbols: dict[str, str]
+    function_symbols: dict[str, str]
+
+
+@dataclass(slots=True)
+class _PythonRepoContext:
+    modules_by_source_id: dict[str, _PythonModuleContext] = field(default_factory=dict)
+    descriptor_keys_by_source_id: dict[str, list[str]] = field(default_factory=dict)
+    descriptors_by_key: dict[str, _PythonFunctionDescriptor] = field(default_factory=dict)
+    analyses_by_key: dict[str, _PythonFunctionStaticAnalysis] = field(default_factory=dict)
+    class_attribute_bindings_by_class_symbol: dict[str, dict[str, str]] = field(default_factory=dict)
+    function_key_by_symbol: dict[str, str] = field(default_factory=dict)
+    method_key_by_symbol: dict[tuple[str, str], str] = field(default_factory=dict)
+    function_symbols_by_name: dict[str, list[str]] = field(default_factory=dict)
+    class_symbols_by_name: dict[str, list[str]] = field(default_factory=dict)
+    class_base_symbols_by_symbol: dict[str, list[str]] = field(default_factory=dict)
+    subclass_symbols_by_base_symbol: dict[str, list[str]] = field(default_factory=dict)
+    interface_like_symbols: set[str] = field(default_factory=set)
 
 
 def extract_claim_records(*, documents: list[CollectedDocument]) -> list[ExtractedClaimRecord]:
     logger.info("claim_extraction_start", extra={"event_name": "claim_extraction_start", "event_payload": {"document_count": len(documents)}})
     records: list[ExtractedClaimRecord] = []
+    schema_catalog = _build_schema_catalog(documents=documents)
+    python_repo_records_by_source_id = _build_python_repo_claim_records(
+        documents=documents,
+        schema_catalog=schema_catalog,
+    )
     for document in documents:
         try:
             if document.source_type == "metamodel":
                 records.extend(_extract_metamodel_claims(document=document))
                 continue
             if document.source_type == "github_file":
-                records.extend(_extract_code_claims(document=document))
+                records.extend(
+                    _extract_code_claims(
+                        document=document,
+                        schema_catalog=schema_catalog,
+                        precomputed_python_records=python_repo_records_by_source_id,
+                    )
+                )
                 continue
             if document.source_type in {"confluence_page", "local_doc"}:
                 records.extend(_extract_document_claims(document=document))
@@ -135,10 +285,18 @@ def extract_claim_records(*, documents: list[CollectedDocument]) -> list[Extract
     return deduped
 
 
-def _extract_code_claims(*, document: CollectedDocument) -> list[ExtractedClaimRecord]:
+def _extract_code_claims(
+    *,
+    document: CollectedDocument,
+    schema_catalog: _SchemaCatalog | None = None,
+    precomputed_python_records: dict[str, list[ExtractedClaimRecord]] | None = None,
+) -> list[ExtractedClaimRecord]:
     records: list[ExtractedClaimRecord] = []
     if _is_python_document(document=document):
-        records.extend(_extract_python_ast_claims(document=document))
+        if precomputed_python_records is not None:
+            records.extend(precomputed_python_records.get(document.source_id, []))
+        else:
+            records.extend(_extract_python_ast_claims(document=document, schema_catalog=schema_catalog))
     elif _is_typescript_document(document=document):
         records.extend(_extract_typescript_claims(document=document))
     elif _is_config_document(document=document):
@@ -332,36 +490,1987 @@ def _extract_config_claims(*, document: CollectedDocument) -> list[ExtractedClai
     return records
 
 
-def _extract_python_ast_claims(*, document: CollectedDocument) -> list[ExtractedClaimRecord]:
-    try:
-        tree = ast.parse(document.body)
-    except SyntaxError:
+def _extract_python_ast_claims(
+    *,
+    document: CollectedDocument,
+    schema_catalog: _SchemaCatalog | None = None,
+) -> list[ExtractedClaimRecord]:
+    repo_context = _build_python_repo_context(documents=[document])
+    return _extract_python_repo_claim_records_for_source(
+        source_id=document.source_id,
+        repo_context=repo_context,
+        schema_catalog=schema_catalog,
+    )
+
+
+def _build_python_repo_claim_records(
+    *,
+    documents: list[CollectedDocument],
+    schema_catalog: _SchemaCatalog | None,
+) -> dict[str, list[ExtractedClaimRecord]]:
+    repo_context = _build_python_repo_context(documents=documents)
+    if not repo_context.modules_by_source_id:
+        return {}
+    return {
+        source_id: _extract_python_repo_claim_records_for_source(
+            source_id=source_id,
+            repo_context=repo_context,
+            schema_catalog=schema_catalog,
+        )
+        for source_id in repo_context.modules_by_source_id
+    }
+
+
+def _extract_python_repo_claim_records_for_source(
+    *,
+    source_id: str,
+    repo_context: _PythonRepoContext,
+    schema_catalog: _SchemaCatalog | None,
+) -> list[ExtractedClaimRecord]:
+    module_context = repo_context.modules_by_source_id.get(source_id)
+    if module_context is None:
         return []
-    lines = document.body.splitlines()
+    lines = module_context.document.body.splitlines()
     records: list[ExtractedClaimRecord] = []
+    descriptor_keys = repo_context.descriptor_keys_by_source_id.get(source_id, [])
+    for descriptor_key in sorted(
+        descriptor_keys,
+        key=lambda item: int(getattr(repo_context.descriptors_by_key[item].node, "lineno", 0) or 0),
+    ):
+        descriptor = repo_context.descriptors_by_key[descriptor_key]
+        records.extend(
+            _extract_function_claim_records(
+                document=module_context.document,
+                node=descriptor.node,
+                class_stack=descriptor.class_stack,
+                lines=lines,
+                function_analysis=repo_context.analyses_by_key.get(descriptor_key),
+                descriptor=descriptor,
+                schema_catalog=schema_catalog,
+            )
+        )
+    return records
+
+
+def _build_python_repo_context(*, documents: list[CollectedDocument]) -> _PythonRepoContext:
+    repo_context = _PythonRepoContext()
+    for document in documents:
+        if document.source_type != "github_file" or not _is_python_document(document=document):
+            continue
+        try:
+            tree = ast.parse(document.body)
+        except SyntaxError:
+            continue
+        module_name = _module_name_from_document(document=document)
+        import_aliases = _extract_python_import_aliases(tree=tree, module_name=module_name)
+        class_symbols, function_symbols = _extract_python_module_symbols(tree=tree, module_name=module_name)
+        module_context = _PythonModuleContext(
+            document=document,
+            tree=tree,
+            module_name=module_name,
+            import_aliases=import_aliases,
+            class_symbols=class_symbols,
+            function_symbols=function_symbols,
+        )
+        repo_context.modules_by_source_id[document.source_id] = module_context
+        for class_name, class_symbol in class_symbols.items():
+            repo_context.class_symbols_by_name.setdefault(class_name, []).append(class_symbol)
+        for function_name, function_symbol in function_symbols.items():
+            repo_context.function_symbols_by_name.setdefault(function_name, []).append(function_symbol)
+        class_base_symbols, interface_like_symbols = _extract_python_class_relationships(
+            tree=tree,
+            module_context=module_context,
+        )
+        for class_symbol, base_symbols in class_base_symbols.items():
+            repo_context.class_base_symbols_by_symbol[class_symbol] = _dedupe_preserve_order(base_symbols)
+            for base_symbol in base_symbols:
+                repo_context.subclass_symbols_by_base_symbol.setdefault(base_symbol, []).append(class_symbol)
+        repo_context.interface_like_symbols.update(interface_like_symbols)
+
+    for source_id, module_context in repo_context.modules_by_source_id.items():
+        descriptors, class_attribute_bindings = _collect_repo_python_function_descriptors(module_context=module_context)
+        repo_context.descriptor_keys_by_source_id[source_id] = list(descriptors.keys())
+        repo_context.descriptors_by_key.update(descriptors)
+        for descriptor in descriptors.values():
+            repo_context.function_key_by_symbol[descriptor.qualified_symbol] = descriptor.descriptor_key
+            if descriptor.class_symbol:
+                repo_context.method_key_by_symbol[(descriptor.class_symbol, descriptor.node.name)] = descriptor.descriptor_key
+            repo_context.function_symbols_by_name.setdefault(descriptor.node.name, []).append(descriptor.qualified_symbol)
+        for class_symbol, bindings in class_attribute_bindings.items():
+            existing_bindings = repo_context.class_attribute_bindings_by_class_symbol.setdefault(class_symbol, {})
+            for attribute_name, binding_symbol in bindings.items():
+                if attribute_name not in existing_bindings:
+                    existing_bindings[attribute_name] = binding_symbol
+
+    repo_context.class_symbols_by_name = {
+        name: _dedupe_preserve_order(symbols)
+        for name, symbols in repo_context.class_symbols_by_name.items()
+    }
+    repo_context.function_symbols_by_name = {
+        name: _dedupe_preserve_order(symbols)
+        for name, symbols in repo_context.function_symbols_by_name.items()
+    }
+    repo_context.subclass_symbols_by_base_symbol = {
+        base_symbol: _dedupe_preserve_order(subclass_symbols)
+        for base_symbol, subclass_symbols in repo_context.subclass_symbols_by_base_symbol.items()
+    }
+
+    analysis_cache: dict[str, _PythonFunctionStaticAnalysis] = {}
+    stack: set[str] = set()
+
+    def analyze(descriptor_key: str) -> _PythonFunctionStaticAnalysis:
+        cached = analysis_cache.get(descriptor_key)
+        if cached is not None:
+            return cached
+        descriptor = repo_context.descriptors_by_key.get(descriptor_key)
+        if descriptor is None:
+            return _PythonFunctionStaticAnalysis(section_path=descriptor_key)
+        if descriptor_key in stack:
+            return _PythonFunctionStaticAnalysis(section_path=descriptor.section_path)
+        stack.add(descriptor_key)
+        analysis = _analyze_repo_function_descriptor(
+            descriptor=descriptor,
+            repo_context=repo_context,
+            resolve_analysis=analyze,
+        )
+        analysis_cache[descriptor_key] = analysis
+        stack.remove(descriptor_key)
+        return analysis
+
+    for descriptor_key in repo_context.descriptors_by_key:
+        analyze(descriptor_key)
+    repo_context.analyses_by_key = analysis_cache
+    return repo_context
+
+
+def _module_name_from_document(*, document: CollectedDocument) -> str:
+    raw_path = str(document.path_hint or document.source_id or document.title or "").strip().replace("\\", "/")
+    raw_path = raw_path.split("?", 1)[0].split("#", 1)[0]
+    if raw_path.endswith(".py"):
+        raw_path = raw_path[:-3]
+    parts = [part for part in raw_path.split("/") if part and part not in {".", ".."}]
+    if parts[:1] == ["src"]:
+        parts = parts[1:]
+    if parts[-1:] == ["__init__"]:
+        parts = parts[:-1]
+    normalized_parts = [re.sub(r"[^A-Za-z0-9_]", "_", part) for part in parts]
+    normalized_parts = [part for part in normalized_parts if part]
+    return ".".join(normalized_parts) or "runtime_module"
+
+
+def _extract_python_import_aliases(*, tree: ast.AST, module_name: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for child in getattr(tree, "body", []):
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                imported_name = str(alias.name or "").strip()
+                if not imported_name:
+                    continue
+                alias_name = str(alias.asname or imported_name.split(".", 1)[0]).strip()
+                target = imported_name if alias.asname else alias_name
+                aliases[alias_name] = target
+        elif isinstance(child, ast.ImportFrom):
+            base_module = _resolve_relative_import_module(
+                module_name=module_name,
+                imported_module=str(child.module or "").strip(),
+                level=int(getattr(child, "level", 0) or 0),
+            )
+            for alias in child.names:
+                imported_name = str(alias.name or "").strip()
+                if not imported_name or imported_name == "*":
+                    continue
+                alias_name = str(alias.asname or imported_name).strip()
+                if not alias_name:
+                    continue
+                target = f"{base_module}.{imported_name}" if base_module else imported_name
+                aliases[alias_name] = target
+    return aliases
+
+
+def _resolve_relative_import_module(*, module_name: str, imported_module: str, level: int) -> str:
+    if level <= 0:
+        return imported_module
+    module_parts = [part for part in module_name.split(".") if part]
+    if level <= len(module_parts):
+        module_parts = module_parts[:-level]
+    else:
+        module_parts = []
+    imported_parts = [part for part in imported_module.split(".") if part]
+    return ".".join([*module_parts, *imported_parts])
+
+
+def _extract_python_module_symbols(*, tree: ast.AST, module_name: str) -> tuple[dict[str, str], dict[str, str]]:
+    class_symbols: dict[str, str] = {}
+    function_symbols: dict[str, str] = {}
+    for child in getattr(tree, "body", []):
+        if isinstance(child, ast.ClassDef):
+            class_symbols[child.name] = f"{module_name}.{child.name}" if module_name else child.name
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function_symbols[child.name] = f"{module_name}.{child.name}" if module_name else child.name
+    return class_symbols, function_symbols
+
+
+def _extract_python_class_relationships(
+    *,
+    tree: ast.AST,
+    module_context: _PythonModuleContext,
+) -> tuple[dict[str, list[str]], set[str]]:
+    class_base_symbols: dict[str, list[str]] = {}
+    interface_like_symbols: set[str] = set()
 
     def visit(node: ast.AST, *, class_stack: list[str]) -> None:
         if isinstance(node, ast.ClassDef):
             next_stack = [*class_stack, node.name]
+            class_symbol = _class_symbol_from_stack(
+                module_name=module_context.module_name,
+                class_stack=next_stack,
+                class_symbols=module_context.class_symbols,
+            )
+            base_symbols: list[str] = []
+            interface_like = node.name.endswith(("Protocol", "Interface"))
+            for base in node.bases:
+                base_label = _call_chain_from_expr(expr=base) if isinstance(base, ast.expr) else ""
+                if base_label in {"Protocol", "typing.Protocol", "ABC", "abc.ABC", "ABCMeta", "abc.ABCMeta"}:
+                    interface_like = True
+                resolved_base_symbol = _annotation_symbol(annotation=base, module_context=module_context)
+                if resolved_base_symbol:
+                    base_symbols.append(resolved_base_symbol)
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if any(
+                        decorator == "abstractmethod" or decorator.endswith(".abstractmethod")
+                        for decorator in _decorator_labels(node=child)
+                    ):
+                        interface_like = True
+                elif isinstance(child, ast.Pass):
+                    interface_like = True
+            class_base_symbols[class_symbol] = _dedupe_preserve_order(base_symbols)
+            if interface_like:
+                interface_like_symbols.add(class_symbol)
+            for child in node.body:
+                visit(child, class_stack=next_stack)
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, class_stack=class_stack)
+
+    for child in getattr(tree, "body", []):
+        visit(child, class_stack=[])
+    return class_base_symbols, interface_like_symbols
+
+
+def _collect_repo_python_function_descriptors(
+    *,
+    module_context: _PythonModuleContext,
+) -> tuple[dict[str, _PythonFunctionDescriptor], dict[str, dict[str, str]]]:
+    descriptors: dict[str, _PythonFunctionDescriptor] = {}
+    class_attribute_bindings: dict[str, dict[str, str]] = {}
+
+    def visit(node: ast.AST, *, class_stack: list[str]) -> None:
+        if isinstance(node, ast.ClassDef):
+            next_stack = [*class_stack, node.name]
+            class_symbol = _class_symbol_from_stack(
+                module_name=module_context.module_name,
+                class_stack=next_stack,
+                class_symbols=module_context.class_symbols,
+            )
+            class_attribute_bindings[class_symbol] = _extract_repo_class_attribute_bindings(
+                node=node,
+                module_context=module_context,
+                class_symbol=class_symbol,
+            )
             for child in node.body:
                 visit(child, class_stack=next_stack)
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            records.extend(
-                _extract_function_claim_records(
-                    document=document,
-                    node=node,
-                    class_stack=class_stack,
-                    lines=lines,
-                )
+            section_path = ".".join([*class_stack, node.name]) or node.name
+            class_symbol = _class_symbol_from_stack(
+                module_name=module_context.module_name,
+                class_stack=class_stack,
+                class_symbols=module_context.class_symbols,
             )
+            qualified_symbol = (
+                f"{class_symbol}.{node.name}"
+                if class_symbol
+                else module_context.function_symbols.get(node.name, f"{module_context.module_name}.{node.name}")
+            )
+            descriptor = _PythonFunctionDescriptor(
+                node=node,
+                class_stack=list(class_stack),
+                section_path=section_path,
+                decorator_labels=_decorator_labels(node=node),
+                docstring=ast.get_docstring(node) or "",
+                source_id=module_context.document.source_id,
+                module_name=module_context.module_name,
+                descriptor_key=qualified_symbol,
+                qualified_symbol=qualified_symbol,
+                class_symbol=class_symbol,
+                import_aliases=dict(module_context.import_aliases),
+                parameter_type_bindings=_extract_parameter_type_bindings(
+                    node=node,
+                    module_context=module_context,
+                ),
+            )
+            (
+                descriptor.local_symbol_bindings,
+                descriptor.local_binding_expressions,
+            ) = _extract_function_local_symbol_bindings(
+                node=node,
+                module_context=module_context,
+                class_symbol=class_symbol,
+                class_attribute_bindings=class_attribute_bindings.get(class_symbol, {}),
+                parameter_type_bindings=descriptor.parameter_type_bindings,
+            )
+            direct_call_chains: list[str] = []
+            string_literals: list[str] = []
+            with_context_calls: list[str] = []
+            loop_contexts: list[str] = []
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    call_chain = _call_chain_from_expr(expr=child.func)
+                    if call_chain:
+                        direct_call_chains.append(call_chain)
+                elif isinstance(child, (ast.With, ast.AsyncWith)):
+                    for item in child.items:
+                        context_chain = _call_chain_from_context_expr(expr=item.context_expr)
+                        if context_chain:
+                            with_context_calls.append(context_chain)
+                elif isinstance(child, (ast.For, ast.AsyncFor)):
+                    loop_contexts.append(_loop_context_text(node=child))
+                elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+                    string_literals.append(child.value)
+            descriptor.direct_call_chains = _dedupe_preserve_order(direct_call_chains)
+            descriptor.string_literals = _dedupe_preserve_order(string_literals)
+            descriptor.with_context_calls = _dedupe_preserve_order(with_context_calls)
+            descriptor.loop_contexts = _dedupe_preserve_order(loop_contexts)
+            descriptors[descriptor.descriptor_key] = descriptor
+            return
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 visit(child, class_stack=class_stack)
 
-    for child in tree.body:
+    for child in getattr(module_context.tree, "body", []):
         visit(child, class_stack=[])
-    return records
+    return descriptors, class_attribute_bindings
+
+
+def _class_symbol_from_stack(
+    *,
+    module_name: str,
+    class_stack: list[str],
+    class_symbols: dict[str, str],
+) -> str:
+    if not class_stack:
+        return ""
+    if len(class_stack) == 1 and class_stack[0] in class_symbols:
+        return class_symbols[class_stack[0]]
+    return ".".join([module_name, *class_stack]) if module_name else ".".join(class_stack)
+
+
+def _extract_parameter_type_bindings(
+    *,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_context: _PythonModuleContext,
+) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+    if node.args.vararg is not None:
+        args.append(node.args.vararg)
+    if node.args.kwarg is not None:
+        args.append(node.args.kwarg)
+    for argument in args:
+        annotation_symbol = _annotation_symbol(annotation=argument.annotation, module_context=module_context)
+        if annotation_symbol:
+            bindings[argument.arg] = annotation_symbol
+    return bindings
+
+
+def _extract_function_local_symbol_bindings(
+    *,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_context: _PythonModuleContext,
+    class_symbol: str,
+    class_attribute_bindings: dict[str, str],
+    parameter_type_bindings: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    local_symbol_bindings: dict[str, str] = {}
+    local_binding_expressions: dict[str, str] = {}
+    for statement in _iter_statements_in_order(statements=list(node.body)):
+        if isinstance(statement, ast.Assign):
+            binding_expression = _binding_expression_from_value(value=statement.value)
+            if not binding_expression:
+                continue
+            resolved_symbol = _resolve_local_binding_expression(
+                binding_expression=binding_expression,
+                module_context=module_context,
+                class_symbol=class_symbol,
+                class_attribute_bindings=class_attribute_bindings,
+                parameter_type_bindings=parameter_type_bindings,
+                local_symbol_bindings=local_symbol_bindings,
+            )
+            for target_name in _assignment_target_names(targets=statement.targets):
+                local_binding_expressions[target_name] = binding_expression
+                if resolved_symbol:
+                    local_symbol_bindings[target_name] = resolved_symbol
+        elif isinstance(statement, ast.AnnAssign):
+            binding_expression = _binding_expression_from_value(value=statement.value)
+            annotation_symbol = _annotation_symbol(annotation=statement.annotation, module_context=module_context)
+            target_name = _target_name_from_expr(expr=statement.target)
+            if not target_name:
+                continue
+            if binding_expression:
+                local_binding_expressions[target_name] = binding_expression
+            resolved_symbol = (
+                _resolve_local_binding_expression(
+                    binding_expression=binding_expression,
+                    module_context=module_context,
+                    class_symbol=class_symbol,
+                    class_attribute_bindings=class_attribute_bindings,
+                    parameter_type_bindings=parameter_type_bindings,
+                    local_symbol_bindings=local_symbol_bindings,
+                )
+                if binding_expression
+                else None
+            ) or annotation_symbol
+            if resolved_symbol:
+                local_symbol_bindings[target_name] = resolved_symbol
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            for item in statement.items:
+                target_names = _optional_var_target_names(expr=item.optional_vars)
+                if not target_names:
+                    continue
+                binding_expression = _binding_expression_from_context_expr(expr=item.context_expr)
+                if not binding_expression:
+                    continue
+                resolved_symbol = _resolve_local_binding_expression(
+                    binding_expression=binding_expression,
+                    module_context=module_context,
+                    class_symbol=class_symbol,
+                    class_attribute_bindings=class_attribute_bindings,
+                    parameter_type_bindings=parameter_type_bindings,
+                    local_symbol_bindings=local_symbol_bindings,
+                )
+                for target_name in target_names:
+                    local_binding_expressions[target_name] = binding_expression
+                    if resolved_symbol:
+                        local_symbol_bindings[target_name] = resolved_symbol
+    return local_symbol_bindings, local_binding_expressions
+
+
+def _iter_statements_in_order(*, statements: list[ast.stmt]) -> list[ast.stmt]:
+    ordered: list[ast.stmt] = []
+    for statement in statements:
+        ordered.append(statement)
+        nested_blocks = (
+            getattr(statement, "body", None),
+            getattr(statement, "orelse", None),
+            getattr(statement, "finalbody", None),
+        )
+        for nested in nested_blocks:
+            if isinstance(nested, list):
+                ordered.extend(_iter_statements_in_order(statements=[item for item in nested if isinstance(item, ast.stmt)]))
+        handlers = getattr(statement, "handlers", None)
+        if isinstance(handlers, list):
+            for handler in handlers:
+                if isinstance(handler, ast.ExceptHandler):
+                    ordered.extend(_iter_statements_in_order(statements=[item for item in handler.body if isinstance(item, ast.stmt)]))
+    return ordered
+
+
+def _assignment_target_names(*, targets: list[ast.expr]) -> list[str]:
+    names: list[str] = []
+    for target in targets:
+        names.extend(_optional_var_target_names(expr=target))
+    return _dedupe_preserve_order(names)
+
+
+def _optional_var_target_names(*, expr: ast.expr | None) -> list[str]:
+    if isinstance(expr, ast.Name):
+        return [expr.id]
+    if isinstance(expr, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for element in expr.elts:
+            names.extend(_optional_var_target_names(expr=element))
+        return _dedupe_preserve_order(names)
+    return []
+
+
+def _target_name_from_expr(*, expr: ast.expr) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    return ""
+
+
+def _binding_expression_from_context_expr(*, expr: ast.expr) -> str:
+    if isinstance(expr, ast.Call):
+        return _binding_expression_from_value(value=expr)
+    return _binding_expression_from_value(value=expr)
+
+
+def _binding_expression_from_value(*, value: ast.expr | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, ast.Constant):
+        return ""
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return _call_chain_from_expr(expr=value)
+    if isinstance(value, ast.Call):
+        return _call_chain_from_expr(expr=value.func)
+    if isinstance(value, ast.BoolOp):
+        for inner in value.values:
+            binding_expression = _binding_expression_from_value(value=inner)
+            if binding_expression:
+                return binding_expression
+        return ""
+    if isinstance(value, ast.IfExp):
+        return _binding_expression_from_value(value=value.body) or _binding_expression_from_value(value=value.orelse)
+    return ""
+
+
+def _resolve_local_binding_expression(
+    *,
+    binding_expression: str,
+    module_context: _PythonModuleContext,
+    class_symbol: str,
+    class_attribute_bindings: dict[str, str],
+    parameter_type_bindings: dict[str, str],
+    local_symbol_bindings: dict[str, str],
+) -> str | None:
+    normalized = str(binding_expression or "").strip()
+    if not normalized:
+        return None
+    qualified = _qualify_local_binding_chain(
+        call_chain=normalized,
+        module_context=module_context,
+        class_symbol=class_symbol,
+        class_attribute_bindings=class_attribute_bindings,
+        parameter_type_bindings=parameter_type_bindings,
+        local_symbol_bindings=local_symbol_bindings,
+    )
+    if not qualified:
+        return None
+    base_symbol, separator, method_name = qualified.rpartition(".")
+    if separator and method_name.casefold() in TRANSACTION_HINTS and base_symbol:
+        return base_symbol
+    followed_binding = _follow_local_attribute_binding(
+        qualified_chain=qualified,
+        class_attribute_bindings=class_attribute_bindings,
+    )
+    return followed_binding or qualified
+
+
+def _qualify_local_binding_chain(
+    *,
+    call_chain: str,
+    module_context: _PythonModuleContext,
+    class_symbol: str,
+    class_attribute_bindings: dict[str, str],
+    parameter_type_bindings: dict[str, str],
+    local_symbol_bindings: dict[str, str],
+) -> str:
+    normalized = str(call_chain or "").strip()
+    if not normalized:
+        return ""
+    if normalized.startswith("self.") and class_symbol:
+        remainder = normalized[len("self.") :]
+        attribute_name, separator, tail = remainder.partition(".")
+        binding_symbol = class_attribute_bindings.get(attribute_name)
+        if binding_symbol:
+            return binding_symbol if not separator else f"{binding_symbol}.{tail}"
+        return f"{class_symbol}.{remainder}"
+    if normalized.startswith("cls.") and class_symbol:
+        remainder = normalized[len("cls.") :]
+        return f"{class_symbol}.{remainder}"
+    if "." not in normalized:
+        return (
+            local_symbol_bindings.get(normalized)
+            or parameter_type_bindings.get(normalized)
+            or _known_module_symbol(
+                symbol_name=normalized,
+                module_context=module_context,
+                allow_uppercase_fallback=True,
+            )
+            or normalized
+        )
+    root, _, tail = normalized.partition(".")
+    resolved_root = (
+        local_symbol_bindings.get(root)
+        or parameter_type_bindings.get(root)
+        or _known_module_symbol(
+            symbol_name=root,
+            module_context=module_context,
+            allow_uppercase_fallback=True,
+        )
+        or root
+    )
+    qualified = f"{resolved_root}.{tail}"
+    followed_binding = _follow_local_attribute_binding(
+        qualified_chain=qualified,
+        class_attribute_bindings=class_attribute_bindings,
+    )
+    return followed_binding or qualified
+
+
+def _follow_local_attribute_binding(
+    *,
+    qualified_chain: str,
+    class_attribute_bindings: dict[str, str],
+) -> str | None:
+    parts = [part for part in str(qualified_chain or "").split(".") if part]
+    if len(parts) < 2:
+        return None
+    for split_index in range(len(parts) - 1, 0, -1):
+        owner_parts = parts[:split_index]
+        attribute_parts = parts[split_index:]
+        if not owner_parts or not attribute_parts:
+            continue
+        attribute_name = owner_parts[-1]
+        resolved_root = class_attribute_bindings.get(attribute_name)
+        if resolved_root:
+            remaining = ".".join(attribute_parts)
+            return f"{resolved_root}.{remaining}" if remaining else resolved_root
+    return None
+
+
+def _annotation_symbol(*, annotation: ast.AST | None, module_context: _PythonModuleContext) -> str | None:
+    if annotation is None:
+        return None
+    if isinstance(annotation, ast.Name):
+        if annotation.id in PYTHON_BUILTIN_TYPE_HINTS:
+            return None
+        return _known_module_symbol(
+            symbol_name=annotation.id,
+            module_context=module_context,
+            allow_uppercase_fallback=True,
+        )
+    if isinstance(annotation, ast.Attribute):
+        return _known_module_symbol(
+            symbol_name=_call_chain_from_expr(expr=annotation),
+            module_context=module_context,
+            allow_uppercase_fallback=True,
+        )
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return _known_module_symbol(
+            symbol_name=annotation.value,
+            module_context=module_context,
+            allow_uppercase_fallback=True,
+        )
+    if isinstance(annotation, ast.Subscript):
+        slice_value = getattr(annotation, "slice", None)
+        return _annotation_symbol(annotation=slice_value, module_context=module_context) or _annotation_symbol(
+            annotation=annotation.value,
+            module_context=module_context,
+        )
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _annotation_symbol(annotation=annotation.left, module_context=module_context) or _annotation_symbol(
+            annotation=annotation.right,
+            module_context=module_context,
+        )
+    if isinstance(annotation, ast.Tuple):
+        for element in annotation.elts:
+            resolved = _annotation_symbol(annotation=element, module_context=module_context)
+            if resolved:
+                return resolved
+        return None
+    return None
+
+
+def _known_module_symbol(
+    *,
+    symbol_name: str,
+    module_context: _PythonModuleContext,
+    allow_uppercase_fallback: bool = False,
+) -> str | None:
+    normalized = str(symbol_name or "").strip().strip("'\"")
+    if not normalized or normalized in PYTHON_BUILTIN_TYPE_HINTS:
+        return None
+    if normalized in module_context.import_aliases:
+        return module_context.import_aliases[normalized]
+    if normalized in module_context.class_symbols:
+        return module_context.class_symbols[normalized]
+    if normalized in module_context.function_symbols:
+        return module_context.function_symbols[normalized]
+    if "." in normalized:
+        root, _, tail = normalized.partition(".")
+        resolved_root = _known_module_symbol(
+            symbol_name=root,
+            module_context=module_context,
+            allow_uppercase_fallback=allow_uppercase_fallback,
+        )
+        if resolved_root:
+            return f"{resolved_root}.{tail}"
+        return normalized
+    if allow_uppercase_fallback and normalized[:1].isupper():
+        return f"{module_context.module_name}.{normalized}" if module_context.module_name else normalized
+    return None
+
+
+def _extract_repo_class_attribute_bindings(
+    *,
+    node: ast.ClassDef,
+    module_context: _PythonModuleContext,
+    class_symbol: str,
+) -> dict[str, str]:
+    del class_symbol
+    bindings: dict[str, str] = {}
+    for child in node.body:
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) or child.name != "__init__":
+            continue
+        parameter_type_bindings = _extract_parameter_type_bindings(node=child, module_context=module_context)
+        for inner in ast.walk(child):
+            if isinstance(inner, ast.Assign):
+                binding = _repo_self_attribute_binding(
+                    assign_targets=inner.targets,
+                    value=inner.value,
+                    parameter_type_bindings=parameter_type_bindings,
+                    module_context=module_context,
+                )
+                if binding is not None:
+                    attribute_name, binding_symbol = binding
+                    bindings[attribute_name] = binding_symbol
+            elif isinstance(inner, ast.AnnAssign):
+                binding = _repo_self_attribute_binding(
+                    assign_targets=[inner.target],
+                    value=inner.value,
+                    parameter_type_bindings=parameter_type_bindings,
+                    module_context=module_context,
+                    explicit_annotation=inner.annotation,
+                )
+                if binding is not None:
+                    attribute_name, binding_symbol = binding
+                    bindings[attribute_name] = binding_symbol
+    return bindings
+
+
+def _repo_self_attribute_binding(
+    *,
+    assign_targets: list[ast.expr],
+    value: ast.expr | None,
+    parameter_type_bindings: dict[str, str],
+    module_context: _PythonModuleContext,
+    explicit_annotation: ast.AST | None = None,
+) -> tuple[str, str] | None:
+    for target in assign_targets:
+        if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name) or target.value.id != "self":
+            continue
+        attribute_name = str(target.attr or "").strip()
+        if not attribute_name:
+            continue
+        binding_symbol = _binding_symbol_from_value(
+            value=value,
+            parameter_type_bindings=parameter_type_bindings,
+            module_context=module_context,
+        ) or _annotation_symbol(annotation=explicit_annotation, module_context=module_context)
+        if binding_symbol:
+            return attribute_name, binding_symbol
+    return None
+
+
+def _binding_symbol_from_value(
+    *,
+    value: ast.expr | None,
+    parameter_type_bindings: dict[str, str],
+    module_context: _PythonModuleContext,
+) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, ast.Name):
+        return parameter_type_bindings.get(value.id) or _known_module_symbol(
+            symbol_name=value.id,
+            module_context=module_context,
+            allow_uppercase_fallback=False,
+        )
+    if isinstance(value, ast.Call):
+        return _known_module_symbol(
+            symbol_name=_call_chain_from_expr(expr=value.func),
+            module_context=module_context,
+            allow_uppercase_fallback=True,
+        )
+    if isinstance(value, ast.Attribute):
+        return _known_module_symbol(
+            symbol_name=_call_chain_from_expr(expr=value),
+            module_context=module_context,
+            allow_uppercase_fallback=False,
+        )
+    if isinstance(value, ast.BoolOp):
+        for inner in value.values:
+            resolved = _binding_symbol_from_value(
+                value=inner,
+                parameter_type_bindings=parameter_type_bindings,
+                module_context=module_context,
+            )
+            if resolved:
+                return resolved
+        return None
+    if isinstance(value, ast.IfExp):
+        return _binding_symbol_from_value(
+            value=value.body,
+            parameter_type_bindings=parameter_type_bindings,
+            module_context=module_context,
+        ) or _binding_symbol_from_value(
+            value=value.orelse,
+            parameter_type_bindings=parameter_type_bindings,
+            module_context=module_context,
+        )
+    return None
+
+
+def _analyze_repo_function_descriptor(
+    *,
+    descriptor: _PythonFunctionDescriptor,
+    repo_context: _PythonRepoContext,
+    resolve_analysis: Callable[[str], _PythonFunctionStaticAnalysis],
+) -> _PythonFunctionStaticAnalysis:
+    resolved_local_symbol_bindings = _resolve_descriptor_local_symbol_bindings(
+        descriptor=descriptor,
+        repo_context=repo_context,
+    )
+    normalized_calls = _dedupe_preserve_order(
+        [
+            _qualify_repo_call_chain(
+                call_chain=call_chain,
+                descriptor=descriptor,
+                repo_context=repo_context,
+                local_symbol_bindings=resolved_local_symbol_bindings,
+            )
+            for call_chain in descriptor.direct_call_chains
+            if str(call_chain).strip()
+        ]
+    )
+    normalized_contexts = _dedupe_preserve_order(
+        [
+            _qualify_repo_call_chain(
+                call_chain=context_call,
+                descriptor=descriptor,
+                repo_context=repo_context,
+                local_symbol_bindings=resolved_local_symbol_bindings,
+            )
+            for context_call in descriptor.with_context_calls
+            if str(context_call).strip()
+        ]
+    )
+    repository_adapter_symbols = _dedupe_preserve_order(
+        [
+            adapter
+            for call_chain in normalized_calls
+            for adapter in _adapter_symbols_from_call_chain(
+                call_chain=call_chain,
+                adapter_hints=REPOSITORY_ADAPTER_HINTS,
+                repo_context=repo_context,
+            )
+        ]
+    )
+    driver_adapter_symbols = _dedupe_preserve_order(
+        [
+            adapter
+            for call_chain in [*normalized_calls, *normalized_contexts]
+            for adapter in _adapter_symbols_from_call_chain(
+                call_chain=call_chain,
+                adapter_hints=DRIVER_ADAPTER_HINTS,
+                repo_context=repo_context,
+            )
+        ]
+    )
+    repository_adapters = _dedupe_preserve_order([_display_adapter_symbol(symbol) for symbol in repository_adapter_symbols])
+    driver_adapters = _dedupe_preserve_order([_display_adapter_symbol(symbol) for symbol in driver_adapter_symbols])
+    db_write_api_symbols = _dedupe_preserve_order(
+        [
+            call_chain
+            for call_chain in normalized_calls
+            if _call_chain_is_db_write(call_chain=call_chain)
+        ]
+    )
+    db_write_api_calls = _dedupe_preserve_order([_display_call_chain(call_chain) for call_chain in db_write_api_symbols])
+    transaction_boundary_symbols = _dedupe_preserve_order(
+        [
+            boundary
+            for boundary in [*normalized_calls, *normalized_contexts]
+            if _contains_any(text=boundary.casefold(), hints=TRANSACTION_HINTS)
+        ]
+    )
+    transaction_boundaries = _dedupe_preserve_order(
+        [_display_call_chain(boundary) for boundary in transaction_boundary_symbols]
+    )
+    retry_paths = _dedupe_preserve_order(
+        [
+            retry_path
+            for retry_path in [
+                *descriptor.decorator_labels,
+                *[_display_call_chain(call_chain) for call_chain in normalized_calls],
+            ]
+            if _contains_any(text=retry_path.casefold(), hints=RETRY_HINTS)
+        ]
+    )
+    batch_paths = _dedupe_preserve_order(
+        [
+            *descriptor.loop_contexts,
+            *[
+                _display_call_chain(path)
+                for path in normalized_calls
+                if _contains_any(text=path.casefold(), hints=BATCH_HINTS)
+            ],
+        ]
+    )
+    constructor_injection_bindings = _dedupe_preserve_order(
+        [
+            f"{attribute_name}={binding_symbol}"
+            for attribute_name, binding_symbol in sorted(
+                repo_context.class_attribute_bindings_by_class_symbol.get(descriptor.class_symbol, {}).items()
+            )
+        ]
+    )
+    operation_types, schema_targets, backends = _infer_persistence_shape(
+        call_chains=normalized_calls,
+        string_literals=descriptor.string_literals,
+        subject_key_hint=descriptor.qualified_symbol or descriptor.section_path,
+    )
+    descriptor_display = _display_symbol(descriptor.qualified_symbol or descriptor.section_path)
+    descriptor_qualified = descriptor.qualified_symbol or descriptor.section_path
+    static_paths = _dedupe_preserve_order(
+        [f"{descriptor_display} -> {_display_call_chain(call_chain)}" for call_chain in db_write_api_symbols]
+    )
+    qualified_paths = _dedupe_preserve_order(
+        [f"{descriptor_qualified} -> {call_chain}" for call_chain in db_write_api_symbols]
+    )
+
+    resolved_callee_keys = _dedupe_preserve_order(
+        [
+            callee_key
+            for call_chain in normalized_calls
+            for callee_key in [_resolve_repo_callee_key(call_chain=call_chain, repo_context=repo_context)]
+            if callee_key and callee_key != descriptor.descriptor_key
+        ]
+    )
+
+    for callee_key in resolved_callee_keys:
+        callee_descriptor = repo_context.descriptors_by_key.get(callee_key)
+        if callee_descriptor is None:
+            continue
+        callee_analysis = resolve_analysis(callee_key)
+        repository_adapters = _dedupe_preserve_order([*repository_adapters, *callee_analysis.repository_adapters])
+        repository_adapter_symbols = _dedupe_preserve_order(
+            [*repository_adapter_symbols, *callee_analysis.repository_adapter_symbols]
+        )
+        driver_adapters = _dedupe_preserve_order([*driver_adapters, *callee_analysis.driver_adapters])
+        driver_adapter_symbols = _dedupe_preserve_order([*driver_adapter_symbols, *callee_analysis.driver_adapter_symbols])
+        transaction_boundaries = _dedupe_preserve_order([*transaction_boundaries, *callee_analysis.transaction_boundaries])
+        retry_paths = _dedupe_preserve_order([*retry_paths, *callee_analysis.retry_paths])
+        batch_paths = _dedupe_preserve_order([*batch_paths, *callee_analysis.batch_paths])
+        db_write_api_calls = _dedupe_preserve_order([*db_write_api_calls, *callee_analysis.db_write_api_calls])
+        db_write_api_symbols = _dedupe_preserve_order([*db_write_api_symbols, *callee_analysis.db_write_api_symbols])
+        operation_types = _dedupe_preserve_order([*operation_types, *callee_analysis.persistence_operation_types])
+        schema_targets = _dedupe_preserve_order([*schema_targets, *callee_analysis.persistence_schema_targets])
+        backends = _dedupe_preserve_order([*backends, *callee_analysis.persistence_backends])
+        constructor_injection_bindings = _dedupe_preserve_order(
+            [*constructor_injection_bindings, *callee_analysis.constructor_injection_bindings]
+        )
+        callee_display = _display_symbol(callee_descriptor.qualified_symbol or callee_descriptor.section_path)
+        callee_qualified = callee_descriptor.qualified_symbol or callee_descriptor.section_path
+        static_paths = _dedupe_preserve_order(
+            [
+                *static_paths,
+                f"{descriptor_display} -> {callee_display}",
+                *[
+                    f"{descriptor_display} -> {path}"
+                    if not path.startswith(f"{descriptor_display} ->")
+                    else path
+                    for path in callee_analysis.static_call_graph_paths
+                ],
+            ]
+        )
+        qualified_paths = _dedupe_preserve_order(
+            [
+                *qualified_paths,
+                f"{descriptor_qualified} -> {callee_qualified}",
+                *[
+                    f"{descriptor_qualified} -> {path}"
+                    if not path.startswith(f"{descriptor_qualified} ->")
+                    else path
+                    for path in callee_analysis.static_call_graph_qualified_paths
+                ],
+            ]
+        )
+
+    return _PythonFunctionStaticAnalysis(
+        section_path=descriptor.section_path,
+        static_call_graph_paths=static_paths,
+        static_call_graph_qualified_paths=qualified_paths,
+        repository_adapters=repository_adapters,
+        repository_adapter_symbols=repository_adapter_symbols,
+        driver_adapters=driver_adapters,
+        driver_adapter_symbols=driver_adapter_symbols,
+        transaction_boundaries=transaction_boundaries,
+        retry_paths=retry_paths,
+        batch_paths=batch_paths,
+        db_write_api_calls=db_write_api_calls,
+        db_write_api_symbols=db_write_api_symbols,
+        persistence_operation_types=operation_types,
+        persistence_schema_targets=schema_targets,
+        persistence_backends=backends,
+        constructor_injection_bindings=constructor_injection_bindings,
+    )
+
+
+def _qualify_repo_call_chain(
+    *,
+    call_chain: str,
+    descriptor: _PythonFunctionDescriptor,
+    repo_context: _PythonRepoContext,
+    local_symbol_bindings: dict[str, str] | None = None,
+) -> str:
+    normalized = str(call_chain or "").strip()
+    if not normalized:
+        return ""
+    resolved_local_symbol_bindings = local_symbol_bindings or descriptor.local_symbol_bindings
+    if normalized.startswith("self.") and descriptor.class_symbol:
+        remainder = normalized[len("self.") :]
+        attribute_name, separator, tail = remainder.partition(".")
+        binding_symbol = _resolve_class_attribute_binding(
+            class_symbol=descriptor.class_symbol,
+            attribute_name=attribute_name,
+            repo_context=repo_context,
+        )
+        if binding_symbol:
+            return binding_symbol if not separator else f"{binding_symbol}.{tail}"
+        return f"{descriptor.class_symbol}.{remainder}"
+    if normalized.startswith("cls.") and descriptor.class_symbol:
+        remainder = normalized[len("cls.") :]
+        return f"{descriptor.class_symbol}.{remainder}"
+    if "." not in normalized:
+        return _resolve_repo_call_chain_root(
+            root=normalized,
+            descriptor=descriptor,
+            repo_context=repo_context,
+            local_symbol_bindings=resolved_local_symbol_bindings,
+        ) or normalized
+    root, _, tail = normalized.partition(".")
+    resolved_root = _resolve_repo_call_chain_root(
+        root=root,
+        descriptor=descriptor,
+        repo_context=repo_context,
+        local_symbol_bindings=resolved_local_symbol_bindings,
+    )
+    if not resolved_root:
+        return normalized
+    qualified = f"{resolved_root}.{tail}"
+    followed_binding = _follow_repo_attribute_binding(
+        qualified_chain=qualified,
+        repo_context=repo_context,
+    )
+    return followed_binding or qualified
+
+
+def _resolve_repo_call_chain_root(
+    *,
+    root: str,
+    descriptor: _PythonFunctionDescriptor,
+    repo_context: _PythonRepoContext,
+    local_symbol_bindings: dict[str, str] | None = None,
+) -> str | None:
+    normalized_root = str(root or "").strip()
+    if not normalized_root:
+        return None
+    resolved_local_symbol_bindings = local_symbol_bindings or descriptor.local_symbol_bindings
+    if normalized_root in resolved_local_symbol_bindings:
+        return resolved_local_symbol_bindings[normalized_root]
+    if normalized_root in descriptor.parameter_type_bindings:
+        return descriptor.parameter_type_bindings[normalized_root]
+    module_context = repo_context.modules_by_source_id.get(descriptor.source_id)
+    if module_context is None:
+        return None
+    if normalized_root in descriptor.import_aliases:
+        return descriptor.import_aliases[normalized_root]
+    if normalized_root in module_context.class_symbols:
+        return module_context.class_symbols[normalized_root]
+    if normalized_root in module_context.function_symbols:
+        return module_context.function_symbols[normalized_root]
+    class_candidates = repo_context.class_symbols_by_name.get(normalized_root, [])
+    if len(class_candidates) == 1:
+        return class_candidates[0]
+    function_candidates = repo_context.function_symbols_by_name.get(normalized_root, [])
+    if len(function_candidates) == 1:
+        return function_candidates[0]
+    return None
+
+
+def _resolve_descriptor_local_symbol_bindings(
+    *,
+    descriptor: _PythonFunctionDescriptor,
+    repo_context: _PythonRepoContext,
+) -> dict[str, str]:
+    resolved = dict(descriptor.local_symbol_bindings)
+    if not descriptor.local_binding_expressions:
+        return resolved
+    for _ in range(max(len(descriptor.local_binding_expressions), 1) + 1):
+        changed = False
+        for target_name, binding_expression in descriptor.local_binding_expressions.items():
+            binding_symbol = _resolve_repo_binding_expression(
+                binding_expression=binding_expression,
+                descriptor=descriptor,
+                repo_context=repo_context,
+                local_symbol_bindings=resolved,
+            )
+            if not binding_symbol or resolved.get(target_name) == binding_symbol:
+                continue
+            resolved[target_name] = binding_symbol
+            changed = True
+        if not changed:
+            break
+    return resolved
+
+
+def _resolve_repo_binding_expression(
+    *,
+    binding_expression: str,
+    descriptor: _PythonFunctionDescriptor,
+    repo_context: _PythonRepoContext,
+    local_symbol_bindings: dict[str, str],
+) -> str | None:
+    qualified = _qualify_repo_call_chain(
+        call_chain=binding_expression,
+        descriptor=descriptor,
+        repo_context=repo_context,
+        local_symbol_bindings=local_symbol_bindings,
+    )
+    if not qualified:
+        return None
+    base_symbol, separator, method_name = qualified.rpartition(".")
+    if separator and method_name.casefold() in TRANSACTION_HINTS and base_symbol:
+        return base_symbol
+    followed_binding = _follow_repo_attribute_binding(
+        qualified_chain=qualified,
+        repo_context=repo_context,
+    )
+    return followed_binding or qualified
+
+
+def _follow_repo_attribute_binding(
+    *,
+    qualified_chain: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    parts = [part for part in str(qualified_chain or "").split(".") if part]
+    if len(parts) < 2:
+        return None
+    for split_index in range(len(parts) - 1, 0, -1):
+        class_symbol = ".".join(parts[:split_index])
+        attribute_parts = parts[split_index:]
+        resolved = _resolve_attribute_chain_for_class_symbol(
+            class_symbol=class_symbol,
+            attribute_parts=attribute_parts,
+            repo_context=repo_context,
+        )
+        if resolved:
+            return resolved
+    return None
+
+
+def _resolve_attribute_chain_for_class_symbol(
+    *,
+    class_symbol: str,
+    attribute_parts: list[str],
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    current_symbol = str(class_symbol or "").strip()
+    if not current_symbol or not attribute_parts:
+        return None
+    for index, attribute_name in enumerate(attribute_parts):
+        is_last = index == len(attribute_parts) - 1
+        resolved_binding = _resolve_class_attribute_binding(
+            class_symbol=current_symbol,
+            attribute_name=attribute_name,
+            repo_context=repo_context,
+        )
+        if resolved_binding:
+            current_symbol = resolved_binding
+            continue
+        return f"{current_symbol}.{attribute_name}" if is_last else None
+    return current_symbol
+
+
+def _resolve_class_attribute_binding(
+    *,
+    class_symbol: str,
+    attribute_name: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    normalized_class_symbol = str(class_symbol or "").strip()
+    normalized_attribute = str(attribute_name or "").strip()
+    if not normalized_class_symbol or not normalized_attribute:
+        return None
+    direct_binding = repo_context.class_attribute_bindings_by_class_symbol.get(normalized_class_symbol, {}).get(normalized_attribute)
+    if direct_binding:
+        return direct_binding
+    for base_symbol in _transitive_base_symbols(
+        class_symbol=normalized_class_symbol,
+        repo_context=repo_context,
+    ):
+        base_binding = repo_context.class_attribute_bindings_by_class_symbol.get(base_symbol, {}).get(normalized_attribute)
+        if base_binding:
+            return base_binding
+    descendant_bindings = _dedupe_preserve_order(
+        [
+            binding
+            for descendant_symbol in _transitive_descendant_symbols(
+                class_symbol=normalized_class_symbol,
+                repo_context=repo_context,
+            )
+            for binding in [_resolve_attribute_binding_in_lineage(
+                class_symbol=descendant_symbol,
+                attribute_name=normalized_attribute,
+                repo_context=repo_context,
+            )]
+            if binding
+        ]
+    )
+    if len(descendant_bindings) == 1:
+        return descendant_bindings[0]
+    return None
+
+
+def _resolve_attribute_binding_in_lineage(
+    *,
+    class_symbol: str,
+    attribute_name: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    direct_binding = repo_context.class_attribute_bindings_by_class_symbol.get(class_symbol, {}).get(attribute_name)
+    if direct_binding:
+        return direct_binding
+    for base_symbol in _transitive_base_symbols(class_symbol=class_symbol, repo_context=repo_context):
+        inherited_binding = repo_context.class_attribute_bindings_by_class_symbol.get(base_symbol, {}).get(attribute_name)
+        if inherited_binding:
+            return inherited_binding
+    return None
+
+
+def _resolve_method_key_with_hierarchy(
+    *,
+    class_symbol: str,
+    method_name: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    direct_match = repo_context.method_key_by_symbol.get((class_symbol, method_name))
+    if direct_match is not None and class_symbol not in repo_context.interface_like_symbols:
+        return direct_match
+    for base_symbol in _transitive_base_symbols(class_symbol=class_symbol, repo_context=repo_context):
+        inherited_match = repo_context.method_key_by_symbol.get((base_symbol, method_name))
+        if inherited_match is not None:
+            return inherited_match
+    descendant_matches = _dedupe_preserve_order(
+        [
+            match
+            for descendant_symbol in _transitive_descendant_symbols(
+                class_symbol=class_symbol,
+                repo_context=repo_context,
+            )
+            for match in [_resolve_method_key_in_lineage(
+                class_symbol=descendant_symbol,
+                method_name=method_name,
+                repo_context=repo_context,
+            )]
+            if match is not None
+        ]
+    )
+    if len(descendant_matches) == 1:
+        return descendant_matches[0]
+    if direct_match is not None:
+        return direct_match
+    return None
+
+
+def _resolve_method_key_in_lineage(
+    *,
+    class_symbol: str,
+    method_name: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    direct_match = repo_context.method_key_by_symbol.get((class_symbol, method_name))
+    if direct_match is not None:
+        return direct_match
+    for base_symbol in _transitive_base_symbols(class_symbol=class_symbol, repo_context=repo_context):
+        inherited_match = repo_context.method_key_by_symbol.get((base_symbol, method_name))
+        if inherited_match is not None:
+            return inherited_match
+    return None
+
+
+def _transitive_base_symbols(
+    *,
+    class_symbol: str,
+    repo_context: _PythonRepoContext,
+) -> list[str]:
+    ordered: list[str] = []
+    pending = list(repo_context.class_base_symbols_by_symbol.get(class_symbol, []))
+    seen: set[str] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+        pending.extend(repo_context.class_base_symbols_by_symbol.get(candidate, []))
+    return ordered
+
+
+def _transitive_descendant_symbols(
+    *,
+    class_symbol: str,
+    repo_context: _PythonRepoContext,
+) -> list[str]:
+    ordered: list[str] = []
+    pending = list(repo_context.subclass_symbols_by_base_symbol.get(class_symbol, []))
+    seen: set[str] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+        pending.extend(repo_context.subclass_symbols_by_base_symbol.get(candidate, []))
+    return ordered
+
+
+def _resolve_repo_callee_key(*, call_chain: str, repo_context: _PythonRepoContext) -> str | None:
+    normalized = str(call_chain or "").strip()
+    if not normalized:
+        return None
+    direct_match = repo_context.function_key_by_symbol.get(normalized)
+    if direct_match is not None:
+        direct_descriptor = repo_context.descriptors_by_key.get(direct_match)
+        if direct_descriptor is None or direct_descriptor.class_symbol not in repo_context.interface_like_symbols:
+            return direct_match
+    base_symbol, separator, method_name = normalized.rpartition(".")
+    if separator and base_symbol:
+        return _resolve_method_key_with_hierarchy(
+            class_symbol=base_symbol,
+            method_name=method_name,
+            repo_context=repo_context,
+        )
+    return None
+
+
+def _display_call_chain(call_chain: str) -> str:
+    return _display_symbol(call_chain)
+
+
+def _display_adapter_symbol(symbol: str) -> str:
+    normalized = str(symbol or "").strip()
+    if not normalized:
+        return ""
+    return normalized.rsplit(".", 1)[-1]
+
+
+def _display_symbol(symbol: str) -> str:
+    normalized = str(symbol or "").strip()
+    if not normalized:
+        return ""
+    parts = [part for part in normalized.split(".") if part]
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return parts[0]
+
+
+def _adapter_symbols_from_call_chain(
+    *,
+    call_chain: str,
+    adapter_hints: tuple[str, ...],
+    repo_context: _PythonRepoContext | None = None,
+) -> list[str]:
+    base_chain, separator, method_name = call_chain.rpartition(".")
+    if not separator or not base_chain:
+        return []
+    descriptor = f"{base_chain}.{method_name}".casefold()
+    if not any(hint in descriptor for hint in adapter_hints):
+        return []
+    candidate_symbols = [base_chain]
+    if repo_context is not None:
+        concrete_symbol = _preferred_concrete_runtime_symbol(
+            class_symbol=base_chain,
+            repo_context=repo_context,
+        )
+        if concrete_symbol:
+            candidate_symbols.append(concrete_symbol)
+    return _dedupe_preserve_order(candidate_symbols)
+
+
+def _preferred_concrete_runtime_symbol(
+    *,
+    class_symbol: str,
+    repo_context: _PythonRepoContext,
+) -> str | None:
+    descendants = _transitive_descendant_symbols(class_symbol=class_symbol, repo_context=repo_context)
+    if not descendants:
+        return None
+    leaf_descendants = [
+        descendant
+        for descendant in descendants
+        if not repo_context.subclass_symbols_by_base_symbol.get(descendant)
+    ]
+    candidate_symbols = leaf_descendants or descendants
+    unique_candidates = _dedupe_preserve_order(candidate_symbols)
+    if len(unique_candidates) == 1:
+        return unique_candidates[0]
+    return None
+
+
+def _build_python_static_analyses(
+    tree: ast.AST,
+) -> tuple[dict[str, _PythonFunctionDescriptor], dict[str, _PythonFunctionStaticAnalysis]]:
+    descriptors, class_attribute_bindings = _collect_python_function_descriptors(tree=tree)
+    analysis_cache: dict[str, _PythonFunctionStaticAnalysis] = {}
+    stack: set[str] = set()
+
+    def analyze(section_path: str) -> _PythonFunctionStaticAnalysis:
+        cached = analysis_cache.get(section_path)
+        if cached is not None:
+            return cached
+        if section_path in stack:
+            return _PythonFunctionStaticAnalysis(section_path=section_path)
+        stack.add(section_path)
+        descriptor = descriptors[section_path]
+        analysis = _analyze_python_function_descriptor(
+            descriptor=descriptor,
+            descriptors=descriptors,
+            class_attribute_bindings=class_attribute_bindings,
+            resolve_analysis=analyze,
+        )
+        analysis_cache[section_path] = analysis
+        stack.remove(section_path)
+        return analysis
+
+    for section_path in descriptors:
+        analyze(section_path)
+    return descriptors, analysis_cache
+
+
+def _collect_python_function_descriptors(
+    *,
+    tree: ast.AST,
+) -> tuple[dict[str, _PythonFunctionDescriptor], dict[tuple[str, ...], dict[str, str]]]:
+    descriptors: dict[str, _PythonFunctionDescriptor] = {}
+    class_attribute_bindings: dict[tuple[str, ...], dict[str, str]] = {}
+    function_paths_by_name: dict[str, list[str]] = {}
+    method_paths_by_class: dict[tuple[tuple[str, ...], str], str] = {}
+
+    def visit(node: ast.AST, *, class_stack: list[str]) -> None:
+        if isinstance(node, ast.ClassDef):
+            next_stack = [*class_stack, node.name]
+            class_attribute_bindings[tuple(next_stack)] = _extract_class_attribute_bindings(node=node)
+            for child in node.body:
+                visit(child, class_stack=next_stack)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            section_path = ".".join([*class_stack, node.name]) or node.name
+            descriptor = _PythonFunctionDescriptor(
+                node=node,
+                class_stack=list(class_stack),
+                section_path=section_path,
+                decorator_labels=_decorator_labels(node=node),
+                docstring=ast.get_docstring(node) or "",
+            )
+            descriptors[section_path] = descriptor
+            function_paths_by_name.setdefault(node.name, []).append(section_path)
+            if class_stack:
+                method_paths_by_class[(tuple(class_stack), node.name)] = section_path
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, class_stack=class_stack)
+
+    for child in getattr(tree, "body", []):
+        visit(child, class_stack=[])
+
+    for descriptor in descriptors.values():
+        direct_call_chains: list[str] = []
+        local_callee_keys: list[str] = []
+        string_literals: list[str] = []
+        with_context_calls: list[str] = []
+        loop_contexts: list[str] = []
+        for child in ast.walk(descriptor.node):
+            if isinstance(child, ast.Call):
+                call_chain = _call_chain_from_expr(expr=child.func)
+                if call_chain:
+                    direct_call_chains.append(call_chain)
+                    resolved = _resolve_local_callee(
+                        function_name=call_chain,
+                        class_stack=descriptor.class_stack,
+                        function_paths_by_name=function_paths_by_name,
+                        method_paths_by_class=method_paths_by_class,
+                    )
+                    if resolved is None:
+                        resolved = _resolve_local_callee(
+                            function_name=_normalize_call_chain(
+                                call_chain=call_chain,
+                                class_stack=descriptor.class_stack,
+                                class_attribute_bindings=class_attribute_bindings,
+                            ),
+                            class_stack=descriptor.class_stack,
+                            function_paths_by_name=function_paths_by_name,
+                            method_paths_by_class=method_paths_by_class,
+                        )
+                    if resolved is not None and resolved != descriptor.section_path:
+                        local_callee_keys.append(resolved)
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    context_chain = _call_chain_from_context_expr(expr=item.context_expr)
+                    if context_chain:
+                        with_context_calls.append(context_chain)
+            elif isinstance(child, (ast.For, ast.AsyncFor)):
+                loop_contexts.append(_loop_context_text(node=child))
+            elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+                string_literals.append(child.value)
+        descriptor.direct_call_chains = _dedupe_preserve_order(direct_call_chains)
+        descriptor.local_callee_keys = _dedupe_preserve_order(local_callee_keys)
+        descriptor.string_literals = _dedupe_preserve_order(string_literals)
+        descriptor.with_context_calls = _dedupe_preserve_order(with_context_calls)
+        descriptor.loop_contexts = _dedupe_preserve_order(loop_contexts)
+    return descriptors, class_attribute_bindings
+
+
+def _extract_class_attribute_bindings(*, node: ast.ClassDef) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for child in node.body:
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) or child.name != "__init__":
+            continue
+        for inner in ast.walk(child):
+            if isinstance(inner, ast.Assign):
+                binding = _self_attribute_binding(assign_targets=inner.targets, value=inner.value)
+                if binding is not None:
+                    attribute_name, binding_label = binding
+                    bindings[attribute_name] = binding_label
+            elif isinstance(inner, ast.AnnAssign):
+                binding = _self_attribute_binding(assign_targets=[inner.target], value=inner.value)
+                if binding is not None:
+                    attribute_name, binding_label = binding
+                    bindings[attribute_name] = binding_label
+    return bindings
+
+
+def _self_attribute_binding(*, assign_targets: list[ast.expr], value: ast.expr | None) -> tuple[str, str] | None:
+    for target in assign_targets:
+        if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name) or target.value.id != "self":
+            continue
+        attribute_name = str(target.attr or "").strip()
+        if not attribute_name:
+            continue
+        binding_label = _constructor_binding_label(value=value)
+        if binding_label:
+            return attribute_name, binding_label
+    return None
+
+
+def _constructor_binding_label(*, value: ast.expr | None) -> str | None:
+    if isinstance(value, ast.Call):
+        call_label = _call_chain_from_expr(expr=value.func)
+        if call_label:
+            return call_label.rsplit(".", 1)[-1]
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return _call_chain_from_expr(expr=value)
+    return None
+
+
+def _resolve_local_callee(
+    *,
+    function_name: str,
+    class_stack: list[str],
+    function_paths_by_name: dict[str, list[str]],
+    method_paths_by_class: dict[tuple[tuple[str, ...], str], str],
+) -> str | None:
+    normalized_name = str(function_name or "").strip()
+    if not normalized_name:
+        return None
+    if "." in normalized_name:
+        base_name, _, method_name = normalized_name.rpartition(".")
+        if base_name in {"self", "cls"} and class_stack:
+            return method_paths_by_class.get((tuple(class_stack), method_name))
+        for (candidate_class_stack, candidate_method), section_path in method_paths_by_class.items():
+            if candidate_method == method_name and candidate_class_stack and candidate_class_stack[-1] == base_name:
+                return section_path
+        return None
+    candidates = function_paths_by_name.get(normalized_name, [])
+    if not candidates:
+        return None
+    if class_stack:
+        class_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.startswith(".".join(class_stack) + ".")
+        ]
+        if class_candidates:
+            return class_candidates[0]
+    return candidates[0]
+
+
+def _call_chain_from_context_expr(*, expr: ast.expr) -> str:
+    if isinstance(expr, ast.Call):
+        return _call_chain_from_expr(expr=expr.func)
+    return _call_chain_from_expr(expr=expr)
+
+
+def _call_chain_from_expr(*, expr: ast.expr) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _call_chain_from_expr(expr=expr.value)
+        return f"{base}.{expr.attr}" if base else expr.attr
+    if isinstance(expr, ast.Call):
+        return _call_chain_from_expr(expr=expr.func)
+    if isinstance(expr, ast.Subscript):
+        return _call_chain_from_expr(expr=expr.value)
+    return ""
+
+
+def _loop_context_text(*, node: ast.For | ast.AsyncFor) -> str:
+    target = _expr_text(expr=node.target)
+    iterator = _expr_text(expr=node.iter)
+    return f"{target} in {iterator}".strip()
+
+
+def _expr_text(*, expr: ast.AST) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _expr_text(expr=expr.value)
+        return f"{base}.{expr.attr}" if base else expr.attr
+    if isinstance(expr, ast.Call):
+        call_target = _expr_text(expr=expr.func)
+        return f"{call_target}()"
+    if isinstance(expr, ast.Constant):
+        return str(expr.value)
+    return ""
+
+
+def _analyze_python_function_descriptor(
+    *,
+    descriptor: _PythonFunctionDescriptor,
+    descriptors: dict[str, _PythonFunctionDescriptor],
+    class_attribute_bindings: dict[tuple[str, ...], dict[str, str]],
+    resolve_analysis: Callable[[str], _PythonFunctionStaticAnalysis],
+) -> _PythonFunctionStaticAnalysis:
+    normalized_calls = _dedupe_preserve_order(
+        [
+            _normalize_call_chain(
+                call_chain=call_chain,
+                class_stack=descriptor.class_stack,
+                class_attribute_bindings=class_attribute_bindings,
+            )
+            for call_chain in descriptor.direct_call_chains
+            if str(call_chain).strip()
+        ]
+    )
+    normalized_contexts = _dedupe_preserve_order(
+        [
+            _normalize_call_chain(
+                call_chain=context_call,
+                class_stack=descriptor.class_stack,
+                class_attribute_bindings=class_attribute_bindings,
+            )
+            for context_call in descriptor.with_context_calls
+            if str(context_call).strip()
+        ]
+    )
+    repository_adapters = _dedupe_preserve_order(
+        [
+            adapter
+            for call_chain in normalized_calls
+            for adapter in _adapter_labels_from_call_chain(call_chain=call_chain, adapter_hints=REPOSITORY_ADAPTER_HINTS)
+        ]
+    )
+    driver_adapters = _dedupe_preserve_order(
+        [
+            adapter
+            for call_chain in [*normalized_calls, *normalized_contexts]
+            for adapter in _adapter_labels_from_call_chain(call_chain=call_chain, adapter_hints=DRIVER_ADAPTER_HINTS)
+        ]
+    )
+    db_write_api_calls = _dedupe_preserve_order(
+        [
+            call_chain
+            for call_chain in normalized_calls
+            if _call_chain_is_db_write(call_chain=call_chain)
+        ]
+    )
+    transaction_boundaries = _dedupe_preserve_order(
+        [
+            boundary
+            for boundary in [*normalized_calls, *normalized_contexts]
+            if _contains_any(text=boundary.casefold(), hints=TRANSACTION_HINTS)
+        ]
+    )
+    retry_paths = _dedupe_preserve_order(
+        [
+            retry_path
+            for retry_path in [*descriptor.decorator_labels, *normalized_calls]
+            if _contains_any(text=retry_path.casefold(), hints=RETRY_HINTS)
+        ]
+    )
+    batch_paths = _dedupe_preserve_order(
+        [
+            *descriptor.loop_contexts,
+            *[
+                path
+                for path in normalized_calls
+                if _contains_any(text=path.casefold(), hints=BATCH_HINTS)
+            ],
+        ]
+    )
+    operation_types, schema_targets, backends = _infer_persistence_shape(
+        call_chains=normalized_calls,
+        string_literals=descriptor.string_literals,
+        subject_key_hint=descriptor.section_path,
+    )
+    static_paths = _dedupe_preserve_order(
+        [f"{descriptor.section_path} -> {call_chain}" for call_chain in db_write_api_calls]
+    )
+
+    for callee_key in descriptor.local_callee_keys:
+        callee = descriptors.get(callee_key)
+        if callee is None:
+            continue
+        callee_analysis = resolve_analysis(callee_key)
+        repository_adapters = _dedupe_preserve_order([*repository_adapters, *callee_analysis.repository_adapters])
+        driver_adapters = _dedupe_preserve_order([*driver_adapters, *callee_analysis.driver_adapters])
+        transaction_boundaries = _dedupe_preserve_order([*transaction_boundaries, *callee_analysis.transaction_boundaries])
+        retry_paths = _dedupe_preserve_order([*retry_paths, *callee_analysis.retry_paths])
+        batch_paths = _dedupe_preserve_order([*batch_paths, *callee_analysis.batch_paths])
+        db_write_api_calls = _dedupe_preserve_order([*db_write_api_calls, *callee_analysis.db_write_api_calls])
+        operation_types = _dedupe_preserve_order([*operation_types, *callee_analysis.persistence_operation_types])
+        schema_targets = _dedupe_preserve_order([*schema_targets, *callee_analysis.persistence_schema_targets])
+        backends = _dedupe_preserve_order([*backends, *callee_analysis.persistence_backends])
+        static_paths = _dedupe_preserve_order(
+            [
+                *static_paths,
+                f"{descriptor.section_path} -> {callee_key}",
+                *[
+                    f"{descriptor.section_path} -> {path}"
+                    if not path.startswith(f"{descriptor.section_path} ->")
+                    else path
+                    for path in callee_analysis.static_call_graph_paths
+                ],
+            ]
+        )
+
+    return _PythonFunctionStaticAnalysis(
+        section_path=descriptor.section_path,
+        static_call_graph_paths=static_paths,
+        repository_adapters=repository_adapters,
+        driver_adapters=driver_adapters,
+        transaction_boundaries=transaction_boundaries,
+        retry_paths=retry_paths,
+        batch_paths=batch_paths,
+        db_write_api_calls=db_write_api_calls,
+        persistence_operation_types=operation_types,
+        persistence_schema_targets=schema_targets,
+        persistence_backends=backends,
+    )
+
+
+def _normalize_call_chain(
+    *,
+    call_chain: str,
+    class_stack: list[str],
+    class_attribute_bindings: dict[tuple[str, ...], dict[str, str]],
+) -> str:
+    normalized = str(call_chain or "").strip()
+    if not normalized:
+        return ""
+    if not class_stack or not normalized.startswith("self."):
+        return normalized
+    binding_map = class_attribute_bindings.get(tuple(class_stack), {})
+    _, _, remainder = normalized.partition("self.")
+    attribute_name, separator, tail = remainder.partition(".")
+    binding_label = binding_map.get(attribute_name)
+    if not binding_label:
+        return normalized
+    if not separator:
+        return binding_label
+    return f"{binding_label}.{tail}"
+
+
+def _adapter_labels_from_call_chain(*, call_chain: str, adapter_hints: tuple[str, ...]) -> list[str]:
+    base_chain, separator, method_name = call_chain.rpartition(".")
+    if not separator or not base_chain:
+        return []
+    descriptor = f"{base_chain}.{method_name}".casefold()
+    if not any(hint in descriptor for hint in adapter_hints):
+        return []
+    return [base_chain]
+
+
+def _call_chain_is_db_write(*, call_chain: str) -> bool:
+    method_name = call_chain.rsplit(".", 1)[-1].casefold()
+    return method_name in DB_WRITE_CALL_HINTS
+
+
+def _infer_persistence_shape(
+    *,
+    call_chains: list[str],
+    string_literals: list[str],
+    subject_key_hint: str,
+) -> tuple[list[str], list[str], list[str]]:
+    operation_types: list[str] = []
+    schema_targets: list[str] = []
+    backends: list[str] = []
+    descriptor = " ".join([*call_chains, *string_literals, subject_key_hint]).casefold()
+
+    if any(token in descriptor for token in ("neo4j", "execute_query", "execute_write", "write_transaction", "session", "tx.run", "merge (", "create (")):
+        backends.append("neo4j")
+    elif any(token in descriptor for token in ("repo", "repository", "adapter")):
+        backends.append("repository")
+
+    for call_chain in call_chains:
+        normalized = call_chain.casefold()
+        if normalized.endswith(("save", "persist", "upsert", "merge")):
+            operation_types.append("repository_upsert")
+        if normalized.endswith(("create_relationship", "merge_relationship")):
+            operation_types.append("repository_relationship_write")
+        if normalized.endswith(("execute_query", "run", "execute_write", "write_transaction")):
+            operation_types.append("neo4j_query_write")
+
+    for literal in string_literals:
+        normalized = str(literal or "")
+        upper = normalized.upper()
+        if "MERGE" in upper and ")-[" in upper or "MERGE" in upper and "]-(" in upper:
+            operation_types.append("neo4j_merge_relationship")
+        if "CREATE" in upper and (")-[" in upper or "]-(" in upper):
+            operation_types.append("neo4j_create_relationship")
+        if "MERGE" in upper and "(" in upper:
+            operation_types.append("neo4j_merge_node")
+        if "CREATE" in upper and "(" in upper:
+            operation_types.append("neo4j_create_node")
+        if "SET " in upper:
+            operation_types.append("neo4j_set_properties")
+        if "DELETE " in upper:
+            operation_types.append("neo4j_delete")
+        for label in re.findall(r"\(\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", normalized):
+            schema_targets.append(f"Node:{label}")
+        for rel_type in re.findall(r"\[\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Z_][A-Z0-9_]*)", normalized):
+            schema_targets.append(f"Relationship:{rel_type}")
+
+    if any(token in descriptor for token in ("history", "historic", "version", "audit_trail")):
+        owner = _slugify(subject_key_hint.split(".", 1)[0]) or "artifact"
+        schema_targets.append(f"History:{owner.title().replace('_', '')}")
+        operation_types.append("history_append")
+
+    return (
+        _dedupe_preserve_order(operation_types),
+        _dedupe_preserve_order(schema_targets),
+        _dedupe_preserve_order(backends),
+    )
+
+
+def _build_schema_catalog(*, documents: list[CollectedDocument]) -> _SchemaCatalog | None:
+    metamodel_documents = [document for document in documents if document.source_type == "metamodel"]
+    if not metamodel_documents:
+        return None
+    catalog = _SchemaCatalog()
+    for document in metamodel_documents:
+        try:
+            rows = json.loads(document.body)
+        except ValueError:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            entity_kind = str(row.get("entity_kind") or "").strip().casefold()
+            if entity_kind == "metaclass":
+                metaclass_name = str(row.get("metaclass_name") or row.get("name") or "").strip()
+                if metaclass_name:
+                    catalog.allowed_node_labels.add(metaclass_name)
+                for relation_type in _string_list(row.get("outbound_relation_types")):
+                    catalog.allowed_relationship_types.add(relation_type)
+            elif entity_kind == "label_summary":
+                label = str(row.get("label") or "").strip()
+                if label:
+                    catalog.observed_node_labels.add(label)
+            elif entity_kind == "relationship_summary":
+                relation_type = str(row.get("relation_type") or "").strip()
+                if relation_type:
+                    catalog.observed_relationship_types.add(relation_type)
+    return catalog
+
+
+def _schema_validation_metadata(
+    *,
+    schema_targets: list[str],
+    schema_catalog: _SchemaCatalog | None,
+) -> dict[str, object]:
+    if schema_catalog is None or not schema_targets:
+        return {}
+    validated_targets: list[str] = []
+    observed_only_targets: list[str] = []
+    unconfirmed_targets: list[str] = []
+    for target in schema_targets:
+        normalized_target = str(target or "").strip()
+        if not normalized_target or ":" not in normalized_target:
+            continue
+        target_kind, _, target_name = normalized_target.partition(":")
+        if _schema_target_confirmed(target_kind=target_kind, target_name=target_name, schema_catalog=schema_catalog):
+            validated_targets.append(normalized_target)
+            continue
+        if _schema_target_observed(target_kind=target_kind, target_name=target_name, schema_catalog=schema_catalog):
+            observed_only_targets.append(normalized_target)
+            continue
+        unconfirmed_targets.append(normalized_target)
+    status = "unconfirmed"
+    if validated_targets and not observed_only_targets and not unconfirmed_targets:
+        status = "ssot_confirmed"
+    elif validated_targets and (observed_only_targets or unconfirmed_targets):
+        status = "partially_confirmed"
+    elif observed_only_targets and not unconfirmed_targets:
+        status = "observed_only"
+    elif observed_only_targets and unconfirmed_targets:
+        status = "partially_observed"
+    return {
+        "schema_validated_targets": _dedupe_preserve_order(validated_targets),
+        "schema_observed_only_targets": _dedupe_preserve_order(observed_only_targets),
+        "schema_unconfirmed_targets": _dedupe_preserve_order(unconfirmed_targets),
+        "schema_validation_status": status,
+    }
+
+
+def _schema_target_confirmed(
+    *,
+    target_kind: str,
+    target_name: str,
+    schema_catalog: _SchemaCatalog,
+) -> bool:
+    normalized_kind = str(target_kind or "").strip().casefold()
+    normalized_target = str(target_name or "").strip()
+    if not normalized_target:
+        return False
+    if normalized_kind == "node":
+        return normalized_target in schema_catalog.allowed_node_labels
+    if normalized_kind == "relationship":
+        return normalized_target in schema_catalog.allowed_relationship_types
+    if normalized_kind == "history":
+        return normalized_target in schema_catalog.allowed_node_labels
+    return False
+
+
+def _schema_target_observed(
+    *,
+    target_kind: str,
+    target_name: str,
+    schema_catalog: _SchemaCatalog,
+) -> bool:
+    normalized_kind = str(target_kind or "").strip().casefold()
+    normalized_target = str(target_name or "").strip()
+    if not normalized_target:
+        return False
+    if normalized_kind == "node":
+        return normalized_target in schema_catalog.observed_node_labels
+    if normalized_kind == "relationship":
+        return normalized_target in schema_catalog.observed_relationship_types
+    if normalized_kind == "history":
+        return normalized_target in schema_catalog.observed_node_labels
+    return False
 
 
 def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedClaimRecord]:
@@ -690,7 +2799,15 @@ def _build_claim_record(
     predicate: str,
     section_path: str,
 ) -> ExtractedClaimRecord:
-    normalized_value = _normalize_value(line_text)
+    normalized_value = _normalize_claim_value(matched_text=line_text, predicate=predicate)
+    structured_metadata = _claim_structure_metadata(
+        subject_key=subject_key,
+        predicate=predicate,
+        normalized_value=normalized_value,
+        matched_text=line_text,
+        section_path=section_path,
+        document=document,
+    )
     location = AuditLocation(
         snapshot_id=document.snapshot.snapshot_id,
         source_type=document.source_type,
@@ -726,6 +2843,7 @@ def _build_claim_record(
             "path_hint": document.path_hint,
             "title": document.title,
             "matched_text": line_text,
+            **structured_metadata,
             "evidence_anchor_kind": location.position.anchor_kind if location.position is not None else None,
             "evidence_anchor_value": location.position.anchor_value if location.position is not None else None,
             "evidence_section_path": location.position.section_path if location.position is not None else None,
@@ -764,6 +2882,15 @@ def _build_metamodel_claim_record(
         ),
         metadata={"matched_text": matched_text},
     )
+    normalized = _normalize_claim_value(matched_text=normalized_value, predicate=predicate)
+    structured_metadata = _claim_structure_metadata(
+        subject_key=subject_key,
+        predicate=predicate,
+        normalized_value=normalized,
+        matched_text=matched_text,
+        section_path="current_dump",
+        document=document,
+    )
     claim = AuditClaimEntry(
         source_snapshot_id=document.snapshot.snapshot_id,
         source_type="metamodel",
@@ -771,16 +2898,17 @@ def _build_metamodel_claim_record(
         subject_kind="process",
         subject_key=subject_key,
         predicate=predicate,
-        normalized_value=_normalize_value(normalized_value),
+        normalized_value=normalized,
         scope_kind="global",
         scope_key="FINAI",
         confidence=0.92,
-        fingerprint=f"{subject_key}|{predicate}|{_normalize_value(normalized_value)}|FINAI",
+        fingerprint=f"{subject_key}|{predicate}|{normalized}|FINAI",
         evidence_location_ids=[location.location_id],
         metadata={
             "title": document.title,
             "matched_text": matched_text,
             "path_hint": document.path_hint,
+            **structured_metadata,
             "evidence_anchor_kind": location.position.anchor_kind if location.position is not None else None,
             "evidence_anchor_value": location.position.anchor_value if location.position is not None else None,
             "evidence_section_path": location.position.section_path if location.position is not None else None,
@@ -827,13 +2955,16 @@ def _extract_function_claim_records(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     class_stack: list[str],
     lines: list[str],
+    function_analysis: _PythonFunctionStaticAnalysis | None = None,
+    descriptor: _PythonFunctionDescriptor | None = None,
+    schema_catalog: _SchemaCatalog | None = None,
 ) -> list[ExtractedClaimRecord]:
     line_start = int(getattr(node, "lineno", 1))
     line_end = int(getattr(node, "end_lineno", line_start))
     section_path = ".".join([*class_stack, node.name]) or node.name
     snippet = "\n".join(lines[max(0, line_start - 1) : line_end]).strip()
-    decorator_labels = _decorator_labels(node=node)
-    docstring = ast.get_docstring(node) or ""
+    decorator_labels = descriptor.decorator_labels if descriptor is not None else _decorator_labels(node=node)
+    docstring = descriptor.docstring if descriptor is not None else (ast.get_docstring(node) or "")
     hint_texts = [
         node.name,
         *class_stack,
@@ -870,6 +3001,7 @@ def _extract_function_claim_records(
                     "ast_extracted": True,
                     "class_stack": class_stack,
                     "decorators": decorator_labels,
+                    **_python_function_analysis_metadata(function_analysis=function_analysis, schema_catalog=schema_catalog),
                 },
             )
         )
@@ -900,10 +3032,42 @@ def _extract_function_claim_records(
                     "class_stack": class_stack,
                     "decorators": decorator_labels,
                     "semantic_subclaim": True,
+                    **_python_function_analysis_metadata(function_analysis=function_analysis, schema_catalog=schema_catalog),
                 },
             )
         )
     return records
+
+
+def _python_function_analysis_metadata(
+    *,
+    function_analysis: _PythonFunctionStaticAnalysis | None,
+    schema_catalog: _SchemaCatalog | None = None,
+) -> dict[str, object]:
+    if function_analysis is None:
+        return {}
+    schema_validation = _schema_validation_metadata(
+        schema_targets=function_analysis.persistence_schema_targets,
+        schema_catalog=schema_catalog,
+    )
+    return {
+        "static_call_graph_paths": function_analysis.static_call_graph_paths,
+        "static_call_graph_qualified_paths": function_analysis.static_call_graph_qualified_paths,
+        "repository_adapters": function_analysis.repository_adapters,
+        "repository_adapter_symbols": function_analysis.repository_adapter_symbols,
+        "driver_adapters": function_analysis.driver_adapters,
+        "driver_adapter_symbols": function_analysis.driver_adapter_symbols,
+        "transaction_boundaries": function_analysis.transaction_boundaries,
+        "retry_paths": function_analysis.retry_paths,
+        "batch_paths": function_analysis.batch_paths,
+        "db_write_api_calls": function_analysis.db_write_api_calls,
+        "db_write_api_symbols": function_analysis.db_write_api_symbols,
+        "persistence_operation_types": function_analysis.persistence_operation_types,
+        "persistence_schema_targets": function_analysis.persistence_schema_targets,
+        "persistence_backends": function_analysis.persistence_backends,
+        "constructor_injection_bindings": function_analysis.constructor_injection_bindings,
+        **schema_validation,
+    }
 
 
 def _function_claim_predicates(
@@ -1032,7 +3196,15 @@ def _build_structured_claim_record(
         ),
         metadata={"matched_text": matched_text, **metadata},
     )
-    normalized_value = _normalize_value(matched_text)
+    normalized_value = _normalize_claim_value(matched_text=matched_text, predicate=predicate)
+    structured_metadata = _claim_structure_metadata(
+        subject_key=subject_key,
+        predicate=predicate,
+        normalized_value=normalized_value,
+        matched_text=matched_text,
+        section_path=section_path,
+        document=document,
+    )
     claim = AuditClaimEntry(
         source_snapshot_id=document.snapshot.snapshot_id,
         source_type=document.source_type,
@@ -1046,9 +3218,15 @@ def _build_structured_claim_record(
         confidence=confidence,
         fingerprint=f"{subject_key}|{predicate}|{normalized_value}|FINAI",
         evidence_location_ids=[location.location_id],
+        operator=str(structured_metadata.get("claim_operator") or "").strip() or None,
+        constraint=str(structured_metadata.get("claim_constraint") or "").strip() or None,
+        focus_value=str(structured_metadata.get("claim_focus_value") or "").strip() or None,
+        assertion_status=str(structured_metadata.get("assertion_status") or "asserted"),
+        source_authority=str(structured_metadata.get("source_authority") or "heuristic"),
         metadata={
             **metadata,
             "matched_text": matched_text,
+            **structured_metadata,
             "evidence_anchor_kind": location.position.anchor_kind if location.position is not None else None,
             "evidence_anchor_value": location.position.anchor_value if location.position is not None else None,
             "evidence_section_path": location.position.section_path if location.position is not None else None,
@@ -1081,6 +3259,153 @@ def _is_config_document(*, document: CollectedDocument) -> bool:
 def _normalize_value(value: str) -> str:
     compact = " ".join(str(value or "").split())
     return compact[:180]
+
+
+def _normalize_claim_value(*, matched_text: str, predicate: str) -> str:
+    compact = _normalize_value(matched_text)
+    if "]: " in compact and "[" in compact:
+        compact = compact.split("]: ", 1)[1]
+    elif ": " in compact and predicate in compact:
+        compact = compact.split(": ", 1)[1]
+    return compact[:180]
+
+
+def _claim_structure_metadata(
+    *,
+    subject_key: str,
+    predicate: str,
+    normalized_value: str,
+    matched_text: str,
+    section_path: str,
+    document: CollectedDocument,
+) -> dict[str, object]:
+    subject_root, _, subject_property = subject_key.partition(".")
+    focus_value = _claim_focus_value(normalized_value=normalized_value, matched_text=matched_text)
+    operator = _claim_operator(predicate=predicate, focus_value=focus_value)
+    constraint = _claim_constraint(predicate=predicate, focus_value=focus_value)
+    governance_level = _source_governance_level(document=document, predicate=predicate)
+    temporal_status = _source_temporal_status(document=document)
+    assertion_status = _claim_assertion_status(matched_text=matched_text, document=document)
+    return {
+        "claim_subject_root": subject_root or subject_key,
+        "claim_property": subject_property or predicate,
+        "claim_operator": operator,
+        "claim_constraint": constraint,
+        "claim_scope_key": package_scope_key(subject_key),
+        "claim_focus_value": focus_value,
+        "claim_value_kind": _claim_value_kind(predicate=predicate, focus_value=focus_value),
+        "assertion_status": assertion_status,
+        "source_authority": _source_authority_from_governance_level(
+            governance_level=governance_level,
+            temporal_status=temporal_status,
+        ),
+        "claim_section_path": section_path,
+        "source_governance_level": governance_level,
+        "source_temporal_status": temporal_status,
+    }
+
+
+def _claim_focus_value(*, normalized_value: str, matched_text: str) -> str:
+    compact = _normalize_value(normalized_value or matched_text)
+    if "]: " in compact and "[" in compact:
+        return compact.split("]: ", 1)[1]
+    if ": " in compact and len(compact.split(": ", 1)[1]) >= 8:
+        return compact.split(": ", 1)[1]
+    return compact
+
+
+def _claim_operator(*, predicate: str, focus_value: str) -> str:
+    lowered_predicate = predicate.casefold()
+    lowered_value = focus_value.casefold()
+    if any(token in lowered_predicate for token in ("phase_count", "question_count", "label_count")):
+        return "count_equals"
+    if "phase_order" in lowered_predicate:
+        return "order_equals"
+    if "reference" in lowered_predicate:
+        return "references"
+    if any(token in lowered_predicate for token in ("policy", "approval")):
+        return "forbids" if any(token in lowered_value for token in ("no ", "not ", "without ", "ohne ")) else "requires"
+    if any(token in lowered_predicate for token in ("implemented", "documented", "metamodel")):
+        return "describes"
+    return "states"
+
+
+def _claim_constraint(*, predicate: str, focus_value: str) -> str:
+    lowered_predicate = predicate.casefold()
+    if any(token in lowered_predicate for token in ("policy", "approval", "scope_policy")):
+        return focus_value
+    if any(token in lowered_predicate for token in ("lifecycle", "review_status")):
+        return focus_value
+    if any(token in lowered_predicate for token in ("write", "read")):
+        return focus_value
+    return ""
+
+
+def _claim_value_kind(*, predicate: str, focus_value: str) -> str:
+    lowered_predicate = predicate.casefold()
+    if any(token in lowered_predicate for token in ("count", "order")):
+        return "numeric"
+    if any(token in lowered_predicate for token in ("reference", "label_count")):
+        return "reference"
+    if any(token in lowered_predicate for token in ("policy", "lifecycle", "write", "read")):
+        return "constraint"
+    return "text"
+
+
+def _source_governance_level(*, document: CollectedDocument, predicate: str) -> str:
+    descriptor = " ".join(
+        [
+            str(document.title or ""),
+            str(document.path_hint or ""),
+            predicate,
+        ]
+    ).casefold()
+    if document.source_type == "github_file":
+        return "implementation"
+    if any(token in descriptor for token in ("ssot", "target", "reference", "scope-matrix", "run-ssot", "contract")):
+        return "ssot"
+    if any(token in descriptor for token in ("architecture", "policy", "process", "guardrail")):
+        return "governed"
+    if any(token in descriptor for token in ("as_is", "legacy", "deprecated", "historic", "archive")):
+        return "historical"
+    return "working_doc"
+
+
+def _source_temporal_status(*, document: CollectedDocument) -> str:
+    descriptor = " ".join([str(document.title or ""), str(document.path_hint or "")]).casefold()
+    if any(token in descriptor for token in ("as_is", "legacy", "deprecated", "archive", "historic")):
+        return "historical"
+    if any(token in descriptor for token in ("target", "ssot", "reference")):
+        return "target"
+    return "current"
+
+
+def _source_authority_from_governance_level(*, governance_level: str, temporal_status: str) -> str:
+    normalized_governance = str(governance_level or "").strip()
+    normalized_temporal = str(temporal_status or "").strip()
+    if normalized_governance == "ssot":
+        return "ssot"
+    if normalized_governance == "governed":
+        return "governed"
+    if normalized_governance == "implementation":
+        return "implementation"
+    if normalized_governance == "historical" or normalized_temporal == "historical":
+        return "historical"
+    return "working_doc"
+
+
+def _claim_assertion_status(*, matched_text: str, document: CollectedDocument) -> str:
+    normalized = str(matched_text or "").casefold()
+    descriptor = " ".join([str(document.title or ""), str(document.path_hint or ""), normalized]).casefold()
+    if any(token in normalized for token in ("deprecated", "legacy", "historic", "veraltet", "removed", "entfaellt", "entfällt")):
+        return "deprecated"
+    if any(token in normalized for token in ("not ssot", "kein ssot", "nicht ssot")):
+        return "not_ssot"
+    if any(token in descriptor for token in ("secondary only", "sekundaer", "sekundär")):
+        return "secondary_only"
+    if any(token in normalized for token in ("excluded", "ausgeschlossen", "without ", "ohne ", "kein ", "keine ", "not ")) and "not null" not in normalized:
+        return "excluded"
+    return "asserted"
 
 
 def _deduplicate_claim_records(*, records: list[ExtractedClaimRecord]) -> list[ExtractedClaimRecord]:
@@ -1246,6 +3571,18 @@ def _dedupe_pairs(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
             continue
         seen.add(item)
         result.append(item)
+    return result
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in values:
+        normalized = str(item or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
     return result
 
 

@@ -35,6 +35,9 @@ class _ConfluenceAccessContext:
     api_base_url: str
     site_base_url: str
     mode: str
+    resource_id: str | None = None
+    resource_url: str | None = None
+    resource_scopes: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ class ConfluenceUpdatedPage:
     page_url: str
     version_number: int
     response_payload: dict[str, Any]
+    verification_metadata: dict[str, Any]
 
 
 class ConfluenceKnowledgeBaseConnector:
@@ -430,6 +434,16 @@ class ConfluencePageWriteConnector:
             page_url=page_url,
             version_number=result_version,
             response_payload=dict(payload),
+            verification_metadata={
+                "access_mode": access_context.mode,
+                "resource_id": access_context.resource_id,
+                "resource_url": access_context.resource_url,
+                "resource_scopes": list(access_context.resource_scopes or []),
+                "api_base_url": access_context.api_base_url,
+                "site_base_url": access_context.site_base_url,
+                "base_revision_id": str(current_version),
+                "target_page_id": target.page_id,
+            },
         )
 
 
@@ -478,6 +492,13 @@ def _resolve_access_context(
                 api_base_url=f"https://api.atlassian.com/ex/confluence/{cloud_id}",
                 site_base_url=f"{site_url}/wiki",
                 mode="oauth_cloud",
+                resource_id=cloud_id,
+                resource_url=site_url,
+                resource_scopes=sorted(
+                    str(scope or "").strip()
+                    for scope in (resource.get("scopes") or [])
+                    if str(scope or "").strip()
+                ),
             )
     return _ConfluenceAccessContext(
         api_base_url=_resolve_confluence_base_url(settings=settings),
