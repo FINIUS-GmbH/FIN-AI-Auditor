@@ -189,6 +189,7 @@ def detect_cross_document_contradictions(
 
     # Build source type array for cross-source filtering
     source_types = [eligible[vi].claim.source_type for vi in valid_indices]
+    source_type_arr = np.array(source_types)
     n = len(valid_indices)
 
     # Compute similarities in chunks to control memory (chunk rows, full columns)
@@ -203,73 +204,78 @@ def detect_cross_document_contradictions(
             progress_callback(f"Similarity-Vergleich: Chunk {chunk_idx + 1}/{total_chunks} ({row_start}/{n} Vektoren)")
         sim_block = mat_normed[row_start:row_end] @ mat_normed.T  # (chunk, N)
 
-        # Find pairs above threshold
+        # Zero out lower triangle + self to avoid duplicates (only j > global_i)
         for local_i in range(row_end - row_start):
             global_i = row_start + local_i
-            # Only check j > global_i to avoid duplicates
-            start_j = global_i + 1
-            if start_j >= n:
+            sim_block[local_i, :global_i + 1] = 0.0
+
+        # Find ALL above-threshold pairs in this chunk at once (vectorized)
+        pairs = np.argwhere(sim_block >= SIMILARITY_MEDIUM)
+        if len(pairs) == 0:
+            continue
+
+        # Vectorized cross-source filter
+        global_is = pairs[:, 0] + row_start
+        global_js = pairs[:, 1]
+        src_i = source_type_arr[global_is]
+        src_j = source_type_arr[global_js]
+        cross_mask = src_i != src_j
+
+        cross_pairs = pairs[cross_mask]
+        cross_global_is = global_is[cross_mask]
+        cross_global_js = global_js[cross_mask]
+
+        for k in range(len(cross_pairs)):
+            gi = int(cross_global_is[k])
+            gj = int(cross_global_js[k])
+            sim_val = float(sim_block[cross_pairs[k, 0], cross_pairs[k, 1]])
+
+            vi = valid_indices[gi]
+            vj = valid_indices[gj]
+            rec_i = eligible[vi]
+            rec_j = eligible[vj]
+            if rec_i.claim.normalized_value.strip().casefold() == rec_j.claim.normalized_value.strip().casefold():
                 continue
-            sims = sim_block[local_i, start_j:]
 
-            # Find indices above SIMILARITY_MEDIUM
-            above = np.where(sims >= SIMILARITY_MEDIUM)[0]
-            for offset in above:
-                global_j = start_j + int(offset)
-                sim_val = float(sims[offset])
+            # Deduplicate
+            pair_key = frozenset([rec_i.claim.claim_id, rec_j.claim.claim_id])
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
 
-                vi = valid_indices[global_i]
-                vj = valid_indices[global_j]
-                rec_i = eligible[vi]
-                rec_j = eligible[vj]
+            severity = "high" if sim_val >= SIMILARITY_HIGH else "medium"
+            src_label_i = _SOURCE_LABELS.get(rec_i.claim.source_type, rec_i.claim.source_type)
+            src_label_j = _SOURCE_LABELS.get(rec_j.claim.source_type, rec_j.claim.source_type)
+            text_i = str(rec_i.evidence.matched_text or "")[:120]
+            text_j = str(rec_j.evidence.matched_text or "")[:120]
 
-                # Must be from different source types
-                if source_types[global_i] == source_types[global_j]:
-                    continue
-
-                # Must have different normalized values
-                if rec_i.claim.normalized_value.strip().casefold() == rec_j.claim.normalized_value.strip().casefold():
-                    continue
-
-                # Deduplicate
-                pair_key = frozenset([rec_i.claim.claim_id, rec_j.claim.claim_id])
-                if pair_key in seen_pairs:
-                    continue
-                seen_pairs.add(pair_key)
-
-                severity = "high" if sim_val >= SIMILARITY_HIGH else "medium"
-                src_label_i = _SOURCE_LABELS.get(rec_i.claim.source_type, rec_i.claim.source_type)
-                src_label_j = _SOURCE_LABELS.get(rec_j.claim.source_type, rec_j.claim.source_type)
-                text_i = str(rec_i.evidence.matched_text or "")[:120]
-                text_j = str(rec_j.evidence.matched_text or "")[:120]
-
-                finding = AuditFinding(
-                    severity=severity,
-                    category="contradiction",
-                    title=f"Semantischer Widerspruch: {src_label_i} vs. {src_label_j}",
-                    summary=(
-                        f"Zwei inhaltlich verwandte Aussagen ({int(sim_val * 100)}% semantische Aehnlichkeit) "
-                        f"widersprechen sich zwischen {src_label_i} und {src_label_j}.\n\n"
-                        f"{src_label_i}: \u00ab{text_i}\u00bb\n"
-                        f"{src_label_j}: \u00ab{text_j}\u00bb"
-                    ),
-                    recommendation=(
-                        f"Die Aussagen in {src_label_i} und {src_label_j} zum Thema "
-                        f"'{rec_i.claim.subject_key}' muessen konsolidiert werden. "
-                        f"Pruefen welche Quelle die fuehrende ist und die andere anpassen."
-                    ),
-                    canonical_key=f"embedding_contradiction|{rec_i.claim.subject_key}|{rec_j.claim.subject_key}",
-                    locations=[
-                        loc for loc in [rec_i.evidence.location, rec_j.evidence.location] if loc is not None
-                    ],
-                    metadata={
-                        "generated_by": "embedding_contradiction_detector",
-                        "similarity_score": round(sim_val, 3),
-                        "source_types": [rec_i.claim.source_type, rec_j.claim.source_type],
-                        "subject_keys": [rec_i.claim.subject_key, rec_j.claim.subject_key],
-                    },
-                )
-                findings.append(finding)
+            finding = AuditFinding(
+                severity=severity,
+                category="contradiction",
+                title=f"Semantischer Widerspruch: {src_label_i} vs. {src_label_j}",
+                summary=(
+                    f"Zwei inhaltlich verwandte Aussagen ({int(sim_val * 100)}% semantische Aehnlichkeit) "
+                    f"widersprechen sich zwischen {src_label_i} und {src_label_j}.\n\n"
+                    f"{src_label_i}: \u00ab{text_i}\u00bb\n"
+                    f"{src_label_j}: \u00ab{text_j}\u00bb"
+                ),
+                recommendation=(
+                    f"Die Aussagen in {src_label_i} und {src_label_j} zum Thema "
+                    f"'{rec_i.claim.subject_key}' muessen konsolidiert werden. "
+                    f"Pruefen welche Quelle die fuehrende ist und die andere anpassen."
+                ),
+                canonical_key=f"embedding_contradiction|{rec_i.claim.subject_key}|{rec_j.claim.subject_key}",
+                locations=[
+                    loc for loc in [rec_i.evidence.location, rec_j.evidence.location] if loc is not None
+                ],
+                metadata={
+                    "generated_by": "embedding_contradiction_detector",
+                    "similarity_score": round(sim_val, 3),
+                    "source_types": [rec_i.claim.source_type, rec_j.claim.source_type],
+                    "subject_keys": [rec_i.claim.subject_key, rec_j.claim.subject_key],
+                },
+            )
+            findings.append(finding)
 
     logger.info(
         "embedding_contradictions_found",
