@@ -216,6 +216,7 @@ ul,ol{list-style:none}
 .wc{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-xl);margin-bottom:var(--sp-xl);transition:border-color var(--tr-base)}
 .wc:hover{border-color:var(--border-default)}
 .wc-badges{display:flex;align-items:center;gap:var(--sp-sm);flex-wrap:wrap;margin-bottom:var(--sp-md)}
+.wc-source-icons{display:flex;align-items:center;gap:var(--sp-xs);margin-left:auto;padding-left:var(--sp-sm);border-left:1px solid var(--border-subtle)}
 .wc-title{font-size:var(--fs-lg);font-weight:700;color:var(--text-primary);line-height:1.3;margin-bottom:var(--sp-xs)}
 .wc-scope{font-size:var(--fs-base);color:var(--text-secondary);line-height:1.55;margin-bottom:var(--sp-xl)}
 

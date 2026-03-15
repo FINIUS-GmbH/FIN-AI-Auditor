@@ -604,6 +604,8 @@ export default function App(): ReactNode {
                                 recommendation={item.f.recommendation}
                                 proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
                                 proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
+                                metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
+                                metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
                                 elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
                                 feedback={draft(item.f.finding_id)} onFeedback={v => setDraft(item.f.finding_id, v)}
                                 busy={commentBusy}
@@ -711,14 +713,26 @@ function WorkCard(props: {
   feedback: string; onFeedback: (v: string) => void; busy: boolean;
   onAccept: () => void; onReject: () => void; onSpecify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
+  metaSourceType?: string; metaSourceTypes?: string[];
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
+  // Extract unique source types from all locations + metadata for header icons
+  const srcTypes = [...new Set([
+    ...props.elements.flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean),
+    ...(Array.isArray(props.metaSourceTypes) ? props.metaSourceTypes : []),
+    ...(props.metaSourceType ? [props.metaSourceType] : []),
+  ])];
   return (
     <article className="wc">
-      {/* 1. Typ-Badge + Schweregrad */}
+      {/* 1. Typ-Badge + Schweregrad + Source Icons */}
       <div className="wc-badges">
         <span className="badge badge-cat">{de(props.category)}</span>
         <span className={`badge badge-${props.severity}`}>{de(props.severity)}</span>
+        {srcTypes.length > 0 && (
+          <span className="wc-source-icons">
+            {srcTypes.map(st => <SrcBadge key={st} t={st} />)}
+          </span>
+        )}
       </div>
 
       {/* 2. Kurzbeschreibung: Was ist das Problem? */}

@@ -27,6 +27,8 @@ _TEXT_FILE_SUFFIXES: tuple[str, ...] = (
     ".ini",
     ".cfg",
     ".sh",
+    ".puml",
+    ".plantuml",
 )
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -50,8 +52,8 @@ class GitHubSnapshotRequest:
     git_ref: str
     repo_url: str | None = None
     local_repo_path: str | None = None
-    max_files: int = 400
-    max_chars_per_file: int = 16000
+    max_files: int | None = None
+    max_chars_per_file: int | None = None
     previous_snapshots: list[AuditSourceSnapshot] | None = None
     document_cache_lookup: Callable[[str, str, str], CachedCollectedDocument | None] | None = None
 
@@ -65,6 +67,7 @@ class GitHubSnapshotConnector:
             raise ValueError(f"Lokaler Repo-Pfad nicht gefunden: {repo_path}")
 
         repo_revision = _resolve_git_revision(repo_path=repo_path, git_ref=request.git_ref)
+        finai_backend_focus_active = _is_finai_repo_with_backend_focus(repo_path=repo_path)
         previous_snapshot_map = _build_previous_snapshot_map(previous_snapshots=request.previous_snapshots or [])
         changed_paths = _resolve_changed_paths(
             repo_path=repo_path,
@@ -78,10 +81,12 @@ class GitHubSnapshotConnector:
         reread_documents = 0
 
         for file_path in _iter_repo_files(repo_path=repo_path):
-            if inspected_files >= int(request.max_files):
+            relative_path = file_path.relative_to(repo_path).as_posix()
+            if finai_backend_focus_active and not _is_relevant_finai_analysis_path(relative_path=relative_path):
+                continue
+            if request.max_files is not None and inspected_files >= int(request.max_files):
                 break
             inspected_files += 1
-            relative_path = file_path.relative_to(repo_path).as_posix()
             source_type = "local_doc" if relative_path.startswith("_docs/") or file_path.suffix == ".md" else "github_file"
             stat_result = file_path.stat()
             previous_snapshot = previous_snapshot_map.get((source_type, relative_path))
@@ -140,7 +145,11 @@ class GitHubSnapshotConnector:
             raw_text = _read_text_file(file_path=file_path)
             if raw_text is None:
                 continue
-            truncated_text = raw_text[: int(request.max_chars_per_file)]
+            truncated_text = (
+                raw_text[: int(request.max_chars_per_file)]
+                if request.max_chars_per_file is not None
+                else raw_text
+            )
             content_hash = _sha256_text(raw_text)
             snapshot = AuditSourceSnapshot(
                 source_type=source_type,
@@ -181,6 +190,11 @@ class GitHubSnapshotConnector:
                 f"{len(documents)} lesbare Dateien aus dem lokalen FIN-AI-Repo wurden fuer den Lauf eingesammelt.",
                 f"Git-Revision fuer den Snapshot: {repo_revision}.",
                 (
+                    "Fachliche Repo-Abdeckung ist auf relevante FIN-AI-Backend-, Chunking-, Mining- und Write-Contract-Pfade fokussiert."
+                    if finai_backend_focus_active
+                    else "Repo-Abdeckung nutzt fuer dieses Zielrepo keine FIN-AI-spezifische Pfadfokussierung."
+                ),
+                (
                     f"Inkrementelle Repo-Wiederverwendung: {reused_documents} Dokumente aus dem lokalen Cache uebernommen, "
                     f"{reread_documents} Dateien real neu gelesen."
                 ),
@@ -197,6 +211,26 @@ def _iter_repo_files(*, repo_path: Path) -> list[Path]:
         and not any(part in _EXCLUDED_DIR_NAMES for part in path.parts)
     ]
     return sorted(candidates, key=lambda item: item.as_posix())
+
+
+def _is_finai_repo_with_backend_focus(*, repo_path: Path) -> bool:
+    return (repo_path / "src" / "finai").is_dir()
+
+
+def _is_relevant_finai_analysis_path(*, relative_path: str) -> bool:
+    normalized = str(relative_path or "").strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if normalized in {"README.md", "AGENTS.md", "CLAUDE.md"}:
+        return True
+    return normalized.startswith(
+        (
+            "src/finai/",
+            "_docs/",
+            "models/",
+            "config/",
+        )
+    )
 
 
 def _read_text_file(*, file_path: Path) -> str | None:

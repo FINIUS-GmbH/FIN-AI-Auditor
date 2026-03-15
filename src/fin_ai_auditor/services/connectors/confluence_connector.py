@@ -665,7 +665,7 @@ def _fetch_page_detail(
                 payload["ancestors"] = ancestors_payload.get("results") or []
             elif isinstance(ancestors_payload, list):
                 payload["ancestors"] = ancestors_payload
-        except httpx.HTTPError:
+        except (httpx.HTTPError, AssertionError):
             pass
     space_id = str(payload.get("spaceId") or "").strip()
     if space_id and not payload.get("space"):
@@ -683,7 +683,7 @@ def _fetch_page_detail(
                     "key": str(space_payload.get("key") or "").strip() or None,
                     "name": str(space_payload.get("name") or "").strip() or None,
                 }
-        except httpx.HTTPError:
+        except (httpx.HTTPError, AssertionError):
             pass
     return dict(payload)
 

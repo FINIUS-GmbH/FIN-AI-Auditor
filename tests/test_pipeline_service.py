@@ -332,7 +332,7 @@ def test_claim_delta_annotation_treats_phase_order_format_changes_as_textual_onl
     assert annotated[0].metadata["delta_scope_key"] == "BSM.phase.scoping"
 
 
-def test_impacted_scope_keys_stay_on_changed_clusters() -> None:
+def test_impacted_scope_keys_include_explicit_truth_scopes() -> None:
     changed_claim = AuditClaimEntry(
         source_type="local_doc",
         source_id="_docs/statement.md",
@@ -385,7 +385,7 @@ def test_impacted_scope_keys_stay_on_changed_clusters() -> None:
         inherited_truths=[related_truth, unrelated_truth],
     )
 
-    assert impacted == {"Statement"}
+    assert impacted == {"Statement", "BSM.process"}
 
 
 def test_impacted_scope_keys_expand_transitively_over_semantic_clusters() -> None:
@@ -699,6 +699,40 @@ def test_pipeline_service_marks_semantic_delta_scopes_between_runs(monkeypatch, 
     assert any(claim.metadata.get("delta_change_type") == "semantic" for claim in completed_second.claims)
     assert any(finding.metadata.get("delta_scope_affected") is True for finding in policy_conflicts)
     assert any("Neubewertung fokussiert auf" in entry.message for entry in completed_second.analysis_log)
+
+
+def test_explicit_truth_scope_forces_recalculation_without_source_change() -> None:
+    unchanged_claim = AuditClaimEntry(
+        source_snapshot_id="snapshot_1",
+        source_type="github_file",
+        source_id="src/statement_service.py",
+        subject_kind="object_property",
+        subject_key="Statement.policy",
+        predicate="implemented_policy",
+        normalized_value="approval-gated",
+        scope_kind="project",
+        scope_key="FINAI",
+        confidence=0.9,
+        fingerprint="Statement.policy|implemented_policy|approval-gated|FINAI",
+        metadata={"delta_status": "unchanged", "delta_scope_key": "Statement"},
+    )
+    explicit_truth = TruthLedgerEntry(
+        canonical_key="Statement.policy|user_specification",
+        subject_kind="object_property",
+        subject_key="Statement.policy",
+        predicate="user_specification",
+        normalized_value="approval-gated",
+        scope_kind="project",
+        scope_key="FINAI",
+        source_kind="user_specification",
+    )
+
+    impacted = _derive_impacted_scope_keys(
+        claims=[unchanged_claim],
+        inherited_truths=[explicit_truth],
+    )
+
+    assert "Statement" in impacted
 
 
 def test_pipeline_service_reuses_unchanged_repo_documents_from_cache(monkeypatch, tmp_path: Path) -> None:

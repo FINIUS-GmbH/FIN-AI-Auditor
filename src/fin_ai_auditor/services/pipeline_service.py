@@ -1239,12 +1239,20 @@ def _derive_impacted_scope_keys(
         if claim.metadata.get("delta_status") in {"added", "changed"}
         for scope_key in _claim_scope_keys_for_delta(claim=claim)
     }
-    impacted = set(changed_scope_keys)
+    explicit_truth_scope_keys = {
+        package_scope_key(truth.subject_key)
+        for truth in inherited_truths
+        if truth.truth_status == "active" and _is_explicit_truth(truth=truth)
+    }
+    impacted = {scope_key for scope_key in [*changed_scope_keys, *explicit_truth_scope_keys] if scope_key}
     for truth in inherited_truths:
-        if truth.truth_status != "active":
+        if truth.truth_status != "active" or not _is_explicit_truth(truth=truth):
             continue
         truth_scope_key = package_scope_key(truth.subject_key)
-        if any(_scope_keys_overlap(left=truth_scope_key, right=changed_scope_key) for changed_scope_key in changed_scope_keys):
+        if not changed_scope_keys or any(
+            _scope_keys_overlap(left=truth_scope_key, right=changed_scope_key)
+            for changed_scope_key in changed_scope_keys
+        ):
             impacted.add(truth_scope_key)
     expanded = _expand_impacted_scope_keys_transitively(claims=claims, seed_scope_keys=impacted)
     return {scope_key for scope_key in expanded if str(scope_key or "").strip()}
@@ -1311,3 +1319,7 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
+    return truth.source_kind in {"user_specification", "user_acceptance"}

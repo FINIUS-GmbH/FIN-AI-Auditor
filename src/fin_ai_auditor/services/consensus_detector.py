@@ -69,7 +69,7 @@ def detect_consensus_deviations(
     truth_overrides: dict[tuple[str, str], str] = {}
     if confirmed_truths:
         for truth in confirmed_truths:
-            if truth.truth_status == "active":
+            if truth.truth_status == "active" and _is_explicit_truth(truth=truth):
                 truth_overrides[(truth.subject_key, truth.predicate)] = truth.normalized_value
         logger.info(
             "consensus_truths_loaded",
@@ -96,10 +96,12 @@ def detect_consensus_deviations(
         if len(entries) < _MIN_CLAIMS_FOR_CONSENSUS:
             continue
         consensus_stats["total_aspects"] += 1
+        doc_entries = [entry for entry in entries if entry[1] in _DOC_SOURCES]
+        target_entries = doc_entries or entries
 
         # 2. Determine target value:
         #    - If a confirmed truth exists → it IS the target (100% confidence)
-        #    - Otherwise → majority vote determines the target
+        #    - Otherwise → die Dokument-Mehrheit bestimmt den Zielzustand
         truth_key = (subject_key, predicate)
         # Also check prefix matches for truths
         truth_value_override = truth_overrides.get(truth_key)
@@ -117,9 +119,9 @@ def detect_consensus_deviations(
             is_truth_fixed = True
             aspects_with_fixed_target += 1
         else:
-            # No truth — determine by majority vote
+            # No explicit truth — determine by majority of documents if available.
             value_counter: Counter[str] = Counter()
-            for value, _src_type, _rec in entries:
+            for value, _src_type, _rec in target_entries:
                 value_counter[value.casefold()] += 1
 
             total_votes = sum(value_counter.values())
@@ -129,11 +131,11 @@ def detect_consensus_deviations(
 
             # Find the original-case version of the consensus value
             consensus_display = next(
-                (v for v, _st, _r in entries if v.casefold() == most_common_value),
+                (v for v, _st, _r in target_entries if v.casefold() == most_common_value),
                 most_common_value,
             )
 
-        total_votes = len(entries)
+        total_votes = len(target_entries)
 
         # 3. Determine source coverage
         source_types_present = {src_type for _, src_type, _ in entries}
@@ -143,6 +145,8 @@ def detect_consensus_deviations(
         # 4a. Clear target (consensus >50% OR confirmed truth) — flag all deviations
         if consensus_ratio > 0.5:
             consensus_stats["with_consensus"] += 1
+            if is_truth_fixed:
+                continue
 
             # Find records that deviate from consensus
             deviating_by_source: dict[str, list[tuple[str, ExtractedClaimRecord]]] = defaultdict(list)
@@ -293,3 +297,7 @@ def detect_consensus_deviations(
         extra={"event_name": "consensus_analysis_done", "event_payload": consensus_stats},
     )
     return findings
+
+
+def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
+    return truth.source_kind in {"user_specification", "user_acceptance"}

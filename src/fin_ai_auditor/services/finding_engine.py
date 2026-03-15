@@ -171,25 +171,46 @@ def generate_findings(
         if doc_records and code_records and _values_conflict(
             doc_records, code_records, subject_key=subject_key
         ):
-            findings.append(
-                _build_finding(
-                    subject_key=subject_key,
-                    category="implementation_drift",
-                    severity="high",
-                    title="Code-Implementierung weicht von der Dokumentation ab",
-                    summary=(
-                        "Die Dokumentation spezifiziert fuer diesen Scope ein bestimmtes Verhalten, "
-                        "das im Code anders implementiert ist. Die Dokumentation ist die fuehrende "
-                        "Quelle — der Code muss angepasst werden."
-                    ),
-                    recommendation=(
-                        "Dokumentations-Spezifikation fuer diesen Scope pruefen. Wenn die Doku "
-                        "korrekt ist, Code anpassen. Wenn der Code korrekt ist, Doku aktualisieren."
-                    ),
-                    records=[*doc_records[:2], *code_records[:2]],
-                    delta_scope_affected=delta_scope_affected,
+            if _is_policy_scope(subject_key=subject_key):
+                findings.append(
+                    _build_finding(
+                        subject_key=subject_key,
+                        category="policy_conflict",
+                        severity="high",
+                        title="Implementierte Policy widerspricht der Dokumentation",
+                        summary=(
+                            "Die dokumentierte Policy fuer diesen Scope kollidiert mit der aktuell "
+                            "implementierten Policy im Code. Der Zielzustand muss zuerst fachlich "
+                            "festgezogen und danach in allen Quellen konsistent gespiegelt werden."
+                        ),
+                        recommendation=(
+                            "Die dokumentierte Policy als Zielbild gegen Code, Guardrails und Metamodell pruefen. "
+                            "Danach muessen alle abweichenden Code- und Doku-Stellen auf denselben Policy-Zustand gebracht werden."
+                        ),
+                        records=[*doc_records[:2], *code_records[:2]],
+                        delta_scope_affected=delta_scope_affected,
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    _build_finding(
+                        subject_key=subject_key,
+                        category="implementation_drift",
+                        severity="high",
+                        title="Code-Implementierung weicht von der Dokumentation ab",
+                        summary=(
+                            "Die Dokumentation spezifiziert fuer diesen Scope ein bestimmtes Verhalten, "
+                            "das im Code anders implementiert ist. Die Dokumentation ist die fuehrende "
+                            "Quelle — der Code muss angepasst werden."
+                        ),
+                        recommendation=(
+                            "Dokumentations-Spezifikation fuer diesen Scope pruefen. Wenn die Doku "
+                            "korrekt ist, Code anpassen. Wenn der Code korrekt ist, Doku aktualisieren."
+                        ),
+                        records=[*doc_records[:2], *code_records[:2]],
+                        delta_scope_affected=delta_scope_affected,
+                    )
+                )
 
         # Doc specifies something that code doesn't implement at all
         if subject_key.endswith((".write_path", ".read_path")):
@@ -400,7 +421,11 @@ def _find_truth_conflicts(
     gets its OWN finding so it can be individually tracked and resolved.
     """
     findings: list[AuditFinding] = []
-    active_truths = [truth for truth in inherited_truths if truth.truth_status == "active"]
+    active_truths = [
+        truth
+        for truth in inherited_truths
+        if truth.truth_status == "active" and _is_explicit_truth(truth=truth)
+    ]
     if not active_truths:
         return findings
 
@@ -457,7 +482,7 @@ def _find_truth_conflicts(
                     subject_key=truth.subject_key,
                     category="policy_conflict",
                     severity="critical",  # Confirmed truths are critical
-                    title=f"Bestaetigte Wahrheit nicht umgesetzt: {source_label} — {source_short}",
+                    title=f"Explizit bestaetigte Wahrheit nicht umgesetzt: {source_label} — {source_short}",
                     summary=(
                         f"Die bestaetigte Wahrheit '{truth.subject_key}' "
                         f"definiert den Wert '{truth.normalized_value}', "
@@ -486,6 +511,10 @@ def _find_truth_conflicts(
             )
 
     return findings
+
+
+def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
+    return truth.source_kind in {"user_specification", "user_acceptance"}
 
 
 def _build_finding(

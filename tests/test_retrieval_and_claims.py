@@ -10,6 +10,7 @@ from fin_ai_auditor.domain.models import (
     AuditPosition,
     AuditSourceSnapshot,
     JiraTicketAICodingBrief,
+    TruthLedgerEntry,
 )
 from fin_ai_auditor.services.claim_extractor import extract_claim_records
 from fin_ai_auditor.services.claim_semantics import semantic_values_aligned, semantic_values_conflict
@@ -501,6 +502,50 @@ def test_finding_engine_detects_semantic_policy_conflicts() -> None:
     assert len(policy_conflicts) == 1
     assert policy_conflicts[0].metadata["delta_scope_affected"] is True
     assert "approval" in " ".join(policy_conflicts[0].metadata["semantic_signatures"]).casefold()
+
+
+def test_finding_engine_enforces_only_explicit_truths() -> None:
+    code_record = _claim_record(
+        source_type="github_file",
+        source_id="src/statement_service.py",
+        title="statement_service.py",
+        subject_key="Statement.policy",
+        predicate="implemented_policy",
+        normalized_value="Direct write without approval is allowed.",
+        line_start=10,
+    )
+    implicit_truth = TruthLedgerEntry(
+        canonical_key="Statement.policy|phase_source",
+        subject_kind="object_property",
+        subject_key="Statement.policy",
+        predicate="phase_source",
+        normalized_value="Write flow is approval-gated and review-only.",
+        scope_kind="project",
+        scope_key="FINAI",
+        source_kind="system_inference",
+    )
+    explicit_truth = implicit_truth.model_copy(
+        update={
+            "truth_id": "truth_explicit",
+            "canonical_key": "Statement.policy|user_specification",
+            "predicate": "user_specification",
+            "source_kind": "user_specification",
+        }
+    )
+
+    implicit_findings, _ = generate_findings(
+        claim_records=[code_record],
+        inherited_truths=[implicit_truth],
+        impacted_scope_keys={"Statement"},
+    )
+    explicit_findings, _ = generate_findings(
+        claim_records=[code_record],
+        inherited_truths=[explicit_truth],
+        impacted_scope_keys={"Statement"},
+    )
+
+    assert not any(f.metadata.get("truth_enforcement") is True for f in implicit_findings)
+    assert any(f.metadata.get("truth_enforcement") is True for f in explicit_findings)
 
 
 def test_retrieval_index_builds_segments_and_claim_links(tmp_path) -> None:
