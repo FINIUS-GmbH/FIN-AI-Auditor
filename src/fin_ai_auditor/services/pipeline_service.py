@@ -299,6 +299,17 @@ class AuditPipelineService:
             findings.extend(bsm_findings)
             notes.append(f"BSM-Domain-Widerspruchserkennung: {len(bsm_findings)} strukturelle Widersprueche gefunden.")
 
+        # Documentation gap detection — find undocumented code concepts and generate MD proposals
+        from fin_ai_auditor.services.documentation_gap_detector import detect_documentation_gaps
+        doc_gap_findings = detect_documentation_gaps(
+            claim_records=claim_records,
+            documents=documents,
+        )
+        logger.info("pipeline_doc_gaps", extra={"event_name": "pipeline_doc_gaps", "event_payload": {"found": len(doc_gap_findings)}})
+        if doc_gap_findings:
+            findings.extend(doc_gap_findings)
+            notes.append(f"Dokumentationsluecken-Erkennung: {len(doc_gap_findings)} fehlende Confluence-Seiten identifiziert.")
+
         findings = attach_semantic_context_to_findings(
             findings=findings,
             claims=claims,

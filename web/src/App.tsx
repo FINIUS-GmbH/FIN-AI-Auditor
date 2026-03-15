@@ -602,6 +602,8 @@ export default function App(): ReactNode {
                                 severity={item.f.severity} category={item.f.category}
                                 title={item.f.title} scope={item.f.summary}
                                 recommendation={item.f.recommendation}
+                                proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
+                                proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
                                 elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
                                 feedback={draft(item.f.finding_id)} onFeedback={v => setDraft(item.f.finding_id, v)}
                                 busy={commentBusy}
@@ -704,11 +706,13 @@ export default function App(): ReactNode {
 function WorkCard(props: {
   id: string; severity: string; category: string; title: string; scope: string;
   recommendation: string; deltaHints?: string[];
+  proposedPageMd?: string; proposedPageTitle?: string;
   elements: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
   feedback: string; onFeedback: (v: string) => void; busy: boolean;
   onAccept: () => void; onReject: () => void; onSpecify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
 }): ReactNode {
+  const [showMd, setShowMd] = useState(false);
   return (
     <article className="wc">
       {/* 1. Typ-Badge + Schweregrad */}
@@ -752,6 +756,24 @@ function WorkCard(props: {
         <div className="wc-context">
           <div className="wc-label">Änderungskontext</div>
           <ul>{props.deltaHints.map((h, i) => <li key={i}>{h}</li>)}</ul>
+        </div>
+      )}
+
+      {/* Proposed Confluence Page (MD preview) */}
+      {props.proposedPageMd && (
+        <div className="wc-md-proposal">
+          <button className="btn btn-outline btn-sm wc-md-toggle" onClick={() => setShowMd(!showMd)}>
+            {showMd ? "▾ Seitenvorschlag verbergen" : "▸ Confluence-Seitenvorschlag anzeigen"}
+            {props.proposedPageTitle && <span className="wc-md-title-hint"> — {props.proposedPageTitle}</span>}
+          </button>
+          {showMd && (
+            <div className="wc-md-content">
+              <div className="wc-md-actions">
+                <button className="btn btn-ghost btn-sm" onClick={() => { navigator.clipboard.writeText(props.proposedPageMd!); }}>📋 Kopieren</button>
+              </div>
+              <pre className="wc-md-pre">{props.proposedPageMd}</pre>
+            </div>
+          )}
         </div>
       )}
 

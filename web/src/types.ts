@@ -367,6 +367,7 @@ export type AuditFinding = {
     | "contradiction"
     | "clarification_needed"
     | "missing_definition"
+    | "missing_documentation"
     | "stale_source"
     | "implementation_drift"
     | "read_write_gap"
