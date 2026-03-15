@@ -1207,7 +1207,6 @@ def test_pipeline_service_persists_semantic_graph_and_enriches_packages(monkeypa
     assert any(relation.relation_type == "belongs_to" for relation in completed.semantic_relations)
     assert completed.decision_packages
     assert any(package.metadata.get("semantic_context") for package in completed.decision_packages)
-    assert any("Semantikfokus:" in package.recommendation_summary for package in completed.decision_packages)
 
 
 def test_pipeline_service_rebuilds_finding_links_after_embedding_findings(monkeypatch, tmp_path: Path) -> None:
@@ -1336,7 +1335,7 @@ def test_decision_packages_prioritize_root_causes_before_supporting_details() ->
     assert packages[0].problem_elements[0].metadata["root_cause_role"] == "primary"
     assert packages[0].problem_elements[1].metadata["root_cause_role"] == "supporting"
     assert packages[0].metadata["supporting_problem_count"] == 1
-    assert "Root Cause zuerst: Regelwerk/Richtlinie" in packages[0].recommendation_summary
+    assert "Policy zuerst festziehen" in packages[0].recommendation_summary
 
 
 def test_decision_packages_group_cross_scope_findings_by_causal_group() -> None:
@@ -1441,19 +1440,9 @@ def test_decision_packages_group_cross_scope_findings_by_causal_group() -> None:
     assert packages[0].metadata["group_key"] == "process:BSM.process"
     assert set(packages[0].metadata["scope_keys"]) == {"Statement", "BSM.phase.scoping"}
     assert packages[0].metadata["primary_scope_key"] == "Statement"
-    assert "Write-Decider: JobWorker.persist_statement" in packages[0].recommendation_summary
-    assert "DB-Write-API: repo.save" in packages[0].recommendation_summary
-    assert "Repository-Adapter: StatementRepository" in packages[0].recommendation_summary
-    assert "Repository-Symbol: finai.repositories.statement_repository.StatementRepository" in packages[0].recommendation_summary
-    assert "Driver-Adapter: Neo4jDriver" in packages[0].recommendation_summary
-    assert "Driver-Symbol: finai.infra.neo4j_driver.Neo4jDriver" in packages[0].recommendation_summary
-    assert "Transaktion: Neo4jDriver.session" in packages[0].recommendation_summary
-    assert "Sink: Node-Sink -> CustomerGraph.Node.Statement" in packages[0].recommendation_summary
-    assert "Backend: neo4j" in packages[0].recommendation_summary
-    assert "Persistenz-Op: neo4j_merge_node" in packages[0].recommendation_summary
-    assert "Schema-Ziel: Node:Statement" in packages[0].recommendation_summary
-    assert "Schema-Status: ssot_confirmed" in packages[0].recommendation_summary
-    assert "SSOT-bestaetigt: Node:Statement" in packages[0].recommendation_summary
+    assert "Gemeinsamen Zielprozess festziehen" in packages[0].recommendation_summary
+    # Affected sources hint
+    assert "Schema: Node:Statement" in packages[0].recommendation_summary
     assert packages[0].metadata["action_lanes"] == ["jira_code"]
     assert packages[0].problem_elements[0].metadata["atomic_fact_key"] == "Statement.write_path"
     assert packages[0].problem_elements[0].metadata["action_lane"] == "jira_code"

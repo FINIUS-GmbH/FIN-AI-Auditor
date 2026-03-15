@@ -3468,67 +3468,30 @@ def _package_recommendation_summary(
     causal_schema_validation_statuses: list[str],
 ) -> str:
     ordered_findings = order_package_findings(findings=findings, package_bucket=root_cause_bucket)
-    recommendations = _dedupe_preserve_order([finding.recommendation for finding in ordered_findings])
-    semantic_prefix_parts: list[str] = []
-    semantic_prefix_parts.append(f"Root Cause zuerst: {root_cause_label(bucket=root_cause_bucket)}")
+    recommendations = _dedupe_preserve_order([finding.recommendation for finding in ordered_findings if finding.recommendation])
+
+    # Build a concise "affected sources" hint
+    affected_sources: list[str] = []
     if semantic_contract_paths:
-        semantic_prefix_parts.append(f"Vertragskette: {semantic_contract_paths[0]}")
-    if causal_write_deciders:
-        semantic_prefix_parts.append(f"Write-Decider: {causal_write_deciders[0]}")
-    if causal_write_apis:
-        semantic_prefix_parts.append(f"DB-Write-API: {causal_write_apis[0]}")
-    if causal_repository_adapters:
-        semantic_prefix_parts.append(f"Repository-Adapter: {causal_repository_adapters[0]}")
-    if causal_repository_adapter_symbols:
-        semantic_prefix_parts.append(f"Repository-Symbol: {causal_repository_adapter_symbols[0]}")
-    if causal_driver_adapters:
-        semantic_prefix_parts.append(f"Driver-Adapter: {causal_driver_adapters[0]}")
-    if causal_driver_adapter_symbols:
-        semantic_prefix_parts.append(f"Driver-Symbol: {causal_driver_adapter_symbols[0]}")
-    if causal_transaction_boundaries:
-        semantic_prefix_parts.append(f"Transaktion: {causal_transaction_boundaries[0]}")
-    if causal_retry_paths:
-        semantic_prefix_parts.append(f"Retry-Pfad: {causal_retry_paths[0]}")
-    if causal_batch_paths:
-        semantic_prefix_parts.append(f"Batch-Pfad: {causal_batch_paths[0]}")
-    if causal_persistence_targets:
-        sink_prefix = (
-            f"{_persistence_sink_kind_label(causal_persistence_sink_kinds[0])} -> "
-            if causal_persistence_sink_kinds
-            else ""
-        )
-        semantic_prefix_parts.append(f"Sink: {sink_prefix}{causal_persistence_targets[0]}")
-    if causal_persistence_backends:
-        semantic_prefix_parts.append(f"Backend: {causal_persistence_backends[0]}")
-    if causal_persistence_operation_types:
-        semantic_prefix_parts.append(f"Persistenz-Op: {causal_persistence_operation_types[0]}")
+        affected_sources.append(f"Vertragskette: {semantic_contract_paths[0]}")
     if causal_persistence_schema_targets:
-        semantic_prefix_parts.append(f"Schema-Ziel: {causal_persistence_schema_targets[0]}")
-    if causal_schema_validation_statuses:
-        semantic_prefix_parts.append(f"Schema-Status: {causal_schema_validation_statuses[0]}")
-    if causal_schema_validated_targets:
-        semantic_prefix_parts.append(f"SSOT-bestaetigt: {causal_schema_validated_targets[0]}")
-    elif causal_schema_observed_only_targets:
-        semantic_prefix_parts.append(f"Nur beobachtet: {causal_schema_observed_only_targets[0]}")
-    elif causal_schema_unconfirmed_targets:
-        semantic_prefix_parts.append(f"Nicht bestaetigt: {causal_schema_unconfirmed_targets[0]}")
-    if semantic_context:
-        semantic_prefix_parts.append(f"Semantikfokus: {', '.join(semantic_context[:3])}")
-    if semantic_relation_summaries:
-        semantic_prefix_parts.append(f"Beziehungen pruefen: {semantic_relation_summaries[0]}")
-    semantic_prefix = " | ".join(semantic_prefix_parts)
+        affected_sources.append(f"Schema: {causal_persistence_schema_targets[0]}")
+
     if not recommendations:
-        base = "Empfehlungen aus den betroffenen Problemelementen pruefen und konsolidieren."
-        return f"{semantic_prefix} | {base}" if semantic_prefix else base
-    if len(recommendations) == 1:
-        return f"{semantic_prefix} | {recommendations[0]}" if semantic_prefix else recommendations[0]
+        base = "Die betroffenen Dokumentquellen pruefen und eine konsistente Aussage festlegen."
+        return f"{base} ({', '.join(affected_sources)})" if affected_sources else base
+
+    # Use the primary finding's recommendation directly
     base = recommendations[0]
     supporting_count = max(len(ordered_findings) - 1, 0)
-    if supporting_count:
-        base = f"{base} Danach {supporting_count} Supporting-Finding(s) angleichen."
+    if supporting_count and len(recommendations) > 1:
+        base = f"{base}\n\nWeitere {supporting_count} zusammenhaengende Stelle(n) muessen danach ebenfalls angepasst werden."
     elif len(recommendations) > 1:
-        base = " / ".join(recommendations[:2])
-    return f"{semantic_prefix} | {base}" if semantic_prefix else base
+        base = "\n\n".join(recommendations[:3])
+
+    if affected_sources:
+        base = f"{base}\n\nBetroffene Stellen: {', '.join(affected_sources)}"
+    return base
 
 
 def _semantic_relations_for_entity_ids(

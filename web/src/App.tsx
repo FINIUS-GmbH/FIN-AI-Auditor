@@ -1140,13 +1140,12 @@ function WorkCard(props: {
         </div>
       )}
 
-      {/* Aktionen */}
+      {/* Entscheidung */}
       <div className="wc-actions">
-        <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Begründung oder Anmerkung…" />
-        <div className="wc-btns">
+        <div className="wc-decision-label">Ihre Entscheidung</div>
+        <div className="wc-btns wc-btns-primary">
           <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ Annehmen</button>
           <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ Ablehnen</button>
-          {props.onSpecify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Präzisieren</button>}
         </div>
         {(props.onConfluence || props.onJira) && (
           <div className="wc-writeback">
@@ -1155,6 +1154,16 @@ function WorkCard(props: {
           </div>
         )}
       </div>
+
+      {/* Präzisierung */}
+      {props.onSpecify && (
+        <div className="wc-specify-area">
+          <div className="wc-specify-label">Noch unklar? Klärung anfordern</div>
+          <p className="wc-specify-hint">Beschreiben Sie, was unklar ist oder was der Auditor genauer untersuchen soll. Nach vollständiger Klärung erhalten Sie eine überarbeitete Entscheidungskarte.</p>
+          <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Was genau soll geklärt oder genauer untersucht werden?" />
+          <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Klärung anfordern</button>
+        </div>
+      )}
 
       {/* Klärungsdialog */}
       {props.clarificationPanel}
