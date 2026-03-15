@@ -467,6 +467,5 @@ def _make_claim(
     evidence = ExtractedClaimEvidence(
         location=location,
         matched_text=line_text[:300],
-        short_explanation=f"{subject_key}: {predicate} = {normalized_value[:100]}",
     )
     return ExtractedClaimRecord(claim=claim, evidence=evidence)
