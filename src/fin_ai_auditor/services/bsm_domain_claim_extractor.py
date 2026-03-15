@@ -13,6 +13,7 @@ documented in the project benchmark.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Final, Sequence
 
@@ -99,20 +100,33 @@ _PUML_STATE_PATTERN = re.compile(
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def extract_bsm_domain_claims(
     *, documents: Sequence[CollectedDocument]
 ) -> list[ExtractedClaimRecord]:
     """Extract BSM-domain-specific claims from all documents."""
     records: list[ExtractedClaimRecord] = []
+    doc_count = len(documents)
+    logger.info("bsm_domain_extraction_start", extra={"event_name": "bsm_domain_extraction_start", "event_payload": {"document_count": doc_count}})
     for doc in documents:
-        if doc.source_type in {"confluence_page", "local_doc"}:
-            records.extend(_extract_from_documentation(document=doc))
-        elif doc.source_type == "github_file":
-            path = (doc.path_hint or doc.source_id or "").lower()
-            if path.endswith(".puml") or path.endswith(".plantuml"):
-                records.extend(_extract_from_puml(document=doc))
-            elif "metamodel" in path and path.endswith(".json"):
-                records.extend(_extract_from_metamodel_json(document=doc))
+        before = len(records)
+        try:
+            if doc.source_type in {"confluence_page", "local_doc"}:
+                records.extend(_extract_from_documentation(document=doc))
+            elif doc.source_type == "github_file":
+                path = (doc.path_hint or doc.source_id or "").lower()
+                if path.endswith(".puml") or path.endswith(".plantuml"):
+                    records.extend(_extract_from_puml(document=doc))
+                elif "metamodel" in path and path.endswith(".json"):
+                    records.extend(_extract_from_metamodel_json(document=doc))
+        except Exception as exc:
+            logger.warning("bsm_domain_doc_failed", extra={"event_name": "bsm_domain_doc_failed", "event_payload": {"source_id": doc.source_id, "error": str(exc)}})
+        added = len(records) - before
+        if added > 0:
+            logger.debug("bsm_domain_doc_claims", extra={"event_name": "bsm_domain_doc_claims", "event_payload": {"source_id": doc.source_id, "claims": added}})
+    logger.info("bsm_domain_extraction_done", extra={"event_name": "bsm_domain_extraction_done", "event_payload": {"total_claims": len(records), "documents_processed": doc_count}})
     return records
 
 

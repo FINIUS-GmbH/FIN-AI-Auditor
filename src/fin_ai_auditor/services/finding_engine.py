@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from itertools import combinations
 from typing import Iterable
@@ -12,6 +13,8 @@ from fin_ai_auditor.services.claim_semantics import (
     semantic_values_conflict,
 )
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
+
+logger = logging.getLogger(__name__)
 
 
 def derive_truths(
@@ -60,6 +63,7 @@ def generate_findings(
     findings: list[AuditFinding] = []
     groups = _group_claims(claim_records=claim_records)
     effective_impacted_scope_keys = set(impacted_scope_keys or set())
+    logger.info("finding_generation_start", extra={"event_name": "finding_generation_start", "event_payload": {"claim_groups": len(groups), "total_claims": len(claim_records), "impacted_scopes": len(effective_impacted_scope_keys)}})
 
     for subject_key, records in groups.items():
         code_records = [record for record in records if record.claim.source_type == "github_file"]
@@ -309,6 +313,9 @@ def generate_findings(
     findings.extend(truth_findings)
 
     links = _build_links(findings=findings)
+    from collections import Counter
+    cat_counts = dict(Counter(f.category for f in findings))
+    logger.info("finding_generation_done", extra={"event_name": "finding_generation_done", "event_payload": {"total_findings": len(findings), "links": len(links), "by_category": cat_counts}})
     return findings, links
 
 

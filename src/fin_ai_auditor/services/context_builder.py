@@ -11,9 +11,12 @@ import ast
 import json
 import re
 from collections import Counter, defaultdict
+import logging
 from typing import Sequence
 
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
+
+logger = logging.getLogger(__name__)
 
 
 class AuditContextBuilder:
@@ -167,13 +170,19 @@ class AuditContextBuilder:
 
     def build_full_context(self, documents: Sequence[CollectedDocument]) -> str:
         """Baut alle 4 Kontext-Layer zusammen."""
-        parts = [
-            self.build_repo_summary(documents),
-            self.build_metamodel_summary(documents),
-            self.build_confluence_map(documents),
-            self.build_finai_architecture_context(documents),
-        ]
-        return "\n\n---\n\n".join(p for p in parts if p)
+        logger.info("context_build_start", extra={"event_name": "context_build_start", "event_payload": {"total_docs": len(documents)}})
+        repo = self.build_repo_summary(documents)
+        logger.info("context_layer_done", extra={"event_name": "context_layer_done", "event_payload": {"layer": "repo", "chars": len(repo)}})
+        metamodel = self.build_metamodel_summary(documents)
+        logger.info("context_layer_done", extra={"event_name": "context_layer_done", "event_payload": {"layer": "metamodel", "chars": len(metamodel)}})
+        confluence = self.build_confluence_map(documents)
+        logger.info("context_layer_done", extra={"event_name": "context_layer_done", "event_payload": {"layer": "confluence", "chars": len(confluence)}})
+        arch = self.build_finai_architecture_context(documents)
+        logger.info("context_layer_done", extra={"event_name": "context_layer_done", "event_payload": {"layer": "architecture", "chars": len(arch)}})
+        parts = [repo, metamodel, confluence, arch]
+        result = "\n\n---\n\n".join(p for p in parts if p)
+        logger.info("context_build_done", extra={"event_name": "context_build_done", "event_payload": {"total_chars": len(result)}})
+        return result
 
     # ── Layer 4: FIN-AI Architecture Docs ────────────────────────────
 

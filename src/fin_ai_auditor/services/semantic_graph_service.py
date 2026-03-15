@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import re
 
 from fin_ai_auditor.domain.models import (
@@ -11,6 +12,8 @@ from fin_ai_auditor.domain.models import (
 )
 from fin_ai_auditor.services.claim_semantics import package_scope_key
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ def build_semantic_graph(
     claim_records: list[ExtractedClaimRecord],
     truths: list[TruthLedgerEntry],
 ) -> SemanticGraphBuildResult:
+    logger.info("semantic_graph_build_start", extra={"event_name": "semantic_graph_build_start", "event_payload": {"claims": len(claim_records), "truths": len(truths)}})
     entity_map: dict[str, SemanticEntity] = {}
     relation_map: dict[tuple[str, str, str], SemanticRelation] = {}
     claim_context_by_id: dict[str, dict[str, object]] = {}

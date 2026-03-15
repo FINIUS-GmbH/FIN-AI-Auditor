@@ -215,6 +215,7 @@ class AuditPipelineService:
             *section_reused_claim_records,
             *extract_claim_records(documents=[*regular_fresh_documents, *section_regenerated_documents, *fallback_documents]),
         ]
+        logger.info("pipeline_claims_extracted", extra={"event_name": "pipeline_claims_extracted", "event_payload": {"total_claims": len(claim_records), "cached": len(cached_claim_records), "section_reused": len(section_reused_claim_records)}})
         notes.extend(section_regen_notes)
         notes.extend(
             _build_claim_reuse_notes(
@@ -229,6 +230,7 @@ class AuditPipelineService:
             claim_records=claim_records,
             truths=_inherit_truths(previous_run=previous_run),
         )
+        logger.info("pipeline_semantic_graph_built", extra={"event_name": "pipeline_semantic_graph_built", "event_payload": {"entities": len(semantic_graph.semantic_entities), "relations": len(semantic_graph.semantic_relations)}})
         claims = _annotate_claim_deltas(
             current=semantic_graph.claims,
             previous=previous_run.claims if previous_run else [],
@@ -275,6 +277,7 @@ class AuditPipelineService:
             truths=truths,
             impacted_scope_keys=impacted_scope_keys,
         )
+        logger.info("pipeline_findings_generated", extra={"event_name": "pipeline_findings_generated", "event_payload": {"findings": len(findings), "links": len(finding_links)}})
 
         # Embedding-based cross-document contradiction detection
         from fin_ai_auditor.services.embedding_contradiction_detector import detect_cross_document_contradictions
@@ -283,6 +286,7 @@ class AuditPipelineService:
             claim_records=claim_records,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
         )
+        logger.info("pipeline_embedding_contradictions", extra={"event_name": "pipeline_embedding_contradictions", "event_payload": {"found": len(embedding_findings)}})
         if embedding_findings:
             findings.extend(embedding_findings)
             notes.append(f"Embedding-Widerspruchserkennung: {len(embedding_findings)} semantische Widersprueche gefunden.")
@@ -290,6 +294,7 @@ class AuditPipelineService:
         # Deterministic BSM domain contradiction detection
         from fin_ai_auditor.services.bsm_domain_contradiction_detector import detect_bsm_domain_contradictions
         bsm_findings = detect_bsm_domain_contradictions(claim_records=claim_records)
+        logger.info("pipeline_bsm_contradictions", extra={"event_name": "pipeline_bsm_contradictions", "event_payload": {"found": len(bsm_findings)}})
         if bsm_findings:
             findings.extend(bsm_findings)
             notes.append(f"BSM-Domain-Widerspruchserkennung: {len(bsm_findings)} strukturelle Widersprueche gefunden.")
@@ -353,6 +358,7 @@ class AuditPipelineService:
             cache.set_context_summary(cache_type="arch_docs", content_hash=repo_hash, summary=arch_context)
         if arch_context:
             confluence_context = confluence_context + "\n\n---\n\n" + arch_context
+        logger.info("pipeline_context_ready", extra={"event_name": "pipeline_context_ready", "event_payload": {"repo_chars": len(repo_context), "meta_chars": len(metamodel_context), "conf_chars": len(confluence_context)}})
 
         def _on_llm_chunk(chunk_done: int, chunk_total: int) -> None:
             pct = 89 + int((chunk_done / max(chunk_total, 1)) * 7)  # 89% → 96%

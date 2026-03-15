@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from typing import Final
 
 from fin_ai_auditor.domain.models import AuditClaimEntry, AuditLocation, AuditPosition
 from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimEvidence, ExtractedClaimRecord
+
+logger = logging.getLogger(__name__)
 
 
 READ_LINE_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -108,22 +111,28 @@ REFERENCE_STOP_CHARS: Final[tuple[str, ...]] = (".", ";", ",", "(", ")", "[", "]
 
 
 def extract_claim_records(*, documents: list[CollectedDocument]) -> list[ExtractedClaimRecord]:
+    logger.info("claim_extraction_start", extra={"event_name": "claim_extraction_start", "event_payload": {"document_count": len(documents)}})
     records: list[ExtractedClaimRecord] = []
     for document in documents:
-        if document.source_type == "metamodel":
-            records.extend(_extract_metamodel_claims(document=document))
-            continue
-        if document.source_type == "github_file":
-            records.extend(_extract_code_claims(document=document))
-            continue
-        if document.source_type in {"confluence_page", "local_doc"}:
-            records.extend(_extract_document_claims(document=document))
+        try:
+            if document.source_type == "metamodel":
+                records.extend(_extract_metamodel_claims(document=document))
+                continue
+            if document.source_type == "github_file":
+                records.extend(_extract_code_claims(document=document))
+                continue
+            if document.source_type in {"confluence_page", "local_doc"}:
+                records.extend(_extract_document_claims(document=document))
+        except Exception as exc:
+            logger.warning("claim_extraction_doc_failed", extra={"event_name": "claim_extraction_doc_failed", "event_payload": {"source_id": document.source_id, "source_type": document.source_type, "error": str(exc)}})
 
     # BSM domain-specific claims (cross-cutting, all source types)
     from fin_ai_auditor.services.bsm_domain_claim_extractor import extract_bsm_domain_claims
     records.extend(extract_bsm_domain_claims(documents=documents))
 
-    return _deduplicate_claim_records(records=records)
+    deduped = _deduplicate_claim_records(records=records)
+    logger.info("claim_extraction_done", extra={"event_name": "claim_extraction_done", "event_payload": {"total_claims": len(deduped), "before_dedup": len(records)}})
+    return deduped
 
 
 def _extract_code_claims(*, document: CollectedDocument) -> list[ExtractedClaimRecord]:
