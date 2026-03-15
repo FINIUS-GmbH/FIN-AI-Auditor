@@ -556,29 +556,41 @@ class ClarificationService:
     ) -> ClarificationMessage:
         """Generate the first question for a new clarification thread.
 
-        Currently uses template-based generation.
+        Uses template-based generation with global context injection.
         Future: LLM-based with slot-filling from context.
         """
+        # Inject global context if available
+        context_block = ""
+        if global_context and global_context != "Keine vorherigen Klärungen vorhanden.":
+            context_block = (
+                "\n\n━━━ Bisherige Erkenntnisse ━━━\n"
+                f"{global_context}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+
         if purpose == "truth_clarification":
             content = (
                 "In diesem Paket gibt es widersprüchliche Aussagen. "
                 "Bitte klären Sie, welche der folgenden Aussagen fachlich korrekt ist.\n\n"
                 f"{anchor_context}"
+                f"{context_block}"
             )
         elif purpose == "rating_explanation":
             content = (
                 "Sie möchten verstehen, warum dieses Paket so bewertet wurde. "
                 "Hier ist der Kontext der Bewertung:\n\n"
                 f"{anchor_context}"
+                f"{context_block}"
             )
         elif purpose == "action_routing":
             content = (
                 "Für dieses Paket muss eine Folgeaktion festgelegt werden. "
                 "Soll die Korrektur in Dokumentation, Code oder als Artefakt erfolgen?\n\n"
                 f"{anchor_context}"
+                f"{context_block}"
             )
         else:
-            content = f"Klärungsdialog gestartet.\n\n{anchor_context}"
+            content = f"Klärungsdialog gestartet.\n\n{anchor_context}{context_block}"
 
         return ClarificationMessage(
             role="assistant",
@@ -603,16 +615,35 @@ class ClarificationService:
         # If we extracted indications, propose them
         if indications:
             for indication in indications[:MAX_QUESTIONS_PER_STEP]:
+                confidence_grade = indication.get("confidence_grade", "general")
+                statement = indication.get("statement", user_answer)
+
+                # Build truth proposal with confidence context
+                if confidence_grade == "definite":
+                    prefix = "Sie haben eine klare, definitive Aussage gemacht"
+                elif confidence_grade == "assertion":
+                    prefix = "Sie haben eine fachliche Feststellung getroffen"
+                elif confidence_grade == "negation":
+                    prefix = "Sie haben eine Ausschlusskriterie benannt"
+                else:
+                    prefix = "Sie haben eine relevante Angabe gemacht"
+
                 messages.append(ClarificationMessage(
                     role="assistant",
                     message_type="truth_confirmation",
                     content=(
-                        f"Sie haben angegeben: \"{indication.get('statement', user_answer)}\"\n\n"
+                        f"{prefix}: \"{statement}\"\n\n"
                         f"Soll das als DEFINITIVE Wahrheit gelten?\n"
                         f"Das heißt: Diese Aussage gilt ausnahmslos und beeinflusst ALLE Bewertungen.\n\n"
                         f"💎 Wenn ja: Bestätigen Sie über 'Als Wahrheit bestätigen'\n"
                         f"🔹 Wenn nein: Speichern Sie es über 'Nur als Hinweis'"
                     ),
+                    metadata={
+                        "proposed_statement": statement,
+                        "confidence_grade": confidence_grade,
+                        "extraction_confidence": float(indication.get("confidence", "0.65")),
+                        "detected_patterns": indication.get("detected_patterns", []),
+                    },
                 ))
                 break  # Only one truth proposal at a time
 
@@ -633,6 +664,32 @@ class ClarificationService:
 
     # ── Indication Extraction ──
 
+    # --- Pattern sets for heuristic classification ---
+    _DEFINITE_MARKERS = frozenset([
+        "immer", "grundsätzlich", "ausnahmslos", "definitiv", "zwingend",
+        "muss", "darf nicht", "niemals", "in jedem fall", "stets",
+        "verpflichtend", "unbedingt", "obligatorisch", "auf jeden fall",
+    ])
+    _ASSERTION_MARKERS = frozenset([
+        "ist", "sind", "bedeutet", "heißt", "soll", "wird", "war",
+        "haben", "hat", "verwendet", "nutzt", "basiert auf", "gilt",
+        "entspricht", "erfordert", "benötigt", "liefert", "erzeugt",
+    ])
+    _NEGATION_MARKERS = frozenset([
+        "nicht", "kein", "keiner", "keine", "nie", "weder", "ohne",
+        "darf nicht", "soll nicht", "ist nicht", "gibt es nicht",
+    ])
+    _SCOPE_MARKERS = frozenset([
+        "api", "status", "modul", "service", "klasse", "tabelle",
+        "endpunkt", "endpoint", "feld", "spalte", "column", "schema",
+        "workflow", "prozess", "phase", "schritt",
+    ])
+    _FILLER_RESPONSES = frozenset([
+        "ja", "nein", "ok", "okay", "danke", "verstanden", "klar",
+        "genau", "richtig", "stimmt", "passt", "alles klar",
+        "weiter", "fertig", "abschließen", "schließen",
+    ])
+
     def _extract_indications(
         self,
         content: str,
@@ -641,24 +698,128 @@ class ClarificationService:
     ) -> list[dict[str, str]]:
         """Extract potential truth-like statements from user answer.
 
-        Currently uses simple heuristics. Future: LLM-based extraction.
+        Uses multi-pattern heuristic analysis to classify statement confidence:
+          - definite:  contains absolute qualifiers → 0.95
+          - assertion: contains declarative verbs → 0.85
+          - negation:  contains clear exclusions → 0.75
+          - general:   substantive but not clearly assertive → 0.65
         """
         indications: list[dict[str, str]] = []
-
-        # Simple heuristic: if the answer is a clear statement (not a question),
-        # and it's substantive enough, treat it as a potential indication
         content_stripped = content.strip()
-        if (
-            len(content_stripped) > 15
-            and not content_stripped.endswith("?")
-            and not content_stripped.lower().startswith(("ja", "nein", "ok", "danke"))
-        ):
-            indications.append({
-                "statement": content_stripped,
-                "source": "user_input",
-            })
+        content_lower = content_stripped.lower()
+
+        # Skip empty, too short, questions, and filler responses
+        if len(content_stripped) <= 10:
+            return indications
+        if content_stripped.endswith("?"):
+            return indications
+        if content_lower in self._FILLER_RESPONSES:
+            return indications
+        # Also check for filler phrases at start
+        for filler in self._FILLER_RESPONSES:
+            if content_lower == filler or (content_lower.startswith(filler) and len(content_lower) <= len(filler) + 3):
+                return indications
+
+        # Detect patterns
+        detected_patterns: list[str] = []
+
+        # 1. Definite pattern: absolute qualifiers
+        has_definite = any(marker in content_lower for marker in self._DEFINITE_MARKERS)
+        if has_definite:
+            detected_patterns.append("definite_qualifier")
+
+        # 2. Assertion pattern: declarative verbs
+        words = set(content_lower.split())
+        has_assertion = bool(words & self._ASSERTION_MARKERS)
+        if has_assertion:
+            detected_patterns.append("declarative_verb")
+
+        # 3. Negation pattern: exclusions
+        has_negation = any(marker in content_lower for marker in self._NEGATION_MARKERS)
+        if has_negation:
+            detected_patterns.append("negation")
+
+        # 4. Scope reference: mentions technical terms from the package context
+        scope_key = ""
+        if thread.package_id:
+            pkg = next(
+                (p for p in run.decision_packages if p.package_id == thread.package_id),
+                None,
+            )
+            if pkg:
+                scope_key = pkg.scope_summary.lower()
+        elif thread.atomic_fact_id:
+            fact = next(
+                (f for f in run.atomic_facts if f.atomic_fact_id == thread.atomic_fact_id),
+                None,
+            )
+            if fact:
+                scope_key = fact.fact_key.lower()
+
+        has_scope_ref = any(marker in content_lower for marker in self._SCOPE_MARKERS)
+        # Also check scope key terms
+        if scope_key:
+            scope_terms = [t for t in scope_key.replace(".", " ").replace("_", " ").split() if len(t) > 2]
+            if any(term in content_lower for term in scope_terms):
+                has_scope_ref = True
+                detected_patterns.append("scope_reference")
+
+        if has_scope_ref and "scope_reference" not in detected_patterns:
+            detected_patterns.append("technical_term")
+
+        # Classify confidence grade
+        if has_definite:
+            confidence_grade = "definite"
+            confidence = 0.95
+        elif has_assertion and (has_scope_ref or has_negation):
+            confidence_grade = "assertion"
+            confidence = 0.85
+        elif has_negation:
+            confidence_grade = "negation"
+            confidence = 0.75
+        elif has_assertion or len(content_stripped) > 30:
+            confidence_grade = "general"
+            confidence = 0.65
+        else:
+            # Too short / too vague — not an indication
+            return indications
+
+        indications.append({
+            "statement": content_stripped,
+            "source": "heuristic_extraction",
+            "confidence_grade": confidence_grade,
+            "confidence": str(confidence),
+            "detected_patterns": detected_patterns,
+            "extracted_by": "heuristic_v2",
+        })
 
         return indications
+
+    async def _llm_extract_indications(
+        self,
+        content: str,
+        run: AuditRun,
+        thread: ClarificationThread,
+    ) -> list[dict[str, str]] | None:
+        """LLM-based indication extraction (Phase 5 — future integration point).
+
+        Returns None if LLM is not available or extraction fails,
+        in which case the caller should fall back to heuristic extraction.
+
+        Expected to be wired up when Settings-based LLM slot resolution
+        becomes available in the ClarificationService constructor.
+        """
+        # Stub — returns None to signal heuristic fallback
+        # TODO: Wire up LiteLLMClient with structured_output to extract:
+        #   - statement: The core factual assertion
+        #   - confidence: How confident the extraction is (0.0-1.0)
+        #   - canonical_key_hint: Suggested canonical key for this statement
+        #   - scope_kind: inferred scope category
+        #   - is_definite: whether user expressed absolute certainty
+        logger.debug(
+            "LLM indication extraction not yet configured — using heuristic fallback."
+        )
+        return None
 
     # ── Truth Conflict Detection ──
 
