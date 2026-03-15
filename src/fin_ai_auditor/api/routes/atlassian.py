@@ -79,6 +79,142 @@ def verify_confluence_access(
     return service.verify_confluence_access(space_key=space_key, max_pages=max_pages)
 
 
+@router.post("/confluence/pages/{page_id}/rename")
+def rename_confluence_page(
+    page_id: str,
+    body: dict,
+    service: AtlassianOAuthService = Depends(get_atlassian_oauth_service),
+) -> dict:
+    """Rename a Confluence page (updates its title)."""
+    from fin_ai_auditor.config import get_settings
+    from fin_ai_auditor.services.connectors.confluence_connector import (
+        _fetch_page_detail,
+        _resolve_access_context,
+    )
+    import httpx
+
+    new_title = str(body.get("new_title") or "").strip()
+    if not new_title:
+        raise HTTPException(status_code=400, detail="new_title ist erforderlich.")
+
+    settings = get_settings()
+    access_token = service.get_valid_access_token()
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Kein Atlassian Access Token. Bitte OAuth durchfuehren.")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=20.0, headers=headers) as client:
+            access_ctx = _resolve_access_context(client=client, settings=settings, access_token=access_token)
+            detail = _fetch_page_detail(client=client, api_base_url=access_ctx.api_base_url, page_id=page_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail=f"Seite {page_id} nicht gefunden.")
+            current_version = int((detail.get("version") or {}).get("number") or 0)
+            if current_version <= 0:
+                raise HTTPException(status_code=422, detail="Seite hat keine gueltige Version.")
+            space_id = str(detail.get("spaceId") or "").strip()
+            response = client.put(
+                f"{access_ctx.api_base_url}/wiki/api/v2/pages/{page_id}",
+                json={
+                    "id": page_id,
+                    "status": "current",
+                    "title": new_title,
+                    "spaceId": space_id or None,
+                    "version": {"number": current_version + 1, "message": "FIN-AI Auditor: Umbenennung"},
+                    "body": detail.get("body") or {"representation": "storage", "value": ""},
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Confluence API Fehler: {exc.response.text[:300]}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Confluence Verbindungsfehler: {exc}") from exc
+
+    return {
+        "ok": True,
+        "page_id": page_id,
+        "new_title": str(payload.get("title") or new_title),
+        "version": int((payload.get("version") or {}).get("number") or (current_version + 1)),
+    }
+
+
+@router.post("/confluence/pages/{page_id}/move")
+def move_confluence_page(
+    page_id: str,
+    body: dict,
+    service: AtlassianOAuthService = Depends(get_atlassian_oauth_service),
+) -> dict:
+    """Move a Confluence page to a different parent."""
+    from fin_ai_auditor.config import get_settings
+    from fin_ai_auditor.services.connectors.confluence_connector import (
+        _fetch_page_detail,
+        _resolve_access_context,
+    )
+    import httpx
+
+    new_parent_id = str(body.get("new_parent_id") or "").strip()
+    if not new_parent_id:
+        raise HTTPException(status_code=400, detail="new_parent_id ist erforderlich.")
+
+    settings = get_settings()
+    access_token = service.get_valid_access_token()
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Kein Atlassian Access Token. Bitte OAuth durchfuehren.")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=20.0, headers=headers) as client:
+            access_ctx = _resolve_access_context(client=client, settings=settings, access_token=access_token)
+            detail = _fetch_page_detail(client=client, api_base_url=access_ctx.api_base_url, page_id=page_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail=f"Seite {page_id} nicht gefunden.")
+            current_version = int((detail.get("version") or {}).get("number") or 0)
+            if current_version <= 0:
+                raise HTTPException(status_code=422, detail="Seite hat keine gueltige Version.")
+            space_id = str(detail.get("spaceId") or "").strip()
+            page_title = str(detail.get("title") or "").strip()
+            response = client.put(
+                f"{access_ctx.api_base_url}/wiki/api/v2/pages/{page_id}",
+                json={
+                    "id": page_id,
+                    "status": "current",
+                    "title": page_title,
+                    "spaceId": space_id or None,
+                    "parentId": new_parent_id,
+                    "version": {"number": current_version + 1, "message": "FIN-AI Auditor: Verschiebung"},
+                    "body": detail.get("body") or {"representation": "storage", "value": ""},
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Confluence API Fehler: {exc.response.text[:300]}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Confluence Verbindungsfehler: {exc}") from exc
+
+    new_parent_from_response = str((payload.get("parentId") or new_parent_id))
+    return {
+        "ok": True,
+        "page_id": page_id,
+        "new_parent_id": new_parent_from_response,
+        "title": str(payload.get("title") or page_title),
+        "version": int((payload.get("version") or {}).get("number") or (current_version + 1)),
+    }
+
+
 @router.get("/confluence/pages")
 def list_confluence_pages(
     space_key: str = Query(default="FP", min_length=1),

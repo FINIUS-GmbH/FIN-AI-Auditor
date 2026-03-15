@@ -1,5 +1,11 @@
-import { useEffect, useState, useMemo, type ReactNode } from "react";
-import { listConfluencePages, type ConfluencePageNode, type ConfluencePageTree } from "../api";
+import { useEffect, useState, useMemo, useRef, type ReactNode } from "react";
+import {
+  listConfluencePages,
+  renameConfluencePage,
+  moveConfluencePage,
+  type ConfluencePageNode,
+  type ConfluencePageTree,
+} from "../api";
 import type { AuditRun, BootstrapData, SourceProfile } from "../types";
 
 /* ============================================================
@@ -509,6 +515,14 @@ export default function DocStructureView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tree, setTree] = useState<ConfluencePageTree | null>(null);
+
+  // Writeback state
+  const [renameTarget, setRenameTarget] = useState<{ id: string; currentTitle: string } | null>(null);
+  const [moveTarget, setMoveTarget] = useState<{ id: string; title: string } | null>(null);
+  const [writebackBusy, setWritebackBusy] = useState(false);
+  const [writebackError, setWritebackError] = useState<string | null>(null);
+  const [writebackSuccess, setWritebackSuccess] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "tree" | "suggestions" | "separation" | "target">("overview");
@@ -597,6 +611,52 @@ export default function DocStructureView({
     setExpanded(new Set());
   }
 
+  async function handleRename(pageId: string, newTitle: string) {
+    if (!newTitle.trim()) return;
+    setWritebackBusy(true);
+    setWritebackError(null);
+    setWritebackSuccess(null);
+    try {
+      await renameConfluencePage(pageId, newTitle.trim());
+      // optimistic local update
+      if (tree) {
+        setTree({
+          ...tree,
+          pages: tree.pages.map(p => p.id === pageId ? { ...p, title: newTitle.trim() } : p),
+        });
+      }
+      setWritebackSuccess(`Seite erfolgreich umbenannt zu "${newTitle.trim()}".`);
+      setRenameTarget(null);
+    } catch (e) {
+      setWritebackError(`Umbenennen fehlgeschlagen: ${String(e)}`);
+    } finally {
+      setWritebackBusy(false);
+    }
+  }
+
+  async function handleMove(pageId: string, newParentId: string) {
+    if (!newParentId.trim()) return;
+    setWritebackBusy(true);
+    setWritebackError(null);
+    setWritebackSuccess(null);
+    try {
+      const result = await moveConfluencePage(pageId, newParentId.trim());
+      // optimistic local update
+      if (tree) {
+        setTree({
+          ...tree,
+          pages: tree.pages.map(p => p.id === pageId ? { ...p, parentId: result.new_parent_id } : p),
+        });
+      }
+      setWritebackSuccess(`Seite erfolgreich verschoben.`);
+      setMoveTarget(null);
+    } catch (e) {
+      setWritebackError(`Verschieben fehlgeschlagen: ${String(e)}`);
+    } finally {
+      setWritebackBusy(false);
+    }
+  }
+
   /* ── Render ── */
 
   if (loading) {
@@ -631,6 +691,93 @@ export default function DocStructureView({
 
   return (
     <div className="ds-root">
+
+      {/* ── Rename Dialog ── */}
+      {renameTarget && (() => {
+        let draftTitle = renameTarget.currentTitle;
+        return (
+          <div className="ds-modal-overlay" onClick={() => setRenameTarget(null)}>
+            <div className="ds-modal" onClick={e => e.stopPropagation()}>
+              <h3 className="ds-modal-title">✏️ Seite umbenennen</h3>
+              <p className="ds-modal-sub">Aktueller Titel: <em>{renameTarget.currentTitle}</em></p>
+              <input
+                ref={renameInputRef}
+                className="ds-modal-input"
+                defaultValue={renameTarget.currentTitle}
+                autoFocus
+                onChange={e => { draftTitle = e.target.value; }}
+                onKeyDown={e => { if (e.key === "Enter") void handleRename(renameTarget.id, draftTitle); }}
+                placeholder="Neuer Seitentitel…"
+              />
+              {writebackError && <p className="ds-modal-error">{writebackError}</p>}
+              <div className="ds-modal-actions">
+                <button className="btn btn-ghost btn-sm" onClick={() => setRenameTarget(null)}>Abbrechen</button>
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={writebackBusy}
+                  onClick={() => void handleRename(renameTarget.id, renameInputRef.current?.value ?? draftTitle)}
+                >
+                  {writebackBusy ? "Wird gespeichert…" : "Umbenennen"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Move Dialog ── */}
+      {moveTarget && (() => {
+        let draftParentId = "";
+        return (
+          <div className="ds-modal-overlay" onClick={() => setMoveTarget(null)}>
+            <div className="ds-modal" onClick={e => e.stopPropagation()}>
+              <h3 className="ds-modal-title">📦 Seite verschieben</h3>
+              <p className="ds-modal-sub">Seite: <em>{moveTarget.title}</em></p>
+              <p className="ds-modal-sub" style={{ marginTop: 4 }}>Wähle eine Ziel-Seite als neue Elternseite:</p>
+              <select
+                className="ds-modal-input"
+                autoFocus
+                onChange={e => { draftParentId = e.target.value; }}
+              >
+                <option value="">— Elternseite wählen —</option>
+                {analyses
+                  .filter(a => a.id !== moveTarget.id)
+                  .map(a => (
+                    <option key={a.id} value={a.id}>
+                      {"  ".repeat(a.depth)}{a.title}
+                    </option>
+                  ))}
+              </select>
+              {writebackError && <p className="ds-modal-error">{writebackError}</p>}
+              <div className="ds-modal-actions">
+                <button className="btn btn-ghost btn-sm" onClick={() => setMoveTarget(null)}>Abbrechen</button>
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={writebackBusy}
+                  onClick={() => { if (draftParentId) void handleMove(moveTarget.id, draftParentId); }}
+                >
+                  {writebackBusy ? "Wird verschoben…" : "Verschieben"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Feedback Banner ── */}
+      {writebackSuccess && (
+        <div className="ds-feedback-banner ds-feedback-ok">
+          ✅ {writebackSuccess}
+          <button className="ds-feedback-close" onClick={() => setWritebackSuccess(null)}>×</button>
+        </div>
+      )}
+      {writebackError && !renameTarget && !moveTarget && (
+        <div className="ds-feedback-banner ds-feedback-err">
+          ❌ {writebackError}
+          <button className="ds-feedback-close" onClick={() => setWritebackError(null)}>×</button>
+        </div>
+      )}
+
       {/* ── Space Identifier ── */}
       <div className="ds-space-bar">
         <div className="ds-space-info">
@@ -642,6 +789,7 @@ export default function DocStructureView({
         </div>
         <span className="ds-space-count">{tree.pages.length} Seiten analysiert</span>
       </div>
+
 
       {/* ── KPI Dashboard ── */}
       <div className="ds-kpi-grid">
@@ -850,7 +998,24 @@ export default function DocStructureView({
                    selectedPage.docType === "technisch" ? "⚙️ Technisch" :
                    selectedPage.docType === "gemischt" ? "🔀 Gemischt" : "❓ Unklar"}
                 </span>
+                <div className="ds-detail-actions">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="Seite umbenennen"
+                    onClick={() => setRenameTarget({ id: selectedPage.id, currentTitle: selectedPage.title })}
+                  >
+                    ✏️ Umbenennen
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="Seite verschieben"
+                    onClick={() => setMoveTarget({ id: selectedPage.id, title: selectedPage.title })}
+                  >
+                    📦 Verschieben
+                  </button>
+                </div>
               </div>
+
               <div className="ds-detail-grid">
                 <div className="ds-detail-stat">
                   <span className="ds-detail-stat-label">Ebene</span>

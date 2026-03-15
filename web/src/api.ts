@@ -83,6 +83,37 @@ export async function listConfluencePages(spaceKey: string): Promise<ConfluenceP
   return parseResponse<ConfluencePageTree>(response);
 }
 
+export async function renameConfluencePage(
+  pageId: string,
+  newTitle: string,
+): Promise<{ ok: boolean; page_id: string; new_title: string; version: number }> {
+  const response = await fetch(
+    `${API_BASE}/api/ingestion/atlassian/confluence/pages/${encodeURIComponent(pageId)}/rename`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_title: newTitle }),
+    },
+  );
+  return parseResponse(response);
+}
+
+export async function moveConfluencePage(
+  pageId: string,
+  newParentId: string,
+): Promise<{ ok: boolean; page_id: string; new_parent_id: string; title: string; version: number }> {
+  const response = await fetch(
+    `${API_BASE}/api/ingestion/atlassian/confluence/pages/${encodeURIComponent(pageId)}/move`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_parent_id: newParentId }),
+    },
+  );
+  return parseResponse(response);
+}
+
+
 export async function submitDecisionComment(runId: string, commentText: string): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/decision-comments`, {
     method: "POST",
