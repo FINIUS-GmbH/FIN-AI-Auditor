@@ -22,7 +22,7 @@ def derive_truths(
     inherited_truths: list[TruthLedgerEntry],
     claim_records: list[ExtractedClaimRecord],
 ) -> list[TruthLedgerEntry]:
-    truths = [truth.model_copy(deep=True) for truth in inherited_truths]
+    truths = [_normalize_truth_for_storage(truth=truth) for truth in inherited_truths]
     if any(truth.canonical_key == "BSM.process.phase_source" and truth.truth_status == "active" for truth in truths):
         return truths
     if any(record.claim.subject_key == "BSM.process" and record.claim.predicate == "phase_count" for record in claim_records):
@@ -40,6 +40,12 @@ def derive_truths(
             )
         )
     return truths
+
+
+def _normalize_truth_for_storage(*, truth: TruthLedgerEntry) -> TruthLedgerEntry:
+    metadata = {**truth.metadata}
+    metadata.pop("truth_delta_retrigger", None)
+    return truth.model_copy(deep=True, update={"metadata": metadata})
 
 
 def generate_findings(

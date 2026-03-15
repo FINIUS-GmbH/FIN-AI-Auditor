@@ -216,7 +216,13 @@ ul,ol{list-style:none}
 .wc{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-xl);margin-bottom:var(--sp-xl);transition:border-color var(--tr-base)}
 .wc:hover{border-color:var(--border-default)}
 .wc-badges{display:flex;align-items:center;gap:var(--sp-sm);flex-wrap:wrap;margin-bottom:var(--sp-md)}
-.wc-source-icons{display:flex;align-items:center;gap:var(--sp-xs);margin-left:auto;padding-left:var(--sp-sm);border-left:1px solid var(--border-subtle)}
+.wc-primary-source{display:flex;align-items:center;justify-content:center;margin-left:auto;width:32px;height:32px;border-radius:var(--r-full);background:var(--bg-elevated);border:1px solid var(--border-subtle)}
+.wc-primary-source svg{width:18px;height:18px}
+.wc-primary-source.src-code{color:#8b949e;background:rgba(139,148,158,0.1);border-color:rgba(139,148,158,0.25)}
+.wc-primary-source.src-confluence{color:#2684ff;background:rgba(38,132,255,0.08);border-color:rgba(38,132,255,0.2)}
+.wc-primary-source.src-metamodel{color:var(--accent);background:rgba(99,102,241,0.08);border-color:rgba(99,102,241,0.2)}
+.wc-primary-source.src-local{color:var(--text-muted);background:rgba(128,128,128,0.06);border-color:var(--border-subtle)}
+.wc-primary-source.src-jira{color:#2684ff;background:rgba(38,132,255,0.08);border-color:rgba(38,132,255,0.2)}
 .wc-title{font-size:var(--fs-lg);font-weight:700;color:var(--text-primary);line-height:1.3;margin-bottom:var(--sp-xs)}
 .wc-scope{font-size:var(--fs-base);color:var(--text-secondary);line-height:1.55;margin-bottom:var(--sp-xl)}
 

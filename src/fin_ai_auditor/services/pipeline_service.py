@@ -33,6 +33,7 @@ from fin_ai_auditor.services.connectors.confluence_connector import (
 from fin_ai_auditor.services.connectors.github_connector import GitHubSnapshotConnector, GitHubSnapshotRequest
 from fin_ai_auditor.services.connectors.metamodel_connector import MetaModelConnector
 from fin_ai_auditor.services.finding_engine import build_finding_links, derive_truths, generate_findings
+from fin_ai_auditor.services.finding_prioritization import prioritize_findings
 from fin_ai_auditor.services.pipeline_models import (
     CollectionBundle,
     CollectedDocument,
@@ -371,6 +372,7 @@ class AuditPipelineService:
             semantic_entities=semantic_graph.semantic_entities,
             semantic_relations=semantic_graph.semantic_relations,
         )
+        findings = prioritize_findings(findings=findings)
         recommendation_contexts = build_recommendation_contexts(
             settings=self._settings,
             findings=findings,
@@ -379,6 +381,7 @@ class AuditPipelineService:
         )
         findings = attach_retrieval_context_to_findings(findings=findings, contexts=recommendation_contexts)
         findings = attach_retrieval_insights_to_findings(findings=findings, segments=retrieval_index.segments)
+        findings = prioritize_findings(findings=findings)
         self._audit_service.update_run_progress(
             run_id=run.run_id,
             step_key="llm_recommendations",
@@ -449,6 +452,7 @@ class AuditPipelineService:
                 progress_callback=_on_llm_chunk,
             )
         )
+        findings = prioritize_findings(findings=findings)
         finding_links = build_finding_links(findings=findings)
         notes.extend(llm_notes)
         notes.extend(semantic_graph.notes)
@@ -1184,14 +1188,24 @@ def _inherit_truths(*, previous_run: AuditRun | None) -> list[TruthLedgerEntry]:
     for truth in previous_run.truths:
         if truth.truth_status != "active":
             continue
+        metadata = {
+            **truth.metadata,
+            "inherited_from_run_id": previous_run.run_id,
+        }
+        if _is_explicit_truth(truth=truth):
+            truth_delta_status = str(metadata.get("truth_delta_status") or ("changed" if metadata.get("pending_delta_recalculation") else "unchanged"))
+            metadata.update(
+                {
+                    "truth_delta_status": truth_delta_status,
+                    "truth_delta_retrigger": bool(metadata.get("pending_delta_recalculation")),
+                    "pending_delta_recalculation": False,
+                }
+            )
         inherited.append(
             truth.model_copy(
                 update={
                     "truth_id": new_truth_id(),
-                    "metadata": {
-                        **truth.metadata,
-                        "inherited_from_run_id": previous_run.run_id,
-                    },
+                    "metadata": metadata,
                 }
             )
         )
@@ -1239,14 +1253,14 @@ def _derive_impacted_scope_keys(
         if claim.metadata.get("delta_status") in {"added", "changed"}
         for scope_key in _claim_scope_keys_for_delta(claim=claim)
     }
-    explicit_truth_scope_keys = {
+    truth_recalculation_scope_keys = {
         package_scope_key(truth.subject_key)
         for truth in inherited_truths
-        if truth.truth_status == "active" and _is_explicit_truth(truth=truth)
+        if _truth_requires_delta_recalculation(truth=truth)
     }
-    impacted = {scope_key for scope_key in [*changed_scope_keys, *explicit_truth_scope_keys] if scope_key}
+    impacted = {scope_key for scope_key in [*changed_scope_keys, *truth_recalculation_scope_keys] if scope_key}
     for truth in inherited_truths:
-        if truth.truth_status != "active" or not _is_explicit_truth(truth=truth):
+        if not _truth_requires_delta_recalculation(truth=truth):
             continue
         truth_scope_key = package_scope_key(truth.subject_key)
         if not changed_scope_keys or any(
@@ -1323,3 +1337,11 @@ def _string_list(value: object) -> list[str]:
 
 def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
     return truth.source_kind in {"user_specification", "user_acceptance"}
+
+
+def _truth_requires_delta_recalculation(*, truth: TruthLedgerEntry) -> bool:
+    return (
+        truth.truth_status == "active"
+        and _is_explicit_truth(truth=truth)
+        and bool(truth.metadata.get("truth_delta_retrigger") or truth.metadata.get("pending_delta_recalculation"))
+    )

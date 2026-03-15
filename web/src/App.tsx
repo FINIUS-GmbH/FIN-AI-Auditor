@@ -716,21 +716,22 @@ function WorkCard(props: {
   metaSourceType?: string; metaSourceTypes?: string[];
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
-  // Extract unique source types from all locations + metadata for header icons
-  const srcTypes = [...new Set([
-    ...props.elements.flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean),
-    ...(Array.isArray(props.metaSourceTypes) ? props.metaSourceTypes : []),
-    ...(props.metaSourceType ? [props.metaSourceType] : []),
-  ])];
+  // Determine the PRIMARY source — the one most likely causing the irregularity
+  // Priority: metaSourceType (from detector) → first location → metaSourceTypes[0]
+  const primarySrc = props.metaSourceType
+    || props.elements.flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean)[0]
+    || (props.metaSourceTypes?.[0])
+    || "";
+  const primaryCfg = primarySrc ? (SRC_CFG[primarySrc] ?? null) : null;
   return (
     <article className="wc">
-      {/* 1. Typ-Badge + Schweregrad + Source Icons */}
+      {/* 1. Typ-Badge + Schweregrad + Primary Source */}
       <div className="wc-badges">
         <span className="badge badge-cat">{de(props.category)}</span>
         <span className={`badge badge-${props.severity}`}>{de(props.severity)}</span>
-        {srcTypes.length > 0 && (
-          <span className="wc-source-icons">
-            {srcTypes.map(st => <SrcBadge key={st} t={st} />)}
+        {primaryCfg && (
+          <span className={`wc-primary-source ${primaryCfg.cls}`} title={`Ursprung: ${primaryCfg.label}`}>
+            {primaryCfg.icon}
           </span>
         )}
       </div>
