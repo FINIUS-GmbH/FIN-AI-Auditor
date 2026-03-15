@@ -693,6 +693,8 @@ export default function App(): ReactNode {
                                 severity={item.pkg.severity_summary} category={item.pkg.category}
                                 title={item.pkg.title} scope={item.pkg.scope_summary}
                                 recommendation={item.pkg.recommendation_summary}
+                                positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
+                                negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
                                 deltaHints={strs(item.pkg.metadata?.delta_summary)}
                                 analysisContext={packageContextLines(item.pkg)}
                                 nextActions={packageNextActions(item.pkg)}
@@ -715,6 +717,8 @@ export default function App(): ReactNode {
                                 severity={item.f.severity} category={item.f.category}
                                 title={item.f.title} scope={item.f.summary}
                                 recommendation={item.f.recommendation}
+                                positiveConsequences={strs(item.f.metadata?.positive_consequences)}
+                                negativeConsequences={strs(item.f.metadata?.negative_consequences)}
                                 analysisContext={[
                                   ...strs(item.f.metadata?.semantic_context).slice(0, 2),
                                   ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
@@ -1008,6 +1012,8 @@ function WorkCard(props: {
   metaSourceType?: string; metaSourceTypes?: string[];
   clarificationPanel?: ReactNode;
   rank?: number;
+  positiveConsequences?: string[];
+  negativeConsequences?: string[];
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
   // Determine the PRIMARY source — the one most likely causing the irregularity
@@ -1061,6 +1067,24 @@ function WorkCard(props: {
           <div className="rec-text">{props.recommendation}</div>
         </div>
       )}
+
+      {/* 4b. Konsequenzen */}
+      {(props.positiveConsequences?.length || props.negativeConsequences?.length) ? (
+        <div className="wc-consequences">
+          {props.positiveConsequences && props.positiveConsequences.length > 0 && (
+            <div className="wc-cons wc-cons-pos">
+              <div className="wc-cons-head">✅ Wenn umgesetzt:</div>
+              <ul>{props.positiveConsequences.map((c, i) => <li key={i}>{c}</li>)}</ul>
+            </div>
+          )}
+          {props.negativeConsequences && props.negativeConsequences.length > 0 && (
+            <div className="wc-cons wc-cons-neg">
+              <div className="wc-cons-head">⚠️ Wenn nicht umgesetzt:</div>
+              <ul>{props.negativeConsequences.map((c, i) => <li key={i}>{c}</li>)}</ul>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       {/* Kontext */}
       {props.deltaHints && props.deltaHints.length > 0 && (

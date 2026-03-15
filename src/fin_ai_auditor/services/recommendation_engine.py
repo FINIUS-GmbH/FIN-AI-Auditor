@@ -30,6 +30,14 @@ class _RecommendedFindingItem(BaseModel):
     finding_key: str
     recommendation: str = Field(min_length=1)
     semantic_delta_note: str = Field(min_length=1)
+    positive_consequences: list[str] = Field(
+        default_factory=list,
+        description="Was passiert POSITIVES, wenn die Empfehlung umgesetzt wird",
+    )
+    negative_consequences: list[str] = Field(
+        default_factory=list,
+        description="Was passiert NEGATIVES, wenn die Empfehlung NICHT umgesetzt wird",
+    )
 
 
 class _RecommendationBatch(BaseModel):
@@ -212,6 +220,8 @@ class RecommendationEngine:
                         "metadata": {
                             **finding.metadata,
                             "semantic_delta_note": recommendation.semantic_delta_note,
+                            "positive_consequences": recommendation.positive_consequences,
+                            "negative_consequences": recommendation.negative_consequences,
                             "recommended_by": f"litellm_slot_{slot}",
                         },
                     }
@@ -341,13 +351,22 @@ def _build_enriched_messages(
 
     user_prompt = (
         f"{context_block}"
-        "Leite fuer jedes Finding eine knappe, pruefbare Empfehlung und eine semantische Delta-Notiz ab. "
-        "Die Delta-Notiz soll sagen, welche zuvor gespeicherten Wahrheiten, Dokumente oder Code-Cluster bei einer "
-        "Neugenerierung besonders erneut bewertet werden muessen.\n\n"
+        "=== Ausgabe-Anforderungen ===\n"
+        "1. EINFACHE SPRACHE: Schreibe so, dass ein fachkundiger Entscheider ohne Entwicklerhintergrund "
+        "die Empfehlung sofort versteht. Vermeide Fachbegriffe wo moeglich — wenn noetig, erklaere sie kurz.\n"
+        "2. 'recommendation': Erklaere in 1-3 Saetzen, WAS konkret getan werden muss und WARUM. "
+        "Keine abstrakten Formulierungen. Statt 'Konsolidierung der Dokumentation' schreibe: "
+        "'Die Seite X muss aktualisiert werden, weil dort Status Y steht, aber ueberall sonst Z gilt.'\n"
+        "3. 'positive_consequences': Liste 1-3 konkrete VORTEILE, wenn die Empfehlung umgesetzt wird. "
+        "z.B.: 'Entscheidungstraeger koennen sich auf eine konsistente Doku verlassen'\n"
+        "4. 'negative_consequences': Liste 1-3 konkrete RISIKEN, wenn NICHTS getan wird. "
+        "z.B.: 'Entwickler implementieren gegen die falsche Spezifikation'\n"
+        "5. 'semantic_delta_note': Welche bestehenden Wahrheiten oder Dokumente muessen "
+        "bei einer Neugenerierung besonders erneut bewertet werden.\n\n"
+        "Schreibe ALLES auf Deutsch.\n\n"
         "Nutze den Kontext ueber die Repository-Struktur, das Metamodell und die Confluence-Seiten, "
         "um die Findings in ihrem fachlichen Zusammenhang zu bewerten. "
-        "Identifiziere insbesondere Widersprueche zwischen Doku und Code, fehlende Definitionen, "
-        "und Abweichungen vom Metamodell.\n\n"
+        "Identifiziere insbesondere Widersprueche zwischen Dokument-Quellen und fehlende Definitionen.\n\n"
         "Findings:\n"
         f"{chr(10).join(finding_lines)}\n\n"
         "Aktive Wahrheiten:\n"
@@ -424,7 +443,16 @@ def _build_enriched_messages(
                 "muss gefunden werden. "
                 "Erzeuge nur konkrete, pruefbare Handlungsempfehlungen. "
                 "Kein Marketing, keine Allgemeinplaetze, keine unpruefbaren Aussagen. "
-                "Priorisiere Empfehlungen zur Dokumentationskorrektur vor Code-Anpassungen. "
+                "Priorisiere Empfehlungen zur Dokumentationskorrektur vor Code-Anpassungen.\n\n"
+                "=== Sprache und Verstaendlichkeit ===\n"
+                "WICHTIG: Schreibe ALLE Empfehlungen in einfacher, verstaendlicher Sprache. "
+                "Stell dir vor, du erklaerst das Problem einem erfahrenen Projektleiter, "
+                "der die Fachdomaene kennt, aber keinen Code liest.\n"
+                "- Vermeide unnoetige Fachbegriffe. Wenn du einen verwenden musst, erklaere ihn kurz.\n"
+                "- Nenne konkrete Dokumente, Seiten oder Abschnitte statt abstrakter Konzepte.\n"
+                "- Schreibe was WAS getan werden muss und WARUM — nicht nur dass etwas 'konsolidiert' werden soll.\n"
+                "- Zeige immer BEIDE Seiten auf: Was passiert wenn die Empfehlung umgesetzt wird (Vorteil) "
+                "und was passiert wenn nichts getan wird (Risiko).\n\n"
                 "Nutze Heading-Hierarchien und semantische Relationen "
                 "als relevanten Kontext, nicht nur flachen Text. Wenn eine Vertragskette wie "
                 "phase -> question -> policy -> write_contract erkennbar ist, muss sie explizit "
