@@ -7,7 +7,7 @@ const SRC: Record<string, { icon: string; label: string; cls: string }> = {
   metamodel:       { icon: "🔷", label: "Metamodell", cls: "src-metamodel" },
   local_doc:       { icon: "📋", label: "Lokal",      cls: "src-local" },
   jira_ticket:     { icon: "🎫", label: "Jira",       cls: "src-jira" },
-  user_truth:      { icon: "✦",  label: "User",       cls: "src-user" },
+  user_truth:      { icon: "✦",  label: "Nutzer",     cls: "src-user" },
 };
 function SrcBadge({ type }: { type: string }) {
   const s = SRC[type] ?? { icon: "•", label: type, cls: "src-local" };
@@ -34,10 +34,10 @@ export function HistoryPanel({ run }: Props) {
     <section className="hsection">
       <h2 className="hsection-title">Run-Zusammenfassung</h2>
       <div className="hgrid">
-        <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Findings</span></div>
+        <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Befunde</span></div>
         <div className="hstat"><span className="hstat-val">{run.decision_packages.length}</span><span className="hstat-label">Pakete</span></div>
-        <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Claims</span></div>
-        <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Truths</span></div>
+        <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Behauptungen</span></div>
+        <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Wahrheiten</span></div>
         <div className="hstat"><span className="hstat-val">{changes.length}</span><span className="hstat-label">Umgesetzt</span></div>
       </div>
       {run.summary && <p className="text-secondary">{run.summary}</p>}
@@ -61,7 +61,7 @@ export function HistoryPanel({ run }: Props) {
 
     {/* Resolved Findings */}
     {resolvedFindings.length > 0 && <section className="hsection">
-      <h2 className="hsection-title">Bewertete Findings <span className="hsection-count">{resolvedFindings.length}</span></h2>
+      <h2 className="hsection-title">Bewertete Befunde <span className="hsection-count">{resolvedFindings.length}</span></h2>
       {resolvedFindings.map(f => (
         <div className="hitem" key={f.finding_id}>
           <div className="hitem-head">
@@ -108,7 +108,7 @@ export function HistoryPanel({ run }: Props) {
 
     {/* Truths */}
     {truths.length > 0 && <section className="hsection">
-      <h2 className="hsection-title">Truth Ledger <span className="hsection-count">{truths.length} aktiv</span></h2>
+      <h2 className="hsection-title">Wahrheitsregister <span className="hsection-count">{truths.length} aktiv</span></h2>
       {truths.map(t => (
         <div className="truth" key={t.truth_id}>
           <strong style={{ fontSize: 12 }}>{t.canonical_key}</strong>
@@ -119,7 +119,7 @@ export function HistoryPanel({ run }: Props) {
 
     {/* Claims */}
     {claimGroups.length > 0 && <section className="hsection">
-      <h2 className="hsection-title">Claim-Index <span className="hsection-count">{run.claims.length}</span></h2>
+      <h2 className="hsection-title">Behauptungsindex <span className="hsection-count">{run.claims.length}</span></h2>
       <div className="hgrid">
         {claimGroups.map(([st, n]) => (
           <div className="hstat" key={st}><SrcBadge type={st} /><span className="hstat-val" style={{ marginTop: 4 }}>{n}</span></div>

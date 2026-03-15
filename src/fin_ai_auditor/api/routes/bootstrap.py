@@ -24,9 +24,10 @@ def bootstrap(
     settings = get_settings()
     configured_llm_slots = settings.get_configured_llm_slots()
     direct_metamodel = settings.get_direct_metamodel_config()
-    atlassian_status = atlassian_service.get_auth_status()
-    granted_scopes = atlassian_service.get_granted_scope_set()
-    configured_scopes = atlassian_service.get_configured_scope_set()
+    runtime_access = atlassian_service.get_runtime_access_status()
+    atlassian_status = runtime_access["auth_status"]
+    granted_scopes = set(runtime_access["granted_scopes"])
+    configured_scopes = set(runtime_access["configured_scopes"])
     confluence_read_scopes = {
         "read:confluence-content.summary",
         "read:confluence-content.all",
@@ -35,15 +36,13 @@ def bootstrap(
     }
     jira_write_scopes = {"write:jira-work"}
     atlassian_oauth_ready = bool(
-        atlassian_status.enabled
-        and atlassian_status.client_configured
-        and atlassian_status.redirect_uri_matches_local_api
+        runtime_access["oauth_ready"]
     )
     confluence_live_read_ready = bool(
-        atlassian_status.token_valid and granted_scopes.intersection(confluence_read_scopes)
+        runtime_access["token_available"] and granted_scopes.intersection(confluence_read_scopes)
     )
     jira_write_scope_ready = bool(
-        atlassian_status.token_valid and jira_write_scopes.issubset(granted_scopes)
+        runtime_access["token_available"] and jira_write_scopes.issubset(granted_scopes)
     )
     gold_set_gate = evaluate_reference_gold_set()
     delta_gate = evaluate_reference_delta_gold_set()
@@ -127,7 +126,14 @@ def bootstrap(
                 "required_scopes": sorted(confluence_read_scopes),
                 "granted_scopes": sorted(granted_scopes),
                 "notes": (
-                    ["Confluence kann aktuell live und read-only gegen echte FINAI-Seiten verifiziert werden."]
+                    [
+                        "Confluence kann aktuell live und read-only gegen echte FINAI-Seiten verifiziert werden.",
+                        *(
+                            ["Der lokale Token wurde fuer die Readiness-Pruefung erfolgreich refreshiert."]
+                            if runtime_access.get("refreshed_during_check")
+                            else []
+                        ),
+                    ]
                     if confluence_live_read_ready
                     else [
                         "Fuer echte Confluence-Live-Reads braucht der Auditor einen gueltigen lokalen Access Token mit Confluence-Read-Scope."
@@ -139,7 +145,14 @@ def bootstrap(
                 "required_scopes": sorted(jira_write_scopes),
                 "granted_scopes": sorted(granted_scopes),
                 "notes": (
-                    ["Jira-Writeback ist technisch und scope-seitig bereit, bleibt aber weiter approval-gesteuert."]
+                    [
+                        "Jira-Writeback ist technisch und scope-seitig bereit, bleibt aber weiter approval-gesteuert.",
+                        *(
+                            ["Der lokale Token wurde fuer die Readiness-Pruefung erfolgreich refreshiert."]
+                            if runtime_access.get("refreshed_during_check")
+                            else []
+                        ),
+                    ]
                     if jira_write_scope_ready
                     else [
                         "Fuer externen Jira-Writeback fehlt aktuell ein gueltiger Token mit write:jira-work."

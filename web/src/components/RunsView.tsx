@@ -152,7 +152,7 @@ export function RunsView({
       {/* Runs list header */}
       <div className="section-head">
         <div>
-          <h2>Audit Runs</h2>
+          <h2>Audit-Läufe</h2>
           <p>{runs.length} gespeicherte Läufe</p>
         </div>
         <div className="form-actions">
@@ -194,7 +194,7 @@ export function RunsView({
               <div className="run-list-counts">
                 <div className="run-count">
                   <span className="run-count-value">{run.findings.length}</span>
-                  <span className="run-count-label">Findings</span>
+                  <span className="run-count-label">Befunde</span>
                 </div>
                 <div className="run-count">
                   <span className="run-count-value">{run.decision_packages.length}</span>
@@ -202,7 +202,7 @@ export function RunsView({
                 </div>
                 <div className="run-count">
                   <span className="run-count-value">{run.claims.length}</span>
-                  <span className="run-count-label">Claims</span>
+                  <span className="run-count-label">Behauptungen</span>
                 </div>
               </div>
             </button>

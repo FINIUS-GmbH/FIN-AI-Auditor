@@ -11,7 +11,7 @@ const SRC: Record<string, { icon: string; label: string; cls: string }> = {
   metamodel:       { icon: "🔷", label: "Metamodell", cls: "src-metamodel" },
   local_doc:       { icon: "📋", label: "Lokal",      cls: "src-local" },
   jira_ticket:     { icon: "🎫", label: "Jira",       cls: "src-jira" },
-  user_truth:      { icon: "✦",  label: "User",       cls: "src-user" },
+  user_truth:      { icon: "✦",  label: "Nutzer",     cls: "src-user" },
 };
 function SrcBadge({ type }: { type: string }) {
   const s = SRC[type] ?? { icon: "•", label: type, cls: "src-local" };

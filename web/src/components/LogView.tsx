@@ -19,7 +19,7 @@ function sourceLabel(entry: AuditAnalysisLogEntry): string {
     case "pipeline": return "Pipeline";
     case "decision_comment": return "Kommentar";
     case "truth_update": return "Wahrheit";
-    case "impact_analysis": return "Impact";
+    case "impact_analysis": return "Wirkungsanalyse";
     case "recommendation_regeneration": return "Neugewichtung";
     default: return entry.source_type;
   }
@@ -71,7 +71,7 @@ export function LogView({
       <div className="comment-box">
         <h3>Kommentar / Spezifizierung</h3>
         <p>
-          Kommentare fließen als User-Wahrheiten in den Truth Ledger ein und beeinflussen
+          Kommentare fließen als Nutzer-Wahrheiten in das Wahrheitsregister ein und beeinflussen
           zukünftige Analysen.
         </p>
         {decisionCommentError ? <div className="error-box">{decisionCommentError}</div> : null}

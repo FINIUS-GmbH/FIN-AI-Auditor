@@ -117,3 +117,32 @@ def test_writeback_scope_check_uses_granted_token_scope_not_only_configured_scop
 
     with pytest.raises(ValueError, match="fehlen die noetigen Scopes"):
         service.get_valid_access_token_or_raise(required_scopes={"write:jira-work"})
+
+
+def test_runtime_access_status_refreshes_expired_token(monkeypatch, tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    service._repository.upsert_atlassian_token(
+        token=AtlassianOAuthTokenRecord(
+            access_token="expired-token",
+            refresh_token="refresh-token",
+            scope="read:page:confluence write:jira-work",
+            expires_at="2000-01-01T00:00:00+00:00",
+        )
+    )
+
+    def fake_refresh(*, token: AtlassianOAuthTokenRecord) -> AtlassianOAuthTokenRecord:
+        assert token.refresh_token == "refresh-token"
+        return token.model_copy(
+            update={
+                "access_token": "fresh-token",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            }
+        )
+
+    monkeypatch.setattr(service, "_refresh_access_token", fake_refresh)
+
+    status = service.get_runtime_access_status()
+
+    assert status["token_available"] is True
+    assert status["token_valid"] is True
+    assert status["refreshed_during_check"] is True

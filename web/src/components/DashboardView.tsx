@@ -43,7 +43,7 @@ export function DashboardView({
           <span className="metric-hint">{runs.length} gesamt</span>
         </button>
         <button className="metric-card mc-amber" onClick={() => onNavigate("findings")} style={{ textAlign: "left", cursor: "pointer" }}>
-          <span className="metric-label">Offene Findings</span>
+          <span className="metric-label">Offene Befunde</span>
           <span className="metric-value">{totalFindings}</span>
           <span className="metric-hint">Über alle Runs</span>
         </button>
@@ -55,10 +55,10 @@ export function DashboardView({
         <button className="metric-card mc-red" onClick={() => onNavigate("approvals")} style={{ textAlign: "left", cursor: "pointer" }}>
           <span className="metric-label">Offene Freigaben</span>
           <span className="metric-value">{pendingApprovals}</span>
-          <span className="metric-hint">Awaiting approval</span>
+          <span className="metric-hint">Ausstehend</span>
         </button>
         <button className="metric-card mc-green" onClick={() => onNavigate("truths")} style={{ textAlign: "left", cursor: "pointer" }}>
-          <span className="metric-label">Claims / Truths</span>
+          <span className="metric-label">Behauptungen / Wahrheiten</span>
           <span className="metric-value">{totalClaims}</span>
           <span className="metric-hint">{totalTruths} aktive Wahrheiten</span>
         </button>
@@ -103,7 +103,7 @@ export function DashboardView({
       {/* Recent findings */}
       <div className="section-head">
         <div>
-          <h2>Letzte Findings</h2>
+          <h2>Letzte Befunde</h2>
           <p>Aus dem aktuell ausgewählten Run</p>
         </div>
         {recentFindings.length > 0 ? (

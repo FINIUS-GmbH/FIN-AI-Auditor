@@ -114,7 +114,7 @@ function analysisSourceLabel(entry: AuditAnalysisLogEntry): string {
     case "truth_update":
       return "Wahrheit";
     case "impact_analysis":
-      return "Impact";
+      return "Wirkungsanalyse";
     case "recommendation_regeneration":
       return "Neugewichtung";
     default:
@@ -382,7 +382,7 @@ export function FindingList(props: FindingListProps): JSX.Element {
             </a>
             <div className="ledger-card">
               <span>Analysequelle</span>
-              <strong>Current Dump</strong>
+              <strong>Aktueller Dump</strong>
               <small>{sourceProfile.metamodel_dump_path}</small>
             </div>
             <a className="ledger-card" href={sourceProfile.jira_url} target="_blank" rel="noreferrer">
@@ -439,14 +439,14 @@ export function FindingList(props: FindingListProps): JSX.Element {
             <small>Atomare UI-Einheiten fuer die Bearbeitung</small>
           </div>
           <div className="overview-card">
-            <span className="detail-label">Truths</span>
+            <span className="detail-label">Wahrheiten</span>
             <strong>{activeTruths.length}</strong>
-            <small>Aktive kanonische Wahrheiten im Ledger</small>
+            <small>Aktive kanonische Wahrheiten im Register</small>
           </div>
           <div className="overview-card">
-            <span className="detail-label">Claims</span>
+            <span className="detail-label">Behauptungen</span>
             <strong>{run.claims.length}</strong>
-              <small>Lokaler Claim-Index aus Code, Doku und Metamodell</small>
+              <small>Lokaler Behauptungsindex aus Code, Doku und Metamodell</small>
           </div>
           <div className="overview-card">
             <span className="detail-label">Freigaben</span>
@@ -512,12 +512,12 @@ export function FindingList(props: FindingListProps): JSX.Element {
                             <div className="status-log-tags">
                               {problem.affected_claim_ids.map((claimId) => (
                                 <span className="status-log-tag" key={claimId}>
-                                  Claim {claimId}
+                                  Behauptung {claimId}
                                 </span>
                               ))}
                               {problem.affected_truth_ids.map((truthId) => (
                                 <span className="status-log-tag" key={truthId}>
-                                  Truth {truthId}
+                                  Wahrheit {truthId}
                                 </span>
                               ))}
                             </div>
@@ -611,13 +611,13 @@ export function FindingList(props: FindingListProps): JSX.Element {
 
         <section className="finding-stack">
           <div className="section-subhead">
-            <h3>Rohe Findings</h3>
+            <h3>Rohe Befunde</h3>
             <p>Nur zur Evidenzkontrolle. Die eigentliche Bearbeitung laeuft ueber Entscheidungspakete.</p>
           </div>
           {run.findings.length === 0 ? (
             <div className="finding-empty">
-              <strong>Noch keine Findings vorhanden.</strong>
-              <p>Der Worker verarbeitet geplante Runs weiter und hinterlegt danach Findings, Snapshots und Links.</p>
+              <strong>Noch keine Befunde vorhanden.</strong>
+              <p>Der Worker verarbeitet geplante Runs weiter und hinterlegt danach Befunde, Schnappschüsse und Verknüpfungen.</p>
             </div>
           ) : (
             run.findings.map((finding) => (
@@ -672,8 +672,8 @@ export function FindingList(props: FindingListProps): JSX.Element {
       <aside className="panel ledger-panel">
         <div className="panel-heading compact-heading">
           <div>
-            <h2>Ledger und Freigaben</h2>
-            <p>Truths, Claims, Approval-Gates, umgesetzte Aenderungen und Delta-Nachweise des ausgewaehlten Runs.</p>
+            <h2>Register und Freigaben</h2>
+            <p>Wahrheiten, Behauptungen, Freigabe-Gates, umgesetzte Aenderungen und Delta-Nachweise des ausgewaehlten Runs.</p>
           </div>
         </div>
 
@@ -713,7 +713,7 @@ export function FindingList(props: FindingListProps): JSX.Element {
                   <p>{request.summary}</p>
                   {request.payload_preview.length > 0 ? (
                     <div className="status-log-block">
-                      <strong>Payload Preview</strong>
+                      <strong>Inhaltsvorschau</strong>
                       <ul className="finding-list">
                         {request.payload_preview.map((item, index) => (
                           <li key={`${request.approval_request_id}-preview-${index}`}>{item}</li>
@@ -723,7 +723,7 @@ export function FindingList(props: FindingListProps): JSX.Element {
                   ) : null}
                   {request.target_type === "confluence_page_update" && patchPreview ? (
                     <div className="status-log-block">
-                      <strong>Section-Anchored Patch Preview</strong>
+                      <strong>Abschnittsbasierte Patch-Vorschau</strong>
                       <div className="confluence-preview-block">
                         <p>
                           <strong>{patchPreview.page_title}</strong>
@@ -999,14 +999,14 @@ export function FindingList(props: FindingListProps): JSX.Element {
         <div className="ledger-section">
           <div className="ledger-section-header">
             <div>
-              <h3>Claim-Index</h3>
-              <p className="status-text">Extrahierte Aussagen aus Code, Doku, Metamodell und spaeteren Truths.</p>
+              <h3>Behauptungsindex</h3>
+              <p className="status-text">Extrahierte Aussagen aus Code, Doku, Metamodell und spaeteren Wahrheiten.</p>
             </div>
             <span className="log-count-pill">{run.claims.length}</span>
           </div>
           <div className="ledger-list">
             {run.claims.length === 0 ? (
-              <p className="status-text">Noch keine Claims gespeichert.</p>
+              <p className="status-text">Noch keine Behauptungen gespeichert.</p>
             ) : (
               run.claims.map((claim) => (
                 <article className="ledger-item" key={claim.claim_id}>

@@ -11,7 +11,7 @@ const SOURCE_ICONS: Record<string, { icon: string; label: string }> = {
   metamodel: { icon: "🔷", label: "Metamodell" },
   local_doc: { icon: "📋", label: "Lokal" },
   jira_ticket: { icon: "🎫", label: "Jira" },
-  user_truth: { icon: "✦", label: "User" },
+  user_truth: { icon: "✦", label: "Nutzer" },
 };
 
 function srcLabel(st: string): string {
@@ -41,7 +41,7 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
       <div className="empty-state">
         <div className="empty-state-icon">📜</div>
         <strong>Kein Run ausgewählt</strong>
-        <p>Wähle einen Audit-Run, um den Truth Ledger und Claim-Index zu sehen.</p>
+        <p>Wähle einen Audit-Run, um das Wahrheitsregister und den Behauptungsindex zu sehen.</p>
       </div>
     );
   }
@@ -51,8 +51,8 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
       {/* Claims overview */}
       <div className="section-head">
         <div>
-          <h2>Claim-Index</h2>
-          <p>{claims.length} extrahierte Claims aus allen Quellen</p>
+          <h2>Behauptungsindex</h2>
+          <p>{claims.length} extrahierte Behauptungen aus allen Quellen</p>
         </div>
       </div>
 
@@ -68,11 +68,11 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
       {/* Sample claims */}
       <div className="ledger-section">
         <div className="ledger-section-head">
-          <h3>Claims (letzte 50)</h3>
+          <h3>Behauptungen (letzte 50)</h3>
           <span className="ledger-count">{claims.length} gesamt</span>
         </div>
         {claims.length === 0 ? (
-          <div className="ledger-hint">Noch keine Claims extrahiert.</div>
+          <div className="ledger-hint">Noch keine Behauptungen extrahiert.</div>
         ) : (
           <div className="ledger-list">
             {claims.slice(0, 50).map((claim) => {
@@ -114,7 +114,7 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
                     ({Math.round(claim.confidence * 100)}%)
                   </span>
                   <div className="text-xs text-muted mt-xs">
-                    Assertion: {claim.assertion_status ?? "asserted"} · Authority: {claim.source_authority ?? "heuristic"}
+                    Behauptungsstatus: {claim.assertion_status ?? "asserted"} · Autorität: {claim.source_authority ?? "heuristic"}
                   </div>
                 </div>
               );
@@ -126,13 +126,13 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
       {/* Truth Ledger */}
       <div className="ledger-section mt-xl">
         <div className="ledger-section-head">
-          <h3>Truth Ledger</h3>
+          <h3>Wahrheitsregister</h3>
           <span className="ledger-count">{activeTruths.length} aktiv / {allTruths.length} gesamt</span>
         </div>
         {allTruths.length === 0 ? (
           <div className="ledger-hint">
             Noch keine Wahrheiten definiert. Durch „Spezifizieren" bei Entscheidungspaketen
-            werden User-Wahrheiten mit fachlichen Implikationen gespeichert.
+            werden Nutzer-Wahrheiten mit fachlichen Implikationen gespeichert.
           </div>
         ) : (
           <div className="ledger-list">
@@ -166,7 +166,7 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
 
       <div className="ledger-section mt-xl">
         <div className="ledger-section-head">
-          <h3>Schema Truth Registry</h3>
+          <h3>Schema-Wahrheitsregister</h3>
           <span className="ledger-count">{schemaTruths.length}</span>
         </div>
         {schemaTruths.length === 0 ? (
@@ -225,7 +225,7 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
                   Aktionsspur: <strong>{fact.action_lane}</strong> · Quellen: {fact.source_types.join(", ") || "–"}
                 </div>
                 <div className="text-xs text-muted mt-xs">
-                  Packages: {fact.related_package_ids.slice(0, 3).join(", ") || "–"} · Claims: {fact.claim_ids.length} · Truths: {fact.truth_ids.length}
+                  Pakete: {fact.related_package_ids.slice(0, 3).join(", ") || "–"} · Behauptungen: {fact.claim_ids.length} · Wahrheiten: {fact.truth_ids.length}
                 </div>
               </div>
             ))}
@@ -236,7 +236,7 @@ export function TruthsView({ run }: TruthsViewProps): JSX.Element {
       {/* Snapshots */}
       <div className="ledger-section mt-xl">
         <div className="ledger-section-head">
-          <h3>Source Snapshots</h3>
+          <h3>Quell-Schnappschüsse</h3>
           <span className="ledger-count">{run.source_snapshots.length}</span>
         </div>
         {run.source_snapshots.length === 0 ? (

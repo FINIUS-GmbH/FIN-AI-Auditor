@@ -83,7 +83,7 @@ const SRC_CFG: Record<string, { icon: ReactNode; label: string; cls: string }> =
   metamodel:       { icon: <span>◆</span>, label: "Metamodell", cls: "src-metamodel" },
   local_doc:       { icon: <span>📋</span>, label: "Lokal",      cls: "src-local" },
   jira_ticket:     { icon: JIRA_SVG,   label: "Jira",       cls: "src-jira" },
-  user_truth:      { icon: <span>✦</span>,  label: "User",       cls: "src-user" },
+  user_truth:      { icon: <span>✦</span>,  label: "Nutzer",     cls: "src-user" },
 };
 
 function SrcBadge({ t }: { t: string }): ReactNode {
@@ -515,13 +515,13 @@ export default function App(): ReactNode {
                   <div className="metric-body">
                     <span className="metric-label">Quellen</span>
                     <span className="metric-value">{run?.source_snapshots.length ?? 0}</span>
-                    <span className="metric-sub">{run ? `${run.claims.length} Claims` : "–"}</span>
+                    <span className="metric-sub">{run ? `${run.claims.length} Behauptungen` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-amber">
                   <div className="metric-icon">🔍</div>
                   <div className="metric-body">
-                    <span className="metric-label">Findings</span>
+                    <span className="metric-label">Befunde</span>
                     <span className="metric-value">{run?.findings.length ?? 0}</span>
                     <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "–"; })() : "–"}</span>
                   </div>
@@ -545,9 +545,9 @@ export default function App(): ReactNode {
                 <div className="metric-card mc-teal">
                   <div className="metric-icon">🔤</div>
                   <div className="metric-body">
-                    <span className="metric-label">Tokens</span>
+                    <span className="metric-label">Token</span>
                     <span className="metric-value">{run?.llm_usage?.total_prompt_tokens || run?.llm_usage?.total_completion_tokens ? ((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE") : "0"}</span>
-                    <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${(run.llm_usage.total_prompt_tokens ?? 0).toLocaleString("de-DE")} Prompt · ${(run.llm_usage.total_completion_tokens ?? 0).toLocaleString("de-DE")} Completion` : "–"}</span>
+                    <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${(run.llm_usage.total_prompt_tokens ?? 0).toLocaleString("de-DE")} Eingabe · ${(run.llm_usage.total_completion_tokens ?? 0).toLocaleString("de-DE")} Ausgabe` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-rose">
@@ -565,7 +565,7 @@ export default function App(): ReactNode {
                     <span className="metric-value">{boot?.atomic_fact_registry?.unique_fact_count ?? 0}</span>
                     <span className="metric-sub">
                       {boot?.atomic_fact_registry
-                        ? `${boot.atomic_fact_registry.recurring_fact_count} wiederkehrend · ${boot.atomic_fact_registry.reopened_fact_count} reopened`
+                        ? `${boot.atomic_fact_registry.recurring_fact_count} wiederkehrend · ${boot.atomic_fact_registry.reopened_fact_count} wiedereröffnet`
                         : "–"}
                     </span>
                   </div>
@@ -573,11 +573,11 @@ export default function App(): ReactNode {
                 <div className="metric-card mc-green">
                   <div className="metric-icon">🎯</div>
                   <div className="metric-body">
-                    <span className="metric-label">Gold-Set</span>
+                    <span className="metric-label">Referenz-Set</span>
                     <span className="metric-value">{boot?.quality_gate?.gold_set ? `${Math.round((boot.quality_gate.gold_set.precision ?? 0) * 100)}%` : "–"}</span>
                     <span className="metric-sub">
                       {boot?.quality_gate?.gold_set
-                        ? `${Math.round((boot.quality_gate.gold_set.recall ?? 0) * 100)}% Recall · ${boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}`
+                        ? `${Math.round((boot.quality_gate.gold_set.recall ?? 0) * 100)}% Trefferquote · ${boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}`
                         : "–"}
                     </span>
                   </div>
@@ -585,11 +585,11 @@ export default function App(): ReactNode {
                 <div className="metric-card mc-green">
                   <div className="metric-icon">Δ</div>
                   <div className="metric-body">
-                    <span className="metric-label">Delta-Gate</span>
+                    <span className="metric-label">Delta-Prüfung</span>
                     <span className="metric-value">{boot?.quality_gate?.delta_recompute ? `${Math.round((boot.quality_gate.delta_recompute.precision ?? 0) * 100)}%` : "–"}</span>
                     <span className="metric-sub">
                       {boot?.quality_gate?.delta_recompute
-                        ? `${Math.round((boot.quality_gate.delta_recompute.recall ?? 0) * 100)}% Recall · ${boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}`
+                        ? `${Math.round((boot.quality_gate.delta_recompute.recall ?? 0) * 100)}% Trefferquote · ${boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}`
                         : "–"}
                     </span>
                   </div>
@@ -948,13 +948,13 @@ export default function App(): ReactNode {
                         {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer
                       </span>
                     </div>
-                    <h3 className="wc-title">Referenz-Gold-Set</h3>
+                    <h3 className="wc-title">Referenz-Set</h3>
                     <div className="wc-context">
                       <div className="wc-label">Qualitätsstand</div>
                       <ul>
-                        <li>Recall: {Math.round(boot.quality_gate.gold_set.recall * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%</li>
-                        <li>Precision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%</li>
-                        <li>False Positives: {boot.quality_gate.gold_set.false_positives} von maximal {boot.quality_gate.gold_set.max_false_positives}</li>
+                        <li>Trefferquote: {Math.round(boot.quality_gate.gold_set.recall * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%</li>
+                        <li>Präzision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%</li>
+                        <li>Fehlalarme: {boot.quality_gate.gold_set.false_positives} von maximal {boot.quality_gate.gold_set.max_false_positives}</li>
                       </ul>
                     </div>
                     {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
@@ -1162,7 +1162,7 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
       <section className="hsection">
         <h2 className="hsection-title">Run-Zusammenfassung</h2>
         <div className="hgrid">
-          <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Findings</span></div>
+          <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Befunde</span></div>
           <div className="hstat"><span className="hstat-val">{run.decision_packages.length}</span><span className="hstat-label">Pakete</span></div>
           <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Behauptungen</span></div>
           <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Wahrheiten</span></div>
@@ -1269,8 +1269,8 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
               </p>
               <p className="text-secondary">
                 {(fact.scope_summary ? `${fact.scope_summary} · ` : "")}
-                {fact.root_cause_bucket ? `Root Cause ${fact.root_cause_bucket} · ` : ""}
-                Claims {fact.claim_count} · Truths {fact.truth_count}
+                {fact.root_cause_bucket ? `Ursache ${fact.root_cause_bucket} · ` : ""}
+                Behauptungen {fact.claim_count} · Wahrheiten {fact.truth_count}
               </p>
               {(fact.subject_keys.length > 0 || fact.source_types.length > 0) && (
                 <p className="text-secondary">
@@ -1294,14 +1294,14 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
           <div className="hitem">
             <div className="hitem-head">
               <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
-                {boot.quality_gate.gold_set.passed ? "Gold-Set grün" : "Gold-Set offen"}
+                {boot.quality_gate.gold_set.passed ? "Referenz-Set grün" : "Referenz-Set offen"}
               </span>
             </div>
             <strong>Referenz-Benchmark</strong>
             <p>
               {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Erwartungen erfüllt ·
-              {" "}Recall {Math.round(boot.quality_gate.gold_set.recall * 100)}% ·
-              {" "}Precision {Math.round(boot.quality_gate.gold_set.precision * 100)}%
+              {" "}Trefferquote {Math.round(boot.quality_gate.gold_set.recall * 100)}% ·
+              {" "}Präzision {Math.round(boot.quality_gate.gold_set.precision * 100)}%
             </p>
           </div>
           <div className="hitem">
@@ -1310,11 +1310,11 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
                 {boot.quality_gate.delta_recompute.passed ? "Delta grün" : "Delta offen"}
               </span>
             </div>
-            <strong>Delta-Recompute</strong>
+            <strong>Delta-Neuberechnung</strong>
             <p>
               {boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Erwartungen erfüllt ·
-              {" "}Recall {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% ·
-              {" "}Precision {Math.round(boot.quality_gate.delta_recompute.precision * 100)}%
+              {" "}Trefferquote {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% ·
+              {" "}Präzision {Math.round(boot.quality_gate.delta_recompute.precision * 100)}%
             </p>
           </div>
         </section>

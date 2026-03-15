@@ -11,11 +11,11 @@ type SidebarProps = {
 
 const NAV_ITEMS = [
   { key: "dashboard", label: "Dashboard", icon: "📊" },
-  { key: "runs", label: "Audit Runs", icon: "🔄" },
+  { key: "runs", label: "Audit-Läufe", icon: "🔄" },
   { key: "packages", label: "Entscheidungen", icon: "📦" },
-  { key: "findings", label: "Findings", icon: "🔍" },
+  { key: "findings", label: "Befunde", icon: "🔍" },
   { key: "approvals", label: "Freigaben", icon: "✅" },
-  { key: "truths", label: "Truth Ledger", icon: "📜" },
+  { key: "truths", label: "Wahrheitsregister", icon: "📜" },
   { key: "log", label: "Aktivitätslog", icon: "📋" },
 ];
 

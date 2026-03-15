@@ -218,6 +218,32 @@ class AtlassianOAuthService:
         granted = self.get_granted_scope_set()
         return granted or self.get_configured_scope_set()
 
+    def get_runtime_access_status(self) -> dict[str, object]:
+        auth_status = self.get_auth_status()
+        token_available = False
+        refreshed = False
+        try:
+            token_available = bool(self.get_valid_access_token())
+        except Exception:
+            token_available = False
+        if token_available:
+            refreshed = not bool(auth_status.token_valid)
+            auth_status = self.get_auth_status()
+        return {
+            "token_available": token_available,
+            "token_valid": bool(auth_status.token_valid),
+            "refreshed_during_check": refreshed,
+            "granted_scopes": sorted(self.get_granted_scope_set()),
+            "configured_scopes": sorted(self.get_configured_scope_set()),
+            "effective_scopes": sorted(self.get_effective_scope_set()),
+            "oauth_ready": bool(
+                auth_status.enabled
+                and auth_status.client_configured
+                and auth_status.redirect_uri_matches_local_api
+            ),
+            "auth_status": auth_status,
+        }
+
     def build_scope_verification(
         self,
         *,
