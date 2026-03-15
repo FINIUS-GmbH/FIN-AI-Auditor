@@ -3409,9 +3409,18 @@ def _severity_rank(severity: str) -> int:
 
 def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[AuditFinding]) -> str:
     root_label = root_cause_label(bucket=root_cause_bucket)
+    # Use the primary finding's actual human-readable title
+    primary_title = ""
+    if findings:
+        primary_title = findings[0].title or ""
+    if primary_title:
+        if len(findings) > 1:
+            return f"{primary_title} (+{len(findings) - 1} weitere)"
+        return primary_title
+    # Fallback to root_cause_label if no finding title available
     if len(findings) == 1:
-        return f"{cluster_key} · {root_label} klaeren"
-    return f"{cluster_key} · {root_label} konsolidieren"
+        return f"{root_label} klaeren"
+    return f"{root_label} konsolidieren"
 
 
 def _package_scope_summary(

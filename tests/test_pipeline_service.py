@@ -1336,7 +1336,7 @@ def test_decision_packages_prioritize_root_causes_before_supporting_details() ->
     assert packages[0].problem_elements[0].metadata["root_cause_role"] == "primary"
     assert packages[0].problem_elements[1].metadata["root_cause_role"] == "supporting"
     assert packages[0].metadata["supporting_problem_count"] == 1
-    assert "Root Cause zuerst: Policy" in packages[0].recommendation_summary
+    assert "Root Cause zuerst: Regelwerk/Richtlinie" in packages[0].recommendation_summary
 
 
 def test_decision_packages_group_cross_scope_findings_by_causal_group() -> None:

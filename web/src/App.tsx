@@ -661,10 +661,23 @@ export default function App(): ReactNode {
                 if (cards.length === 0) return null;
                 // Group by scope cluster: show root issue per group, count related
                 const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+                // SDD: documentation sources are primary, code is only indication
+                const srcPriority = (card: CardItem): number => {
+                  const srcs: string[] = card.kind === "pkg"
+                    ? (card.pkg.metadata?.source_types as string[] ?? [])
+                    : (card.f.metadata?.source_types as string[] ?? (card.f.metadata?.source_type ? [card.f.metadata.source_type as string] : []));
+                  // Doku-Quellen = Priorität 0 (höchste), Code = 2 (niedrigste)
+                  if (srcs.some(s => ["confluence_page", "metamodel", "local_doc"].includes(s))) return 0;
+                  if (srcs.some(s => ["jira_ticket"].includes(s))) return 1;
+                  return 2; // github_file / code
+                };
                 const sorted = [...cards].sort((a, b) => {
                   const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
                   const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
-                  return (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                  const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                  if (sevDiff !== 0) return sevDiff;
+                  // Bei gleicher Severity: Doku-Findings vor Code-Findings
+                  return srcPriority(a) - srcPriority(b);
                 });
                 // Cluster by base scope — first per cluster = root issue
                 const scopeGroups = new Map<string, CardItem[]>();
@@ -673,12 +686,14 @@ export default function App(): ReactNode {
                   if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
                   scopeGroups.get(baseScope)!.push(card);
                 }
-                // Root issues = first of each group, sorted by severity
+                // Root issues = first of each group, sorted by severity + source priority
                 const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
                   .sort((a, b) => {
                     const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
                     const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
-                    return (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                    const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                    if (sevDiff !== 0) return sevDiff;
+                    return srcPriority(a.root) - srcPriority(b.root);
                   });
                 const idx = Math.min(cardIdx, finalCards.length - 1);
                 const visibleCards = finalCards.slice(idx, idx + 3);
@@ -710,7 +725,7 @@ export default function App(): ReactNode {
                                 busy={pkgBusy === item.pkg.package_id || commentBusy}
                                 onAccept={() => void doPkg(item.pkg.package_id, "accept", draft(item.pkg.package_id) || undefined)}
                                 onReject={() => void doPkg(item.pkg.package_id, "reject", draft(item.pkg.package_id) || undefined)}
-                                onSpecify={() => void doPkg(item.pkg.package_id, "specify", draft(item.pkg.package_id) || undefined)}
+                                onSpecify={() => { const d = draft(item.pkg.package_id); if (!d?.trim()) { alert("Bitte geben Sie im Kommentarfeld eine Präzisierung ein, bevor Sie 'Präzisieren' klicken."); return; } void doPkg(item.pkg.package_id, "specify", d); }}
                                 onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 appBusy={appBusy}

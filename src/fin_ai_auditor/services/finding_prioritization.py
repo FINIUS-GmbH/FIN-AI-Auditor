@@ -15,14 +15,14 @@ ROOT_CAUSE_PRIORITY: dict[str, int] = {
     "misc": 8,
 }
 ROOT_CAUSE_LABELS: dict[str, str] = {
-    "truth": "Wahrheitsabgleich",
-    "write_contract": "Write-Contract",
-    "policy": "Policy",
-    "lifecycle": "Lifecycle",
-    "process": "BSM-Prozess",
-    "implementation": "Implementierung",
-    "documentation": "Dokumentation",
-    "clarification": "Klaerung",
+    "truth": "Bestätigte Wahrheit verletzt",
+    "write_contract": "Schreib-/Lesevertrag",
+    "policy": "Regelwerk/Richtlinie",
+    "lifecycle": "Lebenszyklus/Status",
+    "process": "BSM-Prozessdefinition",
+    "implementation": "Umsetzungsabweichung",
+    "documentation": "Dokumentationslücke",
+    "clarification": "Klärungsbedarf",
     "misc": "Sonstiges",
 }
 CORE_ROOT_CAUSE_BUCKETS: frozenset[str] = frozenset(
