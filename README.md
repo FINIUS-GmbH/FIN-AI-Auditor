@@ -46,6 +46,7 @@ Aktueller Stand dieses Scaffolds:
 - technischer Confluence-Writeback-Pfad hinter expliziter Freigabe; der Auditor schreibt erst nach Approval und nur mit gueltigem `write:page:confluence`-Scope extern
 - Jira-AI-Coding-Briefs mit Problem, Grund, Korrekturmassnahmen, Zielbild, Abnahmekriterien, Implikationen, betroffenen Teilen, Evidenz und validierbarem Prompt-Kontext
 - kontrollierter Jira-Writeback-Pfad hinter expliziter Freigabe; ohne `write:jira-work` blockiert der Auditor den externen Ticket-POST hart
+- Jira-Connector loest den Issue-Type jetzt projektfaehig ueber Jira-Createmeta auf, damit reale FIN-AI-Projekte nicht an einem fest verdrahteten `Story`-Typ scheitern
 - Auditor-eigene LiteLLM-Basis, die FIN-AI-kompatible `FINAI_LLM_<slot>_*`-Konfigurationen lesen kann
 - produktive Claim-Extraktion, deterministische Finding-Generierung und Delta-Markierung auf Snapshot- und Claim-Ebene
 - mehrstufige Claim-Extraktion: Regex-Fallback plus AST-basierte Python-Erkennung fuer Klassen, Funktionen und Router-Handler
@@ -76,6 +77,7 @@ Aktueller Stand dieses Scaffolds:
 - Restriktions- und Sensitivitaetsmetadaten aus Confluence werden jetzt konservativer und belastbarer hergeleitet: explizite Restriktionen, Properties und Labels werden ausgewertet, reine `operations`-Antworten gelten dagegen nicht mehr faelschlich als Beleg fuer fehlende Restriktionen
 - Bootstrap und UI unterscheiden jetzt klar zwischen konfigurierter Atlassian-Integration, lokal betriebsbereitem OAuth-Flow, aktuellem Confluence-Live-Read und echtem Jira-Write-Scope
 - Referenz-Gold-Set und Delta-Recompute-Gate messen jetzt produktiv Widersprueche, Policy-Konflikte, Doku-Gaps, Artefakt-Routing und Delta-Propagation
+- wiederholbarer Live-Smoke-Runner unter `scripts/live_writeback_smoke.py` fuer den kompletten Approval->Writeback-Pfad
 - Architektur- und Produktdoku fuer die naechsten Ausbauschritte
 - Bootstrap-Defaults fuer den lokalen FIN-AI-Checkout unter `/Users/martinwaelter/GitHub/FIN-AI`
 - fixes Analyse- und Zielprofil:
@@ -84,17 +86,15 @@ Aktueller Stand dieses Scaffolds:
 - Metamodell wird pro Lauf immer lesend als aktueller lokaler Dump unter `data/metamodel/current_dump.json` behandelt
 - externe Ressourcen bleiben bis zur User-Freigabe read-only; Vorschlaege, Patches und Ticket-Drafts bleiben lokal
 
-Noch **nicht** implementiert:
+Noch **nicht** abgeschlossen:
 
 - persistente Produktionsdatenbank
-- produktiv verifizierter externer Confluence-Writeback gegen echte FINAI-Seiten unter realem OAuth-Consent
-- produktiv verifizierte externe Jira-Ticket-Erstellung gegen das echte FINAI-Projekt unter realem OAuth-Consent
 - strukturierte Tiefenextraktion fuer weitere Quellen und Vertraege, z. B. komplexere Confluence-Makros, tiefere Storage-/ADF-Sonderfaelle, weitere Meta-Objekte, Guardrail-Vertraege und breitere Frontend-/Config-Muster
 - voll inkrementeller Betrieb mit partieller Reanalyse geaenderter Quellbereiche; source-lokale Claim-/Finding-Wiederverwendung und erste section-level Claim-Regeneration stehen, die transitive Neubewertung ueber alle betroffenen Cluster ist aber noch nicht komplett minimal
 - tieferes Hybrid-Retrieval-Ranking und robustere semantische Clusterbildung ueber mehrere Quellen, Prozessketten und transitive Konflikte hinweg
-- betriebliche Haertung fuer produktiven Dauerbetrieb: weitergehendes Fehlertracing, Token-Lifecycle-Handling und staerkere Multi-Worker-Lease-/Recovery-Strategien
+- betriebliche Haertung fuer produktiven Dauerbetrieb: Lasttests, Recovery-/Lease-Proben, Pilotlaufserie und staerkere Multi-Worker-Absicherung
 
-Fachlich-analytisch ist der fokussierte Scope damit weitgehend abgeschlossen: Confluence-, Code-, lokale Doku- und Metamodell-Aussagen werden gegeneinandergestellt, in atomare Fakten zerlegt, ueber Wahrheiten und Delta propagiert und in Doku-/Code-/Artefakt-Folgeaktionen ueberfuehrt. Offene Restarbeit liegt jetzt vor allem bei echter E2E-Verifikation und Betriebshaertung.
+Fachlich-analytisch ist der fokussierte Scope damit abgeschlossen: Confluence-, Code-, lokale Doku- und Metamodell-Aussagen werden gegeneinandergestellt, in atomare Fakten zerlegt, ueber Wahrheiten und Delta propagiert und in Doku-/Code-/Artefakt-Folgeaktionen ueberfuehrt. Der offene Rest liegt jetzt im Wesentlichen bei der finalen Betriebshaertung.
 
 Aktuelle technische Hinweise:
 
@@ -104,8 +104,8 @@ Aktuelle technische Hinweise:
 - Metamodell-Read nutzt bei gesetzter `FINAI_META_SOURCE=DIRECT` eine direkte read-only Neo4j-Verbindung. Wenn der direkte Zugriff fehlschlaegt, wird kontrolliert auf den letzten lokalen Dump unter `data/metamodel/current_dump.json` zurueckgefallen.
 - Die LiteLLM-Empfehlungsschicht ist produktiv verdrahtet und faellt bei Providerfehlern sauber auf die deterministischen Empfehlungen zurueck.
 - Jira-Tickets werden lokal bereits als strukturierte Issue-Payloads mit ADF-Beschreibung vorbereitet und im Approval-Flow vorgelagert, auch wenn der externe Writeback noch nicht aktiviert ist.
-- Der externe Jira-Writeback kann jetzt nach Approval technisch ausgefuehrt werden, bleibt aber ohne frischen OAuth-Consent mit wirklich gewaehrtem `write:jira-work` blockiert.
-- Der externe Confluence-Writeback nutzt eine section-anchored Review-Patch-Engine mit farbigen Review-Markierungen. Ohne frischen OAuth-Consent mit `write:page:confluence`, ohne echten Zielseitenanker und ohne Live-Verifikation gegen reale FINAI-Seiten bleibt der externe Vollzug blockiert.
+- Der externe Jira-Writeback wurde am **15. Maerz 2026** gegen das echte Projekt `FINAI` erfolgreich ueber den Auditor ausgefuehrt; dabei wurde `FINAI-361` angelegt und der Issue-Type projektkonform als `Task` aufgeloest.
+- Der externe Confluence-Writeback wurde am **15. Maerz 2026** gegen die Testseite `FIN-AI Testing` (`page_id 2654426`) erfolgreich ueber den Auditor ausgefuehrt; der Patch lief bis Revision `8`.
 
 Die lokale Datenbank liegt standardmaessig unter `data/fin_ai_auditor.db`.
 
@@ -168,16 +168,15 @@ Wenn `FINAI_LLM_<slot>_*`-Variablen im Auditor-Kontext vorhanden sind, kann die 
 
 ## Naechste sinnvolle Umsetzungsschritte
 
-1. echten OAuth-Consent im Auditor mit realen `granted_scopes` durchlaufen und den Live-Status technisch verifizieren
-2. den vorhandenen Jira-Execution-Pfad gegen ein echtes Testticket im FINAI-Projekt pruefen
-3. den vorhandenen Confluence-Execution-Pfad gegen eine echte FINAI-Testseite pruefen
-4. die Claim-Extraktion und Metamodell-Semantik auf weitere Fachobjekte, Guardrails und ADF-/Storage-Strukturen ausbauen
-5. inkrementelle Reanalyse, Hybrid-Retrieval und Betriebs-Haertung fuer groessere Dauerlaeufe weiter vertiefen
+1. Last-, Recovery- und Wiederanlauf-Haertung fuer groessere Dauerlaeufe nachziehen
+2. eine dokumentierte Pilotlaufserie mit Go-Live-Gates fahren
+3. Claim-Extraktion und Metamodell-Semantik nur noch gezielt an echten Pilot-False-Positives/False-Negatives nachkalibrieren
 
 ## Doku-Einstieg
 
 - [Zielbild](./docs/target-picture.md)
 - [Architektur](./docs/architecture.md)
+- [Production-Readiness Runbook](./docs/production-readiness-runbook.md)
 - [Produktscope](./docs/product-scope.md)
 - [Datenmodell](./docs/data-model.md)
 - [Entscheidungs-Pakete und Retrieval](./docs/decision-packages-and-retrieval.md)

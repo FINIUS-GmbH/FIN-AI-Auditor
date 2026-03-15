@@ -57,6 +57,8 @@ class _FakeJiraClient:
                     }
                 ]
             )
+        if url.endswith("/rest/api/3/issue/createmeta/FINAI/issuetypes"):
+            return _FakeResponse({"issueTypes": [{"id": "10067", "name": "Story", "subtask": False}]})
         raise AssertionError(f"Unexpected GET URL: {url} params={params} headers={headers or self._headers}")
 
     def post(self, url: str, json: dict[str, object] | None = None) -> _FakeResponse:
@@ -477,8 +479,9 @@ def test_writeback_approval_preview_includes_atomic_facts_and_action_lane(tmp_pa
             ),
         ],
     )
-    claim = service._build_demo_claims(run=run)[0]
-    source_snapshot = service._build_demo_snapshots(run=run)[0]
+    snapshot_ids = service._build_demo_snapshot_ids()
+    claim = service._build_demo_claims(run=run, snapshot_ids=snapshot_ids)[0]
+    source_snapshot = service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids)[0]
     updated_run = service._repository.upsert_run(
         run=run.model_copy(update={"findings": [finding], "claims": [claim], "source_snapshots": [source_snapshot]})
     )

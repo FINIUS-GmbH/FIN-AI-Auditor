@@ -511,7 +511,7 @@ export default function App(): ReactNode {
               {/* ── Dashboard Overview — always visible ── */}
               <div className="metrics-row">
                 <div className="metric-card mc-amber">
-                  <div className="metric-icon">🔍</div>
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Unstimmigkeiten</span>
                     <span className="metric-value">{run?.findings.length ?? 0}</span>
@@ -519,7 +519,7 @@ export default function App(): ReactNode {
                   </div>
                 </div>
                 <div className="metric-card mc-purple">
-                  <div className="metric-icon">📦</div>
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Offene Entscheidungen</span>
                     <span className="metric-value">{openPkgs.length}</span>
@@ -527,15 +527,39 @@ export default function App(): ReactNode {
                   </div>
                 </div>
                 <div className="metric-card mc-green">
-                  <div className="metric-icon">✅</div>
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Entschieden</span>
                     <span className="metric-value">{run ? run.decision_packages.filter(p => p.decision_state !== "open").length : 0}</span>
                     <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen` : "–"}</span>
                   </div>
                 </div>
+                <div className="metric-card">
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+                  <div className="metric-body">
+                    <span className="metric-label">Widersprüche</span>
+                    <span className="metric-value">{run ? run.findings.filter(f => ["contradiction","policy_conflict","terminology_collision"].includes(f.category)).length : 0}</span>
+                    <span className="metric-sub">Konflikte zwischen Quellen</span>
+                  </div>
+                </div>
+                <div className="metric-card">
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+                  <div className="metric-body">
+                    <span className="metric-label">Fehler</span>
+                    <span className="metric-value">{run ? run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length : 0}</span>
+                    <span className="metric-sub">Drift, veraltete Quellen</span>
+                  </div>
+                </div>
+                <div className="metric-card">
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="10" y1="14" x2="14" y2="14"/></svg></div>
+                  <div className="metric-body">
+                    <span className="metric-label">Lücken</span>
+                    <span className="metric-value">{run ? run.findings.filter(f => ["missing_definition","missing_documentation","traceability_gap","ownership_gap","clarification_needed"].includes(f.category)).length : 0}</span>
+                    <span className="metric-sub">Fehlende Definitionen & Doku</span>
+                  </div>
+                </div>
                 <div className="metric-card mc-teal">
-                  <div className="metric-icon">💰</div>
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Token & Kosten</span>
                     <span className="metric-value">{run?.llm_usage?.total_cost_eur ? `${run.llm_usage.total_cost_eur.toFixed(2)}€` : "0€"}</span>

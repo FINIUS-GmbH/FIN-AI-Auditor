@@ -214,11 +214,12 @@ def test_create_confluence_approval_request_stores_patch_preview(tmp_path: Path)
             )
         )
     )
+    snapshot_ids = service._build_demo_snapshot_ids()
     run = service._repository.upsert_run(
         run=run.model_copy(
             update={
-                "findings": [service._build_demo_findings(run=run)[0]],
-                "source_snapshots": service._build_demo_snapshots(run=run),
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=snapshot_ids)[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
             }
         )
     )
@@ -317,8 +318,8 @@ def test_audit_service_executes_approved_confluence_writeback(tmp_path: Path) ->
     demo_run = service._repository.upsert_run(
         run=run.model_copy(
             update={
-                "findings": [service._build_demo_findings(run=run)[0]],
-                "source_snapshots": service._build_demo_snapshots(run=run),
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=(snapshot_ids := service._build_demo_snapshot_ids()))[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
             }
         )
     )
@@ -399,8 +400,8 @@ def test_confluence_writeback_failure_persists_http_classification(tmp_path: Pat
     demo_run = service._repository.upsert_run(
         run=run.model_copy(
             update={
-                "findings": [service._build_demo_findings(run=run)[0]],
-                "source_snapshots": service._build_demo_snapshots(run=run),
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=(snapshot_ids := service._build_demo_snapshot_ids()))[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
             }
         )
     )
@@ -462,8 +463,8 @@ def test_audit_service_reuses_existing_confluence_writeback_idempotently(tmp_pat
     demo_run = service._repository.upsert_run(
         run=run.model_copy(
             update={
-                "findings": [service._build_demo_findings(run=run)[0]],
-                "source_snapshots": service._build_demo_snapshots(run=run),
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=(snapshot_ids := service._build_demo_snapshot_ids()))[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
             }
         )
     )
