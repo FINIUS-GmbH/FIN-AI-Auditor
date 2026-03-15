@@ -939,6 +939,11 @@ class ClarificationService:
 
         system_prompt = (
             "Du bist ein Fachexperte für Governance-Klärungsdialoge im FIN-AI Auditor.\n\n"
+            "=== Specification Driven Development ===\n"
+            "FIN-AI folgt dem Prinzip Specification Driven Development:\n"
+            "Die Dokumentation (Confluence, Architektur-Docs, Metamodell) ist die EINZIGE SSOT.\n"
+            "Code dient nur als INDIZ für den Umsetzungsstand, nicht als Zieldefinition.\n"
+            "Explizit bestätigte User-Wahrheiten haben höchste Priorität.\n\n"
             "Deine Aufgabe ist es, aus der Nutzerantwort fachliche Aussagen zu extrahieren, "
             "die als potenzielle Wahrheiten oder Indizien gespeichert werden könnten.\n\n"
             "Regeln:\n"
@@ -951,7 +956,9 @@ class ClarificationService:
             "5. Wenn die Antwort keine extrahierbare Aussage enthält, liefere eine leere Liste "
             "und generiere stattdessen eine gezielte Rückfrage als follow_up_question.\n"
             "6. Die Rückfrage soll den Nutzer gezielt zu einer klärenden Aussage führen — "
-            "nicht allgemein, sondern direkt auf den fachlichen Streitpunkt bezogen.\n\n"
+            "nicht allgemein, sondern direkt auf den fachlichen Streitpunkt bezogen.\n"
+            "7. Priorisiere Aussagen, die die DOKUMENTATION betreffen — das ist die SSOT.\n"
+            "8. Aussagen über Code-Verhalten sind Indizien, nicht Wahrheiten über das Zielbild.\n\n"
             "Antworte ausschließlich als gültiges JSON passend zum Schema."
         )
 

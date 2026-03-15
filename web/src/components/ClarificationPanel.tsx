@@ -217,7 +217,7 @@ export function ClarificationPanel({
       >
         <div className="clar-msg-head">
           <span className="clar-msg-role">
-            {isSystem ? "System" : "Sie"}
+            {isSystem ? "Auditor" : "Sie"}
           </span>
           <span className="clar-msg-time">{relativeTime(msg.created_at)}</span>
         </div>
@@ -229,13 +229,13 @@ export function ClarificationPanel({
           msg.referenced_finding_ids.length > 0) && (
           <div className="clar-msg-refs">
             {msg.referenced_claim_ids.map((id) => (
-              <span key={id} className="clar-ref-badge clar-ref-claim">Claim</span>
+              <span key={id} className="clar-ref-badge clar-ref-claim">Anspruch</span>
             ))}
             {msg.referenced_truth_ids.map((id) => (
-              <span key={id} className="clar-ref-badge clar-ref-truth">Truth</span>
+              <span key={id} className="clar-ref-badge clar-ref-truth">Wahrheit</span>
             ))}
             {msg.referenced_finding_ids.map((id) => (
-              <span key={id} className="clar-ref-badge clar-ref-finding">Finding</span>
+              <span key={id} className="clar-ref-badge clar-ref-finding">Befund</span>
             ))}
           </div>
         )}

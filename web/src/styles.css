@@ -222,18 +222,27 @@ ul,ol{list-style:none}
    WORK CARD — The core decision unit
    ============================================================ */
 
-.wc{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-xl);margin-bottom:var(--sp-xl);transition:border-color var(--tr-base)}
+.wc{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-xl);margin-bottom:var(--sp-xl);transition:border-color var(--tr-base);position:relative}
 .wc:hover{border-color:var(--border-default)}
+/* Severity left accent bar */
+.wc[data-severity="critical"]{border-left:4px solid var(--critical);box-shadow:inset 0 0 20px rgba(217,83,79,0.06)}
+.wc[data-severity="high"]{border-left:4px solid var(--high)}
+.wc[data-severity="medium"]{border-left:4px solid var(--medium)}
+.wc[data-severity="low"]{border-left:4px solid var(--low)}
+/* Priority rank badge */
+.wc-rank{position:absolute;top:var(--sp-md);right:var(--sp-md);display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--r-full);background:var(--bg-elevated);border:1px solid var(--border-default);font-size:var(--fs-xs);font-weight:700;color:var(--text-secondary)}
+.wc[data-severity="critical"] .wc-rank{background:var(--critical-bg);color:var(--critical);border-color:rgba(217,83,79,0.3)}
+.wc[data-severity="high"] .wc-rank{background:var(--high-bg);color:var(--high);border-color:rgba(232,168,56,0.3)}
 .wc-badges{display:flex;align-items:center;gap:var(--sp-sm);flex-wrap:wrap;margin-bottom:var(--sp-md)}
 .wc-primary-source{display:flex;align-items:center;justify-content:center;margin-left:auto;width:32px;height:32px;border-radius:var(--r-full);background:var(--bg-elevated);border:1px solid var(--border-subtle)}
 .wc-primary-source svg{width:18px;height:18px}
 .wc-primary-source.src-code{color:#8b949e;background:rgba(139,148,158,0.1);border-color:rgba(139,148,158,0.25)}
 .wc-primary-source.src-confluence{color:#2684ff;background:rgba(38,132,255,0.08);border-color:rgba(38,132,255,0.2)}
-.wc-primary-source.src-metamodel{color:var(--accent);background:rgba(99,102,241,0.08);border-color:rgba(99,102,241,0.2)}
+.wc-primary-source.src-metamodel{color:#018bff;background:rgba(1,139,255,0.08);border-color:rgba(1,139,255,0.2)}
 .wc-primary-source.src-local{color:var(--text-muted);background:rgba(128,128,128,0.06);border-color:var(--border-subtle)}
 .wc-primary-source.src-jira{color:#2684ff;background:rgba(38,132,255,0.08);border-color:rgba(38,132,255,0.2)}
-.wc-title{font-size:var(--fs-lg);font-weight:700;color:var(--text-primary);line-height:1.3;margin-bottom:var(--sp-xs)}
-.wc-scope{font-size:var(--fs-base);color:var(--text-secondary);line-height:1.55;margin-bottom:var(--sp-xl)}
+.wc-title{font-size:var(--fs-lg);font-weight:700;color:#f0f3f8;line-height:1.3;margin-bottom:var(--sp-xs)}
+.wc-scope{font-size:var(--fs-base);color:#a0abc0;line-height:1.55;margin-bottom:var(--sp-xl)}
 
 /* Labels */
 .wc-label{font-size:var(--fs-xs);font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:var(--sp-sm)}

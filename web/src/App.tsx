@@ -77,11 +77,12 @@ function clusterScopeKey(item: { kind: "pkg"; pkg: DecisionPackage } | { kind: "
 const GH_SVG = <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>;
 const CONF_SVG = <svg width="14" height="14" viewBox="0 0 32 32" fill="currentColor"><path d="M3.82 22.54c-.29.47-.62 1-.87 1.34a1.2 1.2 0 00.37 1.66l5.17 3.18a1.2 1.2 0 001.66-.42c.2-.34.52-.86.89-1.43 2.64-4.14 5.3-3.63 10.11-1.62l5.31 2.23a1.2 1.2 0 001.57-.65l2.54-5.87a1.2 1.2 0 00-.63-1.57c-1.57-.68-4.68-1.99-6.27-2.67C14.5 13.53 8.62 14.17 3.82 22.54zM28.18 9.46c.29-.47.62-1 .87-1.34a1.2 1.2 0 00-.37-1.66L23.5 3.28a1.2 1.2 0 00-1.66.42c-.2.34-.52.86-.89 1.43-2.64 4.14-5.3 3.63-10.11 1.62L5.53 4.52a1.2 1.2 0 00-1.57.65L1.42 11.04a1.2 1.2 0 00.63 1.57c1.57.68 4.68 1.99 6.27 2.67 9.08 3.69 14.96 3.05 19.86-5.82z"/></svg>;
 const JIRA_SVG = <svg width="14" height="14" viewBox="0 0 32 32" fill="currentColor"><path d="M30.28 14.72L17.28 1.72 16 .44 5.37 11.07l-3.65 3.65a1.51 1.51 0 000 2.13l9.34 9.34L16 31.24l10.63-10.63.3-.3 3.35-3.46a1.51 1.51 0 000-2.13zM16 20.45l-4.45-4.45L16 11.55l4.45 4.45z"/></svg>;
+const NEO4J_SVG = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="12" cy="6" r="3"/><line x1="9" y1="7.5" x2="7.5" y2="16" stroke="currentColor" strokeWidth="1.5" fill="none"/><line x1="15" y1="7.5" x2="16.5" y2="16" stroke="currentColor" strokeWidth="1.5" fill="none"/><line x1="9" y1="18" x2="15" y2="18" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>;
 
 const SRC_CFG: Record<string, { icon: ReactNode; label: string; cls: string }> = {
   github_file:     { icon: GH_SVG,     label: "Code",       cls: "src-code" },
   confluence_page: { icon: CONF_SVG,   label: "Confluence", cls: "src-confluence" },
-  metamodel:       { icon: <span>◆</span>, label: "Metamodell", cls: "src-metamodel" },
+  metamodel:       { icon: NEO4J_SVG,  label: "Metamodell", cls: "src-metamodel" },
   local_doc:       { icon: <span>📋</span>, label: "Lokal",      cls: "src-local" },
   jira_ticket:     { icon: JIRA_SVG,   label: "Jira",       cls: "src-jira" },
   user_truth:      { icon: <span>✦</span>,  label: "Nutzer",     cls: "src-user" },
@@ -688,6 +689,7 @@ export default function App(): ReactNode {
                             {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
                             {item.kind === "pkg" ? (
                               <WorkCard id={item.pkg.package_id}
+                                rank={idx + stackPos + 1}
                                 severity={item.pkg.severity_summary} category={item.pkg.category}
                                 title={item.pkg.title} scope={item.pkg.scope_summary}
                                 recommendation={item.pkg.recommendation_summary}
@@ -709,6 +711,7 @@ export default function App(): ReactNode {
                               />
                             ) : (
                               <WorkCard id={item.f.finding_id}
+                                rank={idx + stackPos + 1}
                                 severity={item.f.severity} category={item.f.category}
                                 title={item.f.title} scope={item.f.summary}
                                 recommendation={item.f.recommendation}
@@ -1004,6 +1007,7 @@ function WorkCard(props: {
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
   metaSourceType?: string; metaSourceTypes?: string[];
   clarificationPanel?: ReactNode;
+  rank?: number;
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
   // Determine the PRIMARY source — the one most likely causing the irregularity
@@ -1014,7 +1018,9 @@ function WorkCard(props: {
     || "";
   const primaryCfg = primarySrc ? (SRC_CFG[primarySrc] ?? null) : null;
   return (
-    <article className="wc">
+    <article className="wc" data-severity={props.severity}>
+      {/* Rang-Badge */}
+      {props.rank != null && <div className="wc-rank" title={`Priorität ${props.rank}`}>#{props.rank}</div>}
       {/* 1. Typ-Badge + Schweregrad + Primary Source */}
       <div className="wc-badges">
         <span className="badge badge-cat">{de(props.category)}</span>
