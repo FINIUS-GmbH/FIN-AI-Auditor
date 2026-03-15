@@ -393,42 +393,98 @@ def _find_truth_conflicts(
     inherited_truths: list[TruthLedgerEntry],
     impacted_scope_keys: set[str],
 ) -> list[AuditFinding]:
+    """Enforce confirmed truths across ALL sources.
+
+    Core principle: A confirmed truth MUST be reflected in EVERY document
+    and code fragment.  Each source that contradicts a confirmed truth
+    gets its OWN finding so it can be individually tracked and resolved.
+    """
     findings: list[AuditFinding] = []
     active_truths = [truth for truth in inherited_truths if truth.truth_status == "active"]
+    if not active_truths:
+        return findings
+
     grouped = _group_claims(claim_records=claim_records)
+
     for truth in active_truths:
-        relevant_records = grouped.get(truth.subject_key, [])
+        truth_value = normalize_claim_value(truth.normalized_value)
+        if not truth_value:
+            continue
+
+        # Find ALL records that match by subject_key OR by subject_key prefix
+        relevant_records: list[ExtractedClaimRecord] = []
+        for key, records in grouped.items():
+            if key == truth.subject_key or key.startswith(f"{truth.subject_key}."):
+                relevant_records.extend(records)
+
         if not relevant_records:
             continue
-        claim_values = {normalize_claim_value(record.claim.normalized_value) for record in relevant_records}
-        truth_value = normalize_claim_value(truth.normalized_value)
-        if truth_value and semantic_values_conflict(
-            subject_key=truth.subject_key,
-            left_values={truth_value},
-            right_values=claim_values,
-            predicate=truth.predicate,
-        ):
+
+        # Group conflicting records BY SOURCE — each source gets its own finding
+        conflicting_by_source: dict[str, list[ExtractedClaimRecord]] = {}
+        for record in relevant_records:
+            claim_value = normalize_claim_value(record.claim.normalized_value)
+            if not claim_value:
+                continue
+            if semantic_values_conflict(
+                subject_key=truth.subject_key,
+                left_values={truth_value},
+                right_values={claim_value},
+                predicate=truth.predicate,
+            ):
+                # Key by source type + source id for per-source findings
+                source_key = f"{record.claim.source_type}:{record.evidence.location.source_id or ''}"
+                if source_key not in conflicting_by_source:
+                    conflicting_by_source[source_key] = []
+                conflicting_by_source[source_key].append(record)
+
+        # Generate ONE finding per conflicting source
+        for source_key, conflict_records in conflicting_by_source.items():
+            source_type = conflict_records[0].claim.source_type
+            source_label = {
+                "github_file": "Code",
+                "confluence_page": "Confluence",
+                "local_doc": "Lokales Dokument",
+                "metamodel": "Metamodell",
+            }.get(source_type, source_type)
+            source_path = conflict_records[0].evidence.location.path_hint or conflict_records[0].evidence.location.source_id or ""
+            source_short = source_path.split("/")[-1] if "/" in source_path else source_path
+
+            wrong_values = sorted({r.claim.normalized_value for r in conflict_records})
+
             findings.append(
                 _build_finding(
                     subject_key=truth.subject_key,
                     category="policy_conflict",
-                    severity="high",
-                    title="Gespeicherte Wahrheit kollidiert mit der aktuellen Evidenz",
+                    severity="critical",  # Confirmed truths are critical
+                    title=f"Bestaetigte Wahrheit nicht umgesetzt: {source_label} — {source_short}",
                     summary=(
-                        "Eine bereits lokal gespeicherte User- oder System-Wahrheit passt nicht mehr "
-                        "zu den aktuell gelesenen Claims."
+                        f"Die bestaetigte Wahrheit '{truth.subject_key}' "
+                        f"definiert den Wert '{truth.normalized_value}', "
+                        f"aber {source_label} '{source_short}' verwendet abweichende Werte: "
+                        f"{', '.join(wrong_values[:5])}.\n\n"
+                        f"Bestaetigte Wahrheit: {truth.predicate} = {truth.normalized_value}\n"
+                        f"Quelle der Wahrheit: {truth.source_kind}"
                     ),
                     recommendation=(
-                        "Die Wahrheit pruefen, neu bestaetigen oder bewusst supersedieren und danach "
-                        "die betroffenen Pakete neu bewerten."
+                        f"{source_label} '{source_short}' muss angepasst werden, "
+                        f"um die bestaetigte Wahrheit '{truth.normalized_value}' fuer "
+                        f"'{truth.subject_key}/{truth.predicate}' korrekt widerzuspiegeln. "
+                        f"Nach der Anpassung muss ein Delta-Abgleich erfolgen."
                     ),
-                    records=relevant_records[:3],
-                    delta_scope_affected=_is_subject_impacted(
-                        subject_key=truth.subject_key,
-                        impacted_scope_keys=impacted_scope_keys,
-                    ),
+                    records=conflict_records[:5],
+                    delta_scope_affected=True,  # Always delta-relevant for confirmed truths
+                    extra_metadata={
+                        "truth_enforcement": True,
+                        "truth_id": truth.truth_id,
+                        "confirmed_value": truth.normalized_value,
+                        "wrong_values": wrong_values[:10],
+                        "source_type": source_type,
+                        "requires_delta_recalculation": True,
+                    },
                 )
             )
+
     return findings
 
 
@@ -442,6 +498,7 @@ def _build_finding(
     recommendation: str,
     records: list[ExtractedClaimRecord],
     delta_scope_affected: bool,
+    extra_metadata: dict[str, object] | None = None,
 ) -> AuditFinding:
     semantic_signatures = sorted(
         {
@@ -463,6 +520,15 @@ def _build_finding(
     # Build concrete evidence quotes grouped by source type
     evidence_quotes = _build_evidence_quotes(records)
     enriched_summary = f"{summary}\n\n{evidence_quotes}" if evidence_quotes else summary
+    metadata: dict[str, object] = {
+        "object_key": subject_key,
+        "generated_by": "deterministic_finding_engine",
+        "delta_scope_key": package_scope_key(subject_key),
+        "delta_scope_affected": delta_scope_affected,
+        "semantic_signatures": semantic_signatures,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     return AuditFinding(
         severity=severity,
         category=category,
@@ -471,13 +537,7 @@ def _build_finding(
         recommendation=recommendation,
         canonical_key=subject_key,
         locations=[record.evidence.location for record in records if record.evidence.location is not None],
-        metadata={
-            "object_key": subject_key,
-            "generated_by": "deterministic_finding_engine",
-            "delta_scope_key": package_scope_key(subject_key),
-            "delta_scope_affected": delta_scope_affected,
-            "semantic_signatures": semantic_signatures,
-        },
+        metadata=metadata,
     )
 
 
