@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from fin_ai_auditor.api.dependencies import get_audit_service
 from fin_ai_auditor.domain.models import (
@@ -61,6 +61,22 @@ def process_decision_comment(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+
+@router.post("/runs/{run_id}/packages/{package_id}/regenerate", response_model=AuditRun)
+def regenerate_package_from_clarification(
+    run_id: str,
+    package_id: str,
+    thread_id: str = Query(...),
+    service: AuditService = Depends(get_audit_service),
+) -> AuditRun:
+    try:
+        return service.regenerate_package_from_clarification(
+            run_id=run_id,
+            package_id=package_id,
+            thread_id=thread_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.post("/runs/{run_id}/packages/{package_id}/decisions", response_model=AuditRun)
 def apply_package_decision(
@@ -233,6 +249,7 @@ def create_clarification_thread(
             package_id=payload.package_id,
             atomic_fact_id=payload.atomic_fact_id,
             purpose=payload.purpose,
+            initial_content=payload.initial_content,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

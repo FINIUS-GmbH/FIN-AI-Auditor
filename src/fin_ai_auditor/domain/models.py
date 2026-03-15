@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 FindingSeverity = Literal["critical", "high", "medium", "low"]
 FindingCategory = Literal[
     "contradiction",
+    "architecture_observation",
     "clarification_needed",
     "missing_definition",
     "missing_documentation",
@@ -839,6 +840,7 @@ class CreateClarificationThreadRequest(BaseModel):
     package_id: str | None = None
     atomic_fact_id: str | None = None
     purpose: ClarificationPurpose
+    initial_content: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def exactly_one_anchor(self) -> "CreateClarificationThreadRequest":

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +64,14 @@ class _LLMIndicationResult(BaseModel):
         description="A context-aware follow-up question to ask the user, or empty if extraction is sufficient",
     )
     extraction_notes: str = Field(default="", description="Internal extraction notes")
+    resolution_status: Literal["needs_more", "resolved"] = Field(
+        default="needs_more",
+        description="'resolved' wenn alle Fragen geklärt sind und eine überarbeitete Empfehlung formuliert werden kann. 'needs_more' wenn noch Rückfragen nötig sind."
+    )
+    resolution_summary: str = Field(
+        default="",
+        description="Nur wenn resolved: Zusammenfassung aller geklärten Punkte"
+    )
 
 
 class _LLMFollowUpResult(BaseModel):
@@ -96,6 +104,7 @@ class ClarificationService:
         package_id: str | None = None,
         atomic_fact_id: str | None = None,
         purpose: str,
+        initial_content: str | None = None,
     ) -> AuditRun:
         """Open a new clarification thread and generate the first question."""
         run = self._require_run(run_id)
@@ -118,6 +127,13 @@ class ClarificationService:
             messages=[first_question],
         )
 
+        if initial_content and initial_content.strip():
+            thread = self._process_answer_in_thread(
+                run=run,
+                thread=thread,
+                content=initial_content.strip(),
+            )
+
         log_entry = AuditAnalysisLogEntry(
             source_type="clarification_dialog",
             title="Klärungsdialog gestartet",
@@ -130,6 +146,7 @@ class ClarificationService:
                 "purpose": purpose,
                 "package_id": package_id,
                 "atomic_fact_id": atomic_fact_id,
+                "initial_message_provided": bool(initial_content and initial_content.strip()),
             },
         )
 
@@ -140,7 +157,10 @@ class ClarificationService:
                 "analysis_log": [*run.analysis_log, log_entry],
             }
         )
-        return self._audit.repository.upsert_run(run=updated)
+        persisted = self._audit.repository.upsert_run(run=updated)
+        if thread.status == "resolved":
+            return self._regenerate_package_if_needed(run=persisted, thread=thread)
+        return persisted
 
     def process_answer(
         self,
@@ -156,50 +176,11 @@ class ClarificationService:
         run = self._require_run(run_id)
         thread = self._require_thread(run, thread_id)
         self._check_message_limit(thread)
-
-        # Add user message
-        user_msg = ClarificationMessage(
-            role="user",
-            message_type="answer",
-            content=content,
-        )
-
-        # Try LLM extraction first, fall back to heuristic
-        indications: list[dict[str, str]] | None = None
-        llm_follow_up_question: str = ""
-
-        if self._has_llm():
-            try:
-                llm_result = self._run_async(
-                    self._llm_extract_indications(content, run, thread)
-                )
-                if llm_result is not None:
-                    indications = llm_result.get("indications")
-                    llm_follow_up_question = llm_result.get("follow_up_question", "")
-            except Exception as exc:
-                logger.warning(
-                    "LLM indication extraction failed, using heuristic fallback: %s", exc
-                )
-
-        # Heuristic fallback
-        if indications is None:
-            indications = self._extract_indications(content, run, thread)
-
-        # Build follow-up: either a truth proposal, follow-up question, or resolution suggestion
-        follow_up = self._generate_follow_up(
-            thread=thread,
-            user_answer=content,
-            indications=indications,
-            run=run,
-            llm_follow_up_question=llm_follow_up_question,
-        )
-
-        new_messages = [user_msg, *follow_up]
-        updated_thread = thread.model_copy(
-            update={"messages": [*thread.messages, *new_messages]}
-        )
-
-        return self._update_thread_in_run(run, updated_thread)
+        updated_thread = self._process_answer_in_thread(run=run, thread=thread, content=content)
+        persisted = self._update_thread_in_run(run, updated_thread)
+        if updated_thread.status == "resolved":
+            return self._regenerate_package_if_needed(run=persisted, thread=updated_thread)
+        return persisted
 
     def confirm_truth(
         self,
@@ -226,11 +207,22 @@ class ClarificationService:
 
         if conflicts:
             # Don't create truth yet — return a conflict resolution prompt
+            primary_conflict = conflicts[0]
             conflict_msg = ClarificationMessage(
                 role="assistant",
                 message_type="conflict_resolution",
                 content=self._format_conflict_prompt(conflicts, truth_canonical_key, truth_normalized_value),
                 referenced_truth_ids=[t.truth_id for t in conflicts],
+                metadata={
+                    "conflicting_truth_id": primary_conflict.truth_id,
+                    "proposed_canonical_key": truth_canonical_key,
+                    "proposed_normalized_value": truth_normalized_value,
+                    "proposed_subject_kind": subject_kind,
+                    "proposed_subject_key": subject_key,
+                    "proposed_predicate": predicate,
+                    "proposed_scope_kind": scope_kind,
+                    "proposed_scope_key": scope_key,
+                },
             )
             updated_thread = thread.model_copy(
                 update={"messages": [*thread.messages, conflict_msg]}
@@ -351,7 +343,8 @@ class ClarificationService:
                 "analysis_log": [*run.analysis_log, log_entry],
             }
         )
-        return self._audit.repository.upsert_run(run=updated)
+        persisted = self._audit.repository.upsert_run(run=updated)
+        return self._regenerate_package_if_needed(run=persisted, thread=updated_thread)
 
     def capture_indication(
         self,
@@ -363,10 +356,13 @@ class ClarificationService:
         """Capture user statement as an indication (elevated confidence claim, not truth)."""
         run = self._require_run(run_id)
         thread = self._require_thread(run, thread_id)
+        indication_content = content.strip() or self._latest_user_message_content(thread)
+        if not indication_content:
+            raise ValueError("Es liegt keine Nutzeräußerung vor, die als Indiz gespeichert werden kann.")
 
         # Create an indication claim
         subject_key = self._derive_subject_key(thread, run)
-        fingerprint = f"clarification:{thread.thread_id}:{content[:50]}"
+        fingerprint = f"clarification:{thread.thread_id}:{indication_content[:50]}"
         indication_claim = AuditClaimEntry(
             claim_id=new_claim_id(),
             source_type="user_truth",
@@ -374,7 +370,7 @@ class ClarificationService:
             subject_kind="clarification_indication",
             subject_key=subject_key,
             predicate="user_indication",
-            normalized_value=content,
+            normalized_value=indication_content,
             scope_kind="global",
             scope_key="*",
             confidence=INDICATION_CONFIDENCE,
@@ -391,7 +387,7 @@ class ClarificationService:
         indication_msg = ClarificationMessage(
             role="assistant",
             message_type="resolution",
-            content=f"Als Indiz gespeichert: \"{content}\". Fließt in Bewertung ein, überschreibt aber keine bestehende Wahrheit.",
+            content=f"Als Indiz gespeichert: \"{indication_content}\". Fließt in Bewertung ein, überschreibt aber keine bestehende Wahrheit.",
             outcome_type="indication_captured",
             created_claim_id=indication_claim.claim_id,
         )
@@ -406,7 +402,10 @@ class ClarificationService:
         log_entry = AuditAnalysisLogEntry(
             source_type="clarification_dialog",
             title="Indiz aus Klärungsdialog erfasst",
-            message=f"Nutzeraussage als Indiz gespeichert: \"{content[:100]}{'...' if len(content) > 100 else ''}\"",
+            message=(
+                f"Nutzeraussage als Indiz gespeichert: "
+                f"\"{indication_content[:100]}{'...' if len(indication_content) > 100 else ''}\""
+            ),
             derived_changes=[f"Claim {indication_claim.claim_id} mit Confidence {INDICATION_CONFIDENCE} angelegt."],
             impact_summary=["Beeinflusst Scoring, überschreibt keine Wahrheiten."],
             metadata={"thread_id": thread.thread_id, "claim_id": indication_claim.claim_id},
@@ -706,7 +705,12 @@ class ClarificationService:
                         "confidence_grade": confidence_grade,
                         "extraction_confidence": float(indication.get("confidence", "0.65")),
                         "detected_patterns": indication.get("detected_patterns", []),
-                        "canonical_key_hint": indication.get("canonical_key_hint", ""),
+                        **self._truth_metadata_from_indication(
+                            thread=thread,
+                            run=run,
+                            indication=indication,
+                            statement=statement,
+                        ),
                     },
                 ))
                 break  # Only one truth proposal at a time
@@ -1026,6 +1030,8 @@ class ClarificationService:
         return {
             "indications": indications if indications else None,
             "follow_up_question": result.follow_up_question,
+            "resolution_status": result.resolution_status,
+            "resolution_summary": result.resolution_summary,
         }
 
     # ── Truth Conflict Detection ──
@@ -1134,7 +1140,115 @@ class ClarificationService:
                 "analysis_log": [*run.analysis_log, log_entry],
             }
         )
-        return self._audit.repository.upsert_run(run=updated)
+        persisted = self._audit.repository.upsert_run(run=updated)
+        return self._regenerate_package_if_needed(run=persisted, thread=updated_thread)
+
+    def _process_answer_in_thread(
+        self,
+        *,
+        run: AuditRun,
+        thread: ClarificationThread,
+        content: str,
+    ) -> ClarificationThread:
+        user_msg = ClarificationMessage(
+            role="user",
+            message_type="answer",
+            content=content,
+        )
+
+        indications: list[dict[str, str]] | None = None
+        llm_follow_up_question = ""
+        resolution_status = "needs_more"
+        resolution_summary = ""
+
+        if self._has_llm():
+            try:
+                llm_result = self._run_async(
+                    self._llm_extract_indications(content, run, thread)
+                )
+                if llm_result is not None:
+                    indications = llm_result.get("indications")
+                    llm_follow_up_question = llm_result.get("follow_up_question", "")
+                    resolution_status = llm_result.get("resolution_status", "needs_more")
+                    resolution_summary = llm_result.get("resolution_summary", "")
+            except Exception as exc:
+                logger.warning(
+                    "LLM indication extraction failed, using heuristic fallback: %s", exc
+                )
+
+        if indications is None:
+            indications = self._extract_indications(content, run, thread)
+
+        if resolution_status == "resolved":
+            resolution_msg = ClarificationMessage(
+                role="assistant",
+                message_type="resolution",
+                content=f"Dialog abgeschlossen. Ergebnis: {resolution_summary}",
+                outcome_type="context_only",
+            )
+            return thread.model_copy(
+                update={
+                    "messages": [*thread.messages, user_msg, resolution_msg],
+                    "status": "resolved",
+                    "resolved_at": utc_now_iso(),
+                    "resolution_summary": resolution_summary,
+                    "triggered_delta_recompute": True,
+                }
+            )
+
+        follow_up = self._generate_follow_up(
+            thread=thread,
+            user_answer=content,
+            indications=indications,
+            run=run,
+            llm_follow_up_question=llm_follow_up_question,
+        )
+        return thread.model_copy(
+            update={"messages": [*thread.messages, user_msg, *follow_up]}
+        )
+
+    def _regenerate_package_if_needed(
+        self,
+        *,
+        run: AuditRun,
+        thread: ClarificationThread,
+    ) -> AuditRun:
+        if not thread.package_id:
+            return run
+        return self._audit.regenerate_package_from_clarification(
+            run_id=run.run_id,
+            package_id=thread.package_id,
+            thread_id=thread.thread_id,
+        )
+
+    def _truth_metadata_from_indication(
+        self,
+        *,
+        thread: ClarificationThread,
+        run: AuditRun,
+        indication: dict[str, str],
+        statement: str,
+    ) -> dict[str, object]:
+        subject_key = self._derive_subject_key(thread, run)
+        canonical_key_hint = str(indication.get("canonical_key_hint", "")).strip()
+        predicate = canonical_key_hint.split(".")[-1] if canonical_key_hint else "clarification_truth"
+        return {
+            "canonical_key_hint": canonical_key_hint,
+            "proposed_canonical_key": canonical_key_hint or subject_key,
+            "proposed_normalized_value": statement,
+            "proposed_subject_kind": "package" if thread.package_id else "atomic_fact",
+            "proposed_subject_key": subject_key,
+            "proposed_predicate": predicate,
+            "proposed_scope_kind": indication.get("scope_kind", "global") or "global",
+            "proposed_scope_key": "*",
+        }
+
+    @staticmethod
+    def _latest_user_message_content(thread: ClarificationThread) -> str:
+        for message in reversed(thread.messages):
+            if message.role == "user" and message.message_type == "answer":
+                return message.content.strip()
+        return ""
 
     # ── Helpers ──
 

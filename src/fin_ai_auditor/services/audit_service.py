@@ -40,6 +40,7 @@ from fin_ai_auditor.domain.models import (
     TruthLedgerEntry,
     WritebackApprovalRequest,
     utc_now_iso,
+    new_package_id,
 )
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
@@ -660,6 +661,201 @@ class AuditService:
             }
         )
         return self._repository.upsert_run(run=updated)
+
+    def regenerate_package_from_clarification(
+        self,
+        *,
+        run_id: str,
+        package_id: str,
+        thread_id: str,
+    ) -> AuditRun:
+        """Regenerate a decision package using clarification dialog outcomes."""
+        run = self._require_run(run_id=run_id)
+        package = self._require_package(run=run, package_id=package_id)
+        thread = next((t for t in run.clarification_threads if t.thread_id == thread_id), None)
+        if not thread:
+            raise ValueError(f"Klärungsdialog {thread_id} nicht gefunden.")
+        if thread.package_id and thread.package_id != package_id:
+            raise ValueError("Klärungsdialog ist nicht an dieses Paket gebunden.")
+
+        clarification_context = "\\n".join(
+            f"{'User' if m.role == 'user' else 'Auditor'}: {m.content}"
+            for m in thread.messages
+        )
+
+        rebuilt_packages = self._build_decision_packages(
+            findings=run.findings,
+            claims=run.claims,
+            truths=run.truths,
+            semantic_entities=run.semantic_entities,
+            semantic_relations=run.semantic_relations,
+        )
+        rebuilt_candidate = self._select_regenerated_package_candidate(
+            previous_package=package,
+            rebuilt_packages=rebuilt_packages,
+        )
+        candidate_package = rebuilt_candidate or package
+
+        revised_recommendation = self._generate_revised_recommendation(
+            package=candidate_package,
+            clarification_context=clarification_context,
+            resolution_summary=thread.resolution_summary or "",
+        )
+        new_id = new_package_id()
+
+        base_meta = dict(candidate_package.metadata or {})
+        base_meta.update({
+            "revision_of": package_id,
+            "clarification_thread_id": thread_id,
+            "revision_type": "clarification",
+            "regenerated_scope_key": _canonical_package_scope_key(package=candidate_package),
+        })
+
+        title = f"✎ {candidate_package.title}" if not candidate_package.title.startswith("✎") else candidate_package.title
+
+        revised_package = candidate_package.model_copy(update={
+            "package_id": new_id,
+            "title": title,
+            "recommendation_summary": revised_recommendation,
+            "decision_state": "open",
+            "metadata": base_meta,
+        })
+
+        updated_packages = []
+        for pkg in run.decision_packages:
+            if pkg.package_id == package_id:
+                sup_meta = dict(pkg.metadata or {})
+                sup_meta["superseded_by"] = new_id
+                updated_packages.append(pkg.model_copy(update={
+                    "decision_state": "superseded",
+                    "metadata": sup_meta,
+                }))
+            else:
+                updated_packages.append(pkg)
+        updated_packages.append(revised_package)
+
+        updated_run = run.model_copy(update={
+            "decision_packages": updated_packages,
+            "updated_at": utc_now_iso(),
+        })
+        return self._repository.upsert_run(run=updated_run)
+
+    def _generate_revised_recommendation(
+        self,
+        *,
+        package: DecisionPackage,
+        clarification_context: str,
+        resolution_summary: str,
+    ) -> str:
+        """Helper to generate a revised recommendation via LLM."""
+        fallback = f"{package.recommendation_summary}\\n\\n[!] Nach Klärung: {resolution_summary}"
+        try:
+            from fin_ai_auditor.llm import ChatMessage, GenerationConfig, LiteLLMClient
+        except Exception:
+            return fallback
+
+        configured_slots_getter = getattr(self._settings, "get_configured_llm_slots", None)
+        if not callable(configured_slots_getter):
+            return fallback
+        configured_slots = configured_slots_getter()
+        if not isinstance(configured_slots, (list, tuple)):
+            return fallback
+
+        selected_slot = None
+        for slot in configured_slots:
+            model_hint = f"{getattr(slot, 'model', '')} {getattr(slot, 'deployment', '')}".casefold()
+            if "embedding" in model_hint or "document-ai" in model_hint or "ocr" in model_hint:
+                continue
+            slot_value = getattr(slot, "slot", None)
+            if slot_value is None:
+                continue
+            selected_slot = int(slot_value)
+            break
+
+        if selected_slot is None:
+            return fallback
+
+        try:
+            client = LiteLLMClient(settings=self._settings, default_slot=selected_slot)
+        except Exception:
+            return fallback
+
+        prompt = (
+            f"Du bist der FIN-AI Auditor. Deine Aufgabe ist es, eine Lösungsempfehlung aufgrund eines Klärungsdialogs zu aktualisieren.\\n\\n"
+            f"=== Ursprüngliche Empfehlung ===\\n{package.recommendation_summary}\\n\\n"
+            f"=== Klärungsdialog mit dem User ===\\n{clarification_context}\\n\\n"
+            f"=== Zusammenfassung der Klärung ===\\n{resolution_summary}\\n\\n"
+            f"REGELN FÜR DIE NEUE EMPFEHLUNG:\\n"
+            f"1. Integriere die im Dialog getroffenen Entscheidungen in die Empfehlung.\\n"
+            f"2. Formuliere konkret, WAS exakt WO geändert werden muss, als klare Liste von Schritten.\\n"
+            f"3. Keine technischen Präfixe wie 'Write-Decider', nur klare Anweisungen wie 'Datei X ändern: ...'.\\n"
+            f"4. Behalte Hinweise auf betroffene Dateien (Vertragsketten, Schema) bei.\\n"
+            f"5. Ignoriere irrelevante Teile des Dialogs.\\n\\n"
+            f"Gib AUSSCHLIESSLICH den Text der überarbeiteten Empfehlung zurück, ohne Grußformel oder Erklärung."
+        )
+
+        import asyncio
+        import concurrent.futures
+        import logging
+        logger = logging.getLogger(__name__)
+
+        async def _call_llm() -> str:
+            msg = ChatMessage(role="user", content=prompt)
+            cfg = GenerationConfig(temperature=0.2, max_tokens=1000)
+            return await client.generate(messages=[msg], config=cfg)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(asyncio.run, _call_llm()).result(timeout=45)
+                    return result.strip()
+            else:
+                return asyncio.run(_call_llm()).strip()
+        except Exception as e:
+            logger.error("Fehler bei LLM-Regeneration von Package %s: %s", package.package_id, e)
+            return f"FEHLER BEI REVISION: {e}\\n\\nUrsprünglich:\\n{package.recommendation_summary}"
+
+    @staticmethod
+    def _select_regenerated_package_candidate(
+        *,
+        previous_package: DecisionPackage,
+        rebuilt_packages: list[DecisionPackage],
+    ) -> DecisionPackage | None:
+        previous_scope_key = _canonical_package_scope_key(package=previous_package)
+        previous_group_key = str(previous_package.metadata.get("group_key") or "").strip()
+        previous_root_bucket = str(previous_package.metadata.get("root_cause_bucket") or "").strip()
+        previous_finding_ids = set(previous_package.related_finding_ids)
+
+        ranked_candidates: list[tuple[int, DecisionPackage]] = []
+        for candidate in rebuilt_packages:
+            score = 0
+            candidate_scope_key = _canonical_package_scope_key(package=candidate)
+            candidate_group_key = str(candidate.metadata.get("group_key") or "").strip()
+            candidate_root_bucket = str(candidate.metadata.get("root_cause_bucket") or "").strip()
+            candidate_finding_ids = set(candidate.related_finding_ids)
+            if candidate_scope_key == previous_scope_key:
+                score += 4
+            if previous_group_key and candidate_group_key == previous_group_key:
+                score += 3
+            if previous_root_bucket and candidate_root_bucket == previous_root_bucket:
+                score += 3
+            if previous_finding_ids and previous_finding_ids.intersection(candidate_finding_ids):
+                score += 5
+            if score > 0:
+                ranked_candidates.append((score, candidate))
+
+        if not ranked_candidates:
+            return None
+        ranked_candidates.sort(
+            key=lambda item: (
+                -item[0],
+                severity_rank(severity=item[1].severity_summary),
+                item[1].title,
+            )
+        )
+        return ranked_candidates[0][1]
+
 
     def update_atomic_fact_status(
         self,
@@ -1771,7 +1967,12 @@ class AuditService:
             truth_map.setdefault(truth.subject_key, []).append(truth)
         entities_by_id = {entity.entity_id: entity for entity in semantic_entities}
         findings_by_cluster: dict[str, list[AuditFinding]] = defaultdict(list)
-        for finding in prioritize_findings(findings=findings):
+        actionable_findings = [
+            finding
+            for finding in findings
+            if finding.category != "architecture_observation"
+        ]
+        for finding in prioritize_findings(findings=actionable_findings):
             findings_by_cluster[_package_cluster_key(finding=finding)].append(finding)
         packages: list[DecisionPackage] = []
         for cluster_key, cluster_findings in sorted(findings_by_cluster.items(), key=lambda item: item[0]):
