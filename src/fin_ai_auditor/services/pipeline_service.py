@@ -341,13 +341,27 @@ class AuditPipelineService:
         if doc_gap_findings:
             findings.extend(doc_gap_findings)
             notes.append(f"Dokumentationsluecken-Erkennung: {len(doc_gap_findings)} fehlende Confluence-Seiten identifiziert.")
+
+        # Consensus-based target state analysis — the core question:
+        # "What is the intended BSM process according to the majority of documents,
+        #  and what is missing to describe and implement it completely?"
+        from fin_ai_auditor.services.consensus_detector import detect_consensus_deviations
+        consensus_findings = detect_consensus_deviations(
+            claim_records=claim_records,
+            confirmed_truths=truths,
+        )
+        logger.info("pipeline_consensus_analysis", extra={"event_name": "pipeline_consensus_analysis", "event_payload": {"found": len(consensus_findings)}})
+        if consensus_findings:
+            findings.extend(consensus_findings)
+            notes.append(f"Konsens-Zielbildanalyse: {len(consensus_findings)} Abweichungen vom Zielzustand gefunden.")
+
         self._audit_service.update_run_progress(
             run_id=run.run_id,
             step_key="finding_generation",
             progress_pct=86,
             current_activity=f"Insgesamt {len(findings)} Findings erzeugt. Semantischer Kontext wird angehaengt.",
             step_status="running",
-            detail=f"BSM: {len(bsm_findings)}, Doku-Luecken: {len(doc_gap_findings)}. Semantische Anreicherung laeuft.",
+            detail=f"BSM: {len(bsm_findings)}, Doku-Luecken: {len(doc_gap_findings)}, Konsens: {len(consensus_findings)}. Semantische Anreicherung laeuft.",
             worker_id=worker_id,
         )
 
