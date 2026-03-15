@@ -409,11 +409,11 @@ ul,ol{list-style:none}
 @media(max-width:1100px){.metrics-row{grid-template-columns:repeat(2,1fr)}}
 .metric-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-lg) var(--sp-xl);display:flex;align-items:center;gap:var(--sp-lg);position:relative;overflow:hidden;transition:border-color var(--tr-base)}
 .metric-card::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;border-radius:0 2px 2px 0}
-.mc-blue::before{background:var(--accent)}.mc-amber::before{background:var(--warning)}.mc-purple::before{background:#8b5cf6}.mc-green::before{background:var(--success)}
-.mc-blue{border-color:rgba(75,123,236,.2)}.mc-amber{border-color:rgba(245,158,11,.2)}.mc-purple{border-color:rgba(139,92,246,.2)}.mc-green{border-color:rgba(16,185,129,.2)}
+.mc-blue::before{background:var(--accent)}.mc-amber::before{background:var(--warning)}.mc-purple::before{background:#8b5cf6}.mc-green::before{background:var(--success)}.mc-teal::before{background:#14b8a6}.mc-rose::before{background:#f43f5e}
+.mc-blue{border-color:rgba(75,123,236,.2)}.mc-amber{border-color:rgba(245,158,11,.2)}.mc-purple{border-color:rgba(139,92,246,.2)}.mc-green{border-color:rgba(16,185,129,.2)}.mc-teal{border-color:rgba(20,184,166,.2)}.mc-rose{border-color:rgba(244,63,94,.2)}
 .metric-card:hover{border-color:var(--border-default)}
 .metric-icon{width:42px;height:42px;border-radius:var(--r-md);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
-.mc-blue .metric-icon{background:var(--accent-muted)}.mc-amber .metric-icon{background:var(--warning-bg)}.mc-purple .metric-icon{background:rgba(139,92,246,.1)}.mc-green .metric-icon{background:var(--success-bg)}
+.mc-blue .metric-icon{background:var(--accent-muted)}.mc-amber .metric-icon{background:var(--warning-bg)}.mc-purple .metric-icon{background:rgba(139,92,246,.1)}.mc-green .metric-icon{background:var(--success-bg)}.mc-teal .metric-icon{background:rgba(20,184,166,.1)}.mc-rose .metric-icon{background:rgba(244,63,94,.1)}
 .metric-body{display:flex;flex-direction:column}
 .metric-label{font-size:var(--fs-xs);color:var(--text-muted);font-weight:500;text-transform:uppercase;letter-spacing:.06em}
 .metric-value{font-size:var(--fs-2xl);font-weight:700;letter-spacing:-0.02em;color:var(--text-primary);line-height:1.1}

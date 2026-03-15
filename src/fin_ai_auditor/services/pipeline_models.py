@@ -76,3 +76,4 @@ class PipelineAnalysisResult:
     retrieval_claim_links: list[RetrievalSegmentClaimLink]
     analysis_log_messages: list[str]
     summary: str
+    llm_usage: dict = field(default_factory=dict)

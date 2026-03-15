@@ -388,6 +388,22 @@ export type AuditFinding = {
   metadata?: Record<string, unknown>;
 };
 
+export type LlmUsageByModel = {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number;
+  cost_eur: number;
+};
+
+export type LlmUsage = {
+  by_model?: Record<string, LlmUsageByModel>;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_cost_usd?: number;
+  total_cost_eur?: number;
+};
+
 export type AuditRun = {
   run_id: string;
   status: "planned" | "running" | "completed" | "failed";
@@ -408,5 +424,6 @@ export type AuditRun = {
   source_snapshots: AuditSourceSnapshot[];
   findings: AuditFinding[];
   finding_links: AuditFindingLink[];
+  llm_usage?: LlmUsage;
   error?: string | null;
 };

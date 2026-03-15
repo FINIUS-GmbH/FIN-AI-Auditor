@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def connect_database(*, db_path: Path) -> sqlite3.Connection:
@@ -407,6 +407,8 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             _ensure_confluence_analysis_cache_tables(connection=connection)
         if current < 13:
             _ensure_pipeline_cache_table(connection=connection)
+        if current < 14:
+            _ensure_llm_usage_column(connection=connection)
         connection.execute(
             """
             INSERT INTO schema_meta(key, value)
@@ -468,6 +470,12 @@ def _ensure_run_lease_columns(*, connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE audit_runs ADD COLUMN lease_expires_at TEXT")
     if not _column_exists(connection=connection, table_name="audit_runs", column_name="last_heartbeat_at"):
         connection.execute("ALTER TABLE audit_runs ADD COLUMN last_heartbeat_at TEXT")
+
+
+def _ensure_llm_usage_column(*, connection: sqlite3.Connection) -> None:
+    if _column_exists(connection=connection, table_name="audit_runs", column_name="llm_usage_json"):
+        return
+    connection.execute("ALTER TABLE audit_runs ADD COLUMN llm_usage_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def _ensure_document_cache_table(*, connection: sqlite3.Connection) -> None:

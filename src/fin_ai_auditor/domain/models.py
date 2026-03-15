@@ -560,6 +560,7 @@ class AuditRun(BaseModel):
     semantic_relations: list[SemanticRelation] = Field(default_factory=list)
     findings: list[AuditFinding] = Field(default_factory=list)
     finding_links: list[AuditFindingLink] = Field(default_factory=list)
+    llm_usage: dict = Field(default_factory=dict)
     error: str | None = None
 
 

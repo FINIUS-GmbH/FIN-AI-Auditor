@@ -114,6 +114,7 @@ class AuditPipelineService:
                 semantic_relations=analysis.semantic_relations,
                 summary=analysis.summary,
                 analysis_notes=analysis.analysis_log_messages,
+                llm_usage=analysis.llm_usage,
                 worker_id=worker_id,
             )
         self._audit_service.replace_retrieval_index(
@@ -429,6 +430,7 @@ class AuditPipelineService:
             retrieval_claim_links=retrieval_index.claim_links,
             analysis_log_messages=notes,
             summary=summary,
+            llm_usage=llm_usage,
         )
 
     def _collect_metamodel(self, *, run: AuditRun, notes: list[str], worker_id: str | None) -> CollectionBundle:

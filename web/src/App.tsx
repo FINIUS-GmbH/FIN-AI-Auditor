@@ -447,6 +447,22 @@ export default function App(): ReactNode {
                     <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt` : "–"}</span>
                   </div>
                 </div>
+                <div className="metric-card mc-teal">
+                  <div className="metric-icon">🔤</div>
+                  <div className="metric-body">
+                    <span className="metric-label">Tokens</span>
+                    <span className="metric-value">{run?.llm_usage?.total_prompt_tokens || run?.llm_usage?.total_completion_tokens ? ((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE") : "0"}</span>
+                    <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${(run.llm_usage.total_prompt_tokens ?? 0).toLocaleString("de-DE")} Prompt · ${(run.llm_usage.total_completion_tokens ?? 0).toLocaleString("de-DE")} Completion` : "–"}</span>
+                  </div>
+                </div>
+                <div className="metric-card mc-rose">
+                  <div className="metric-icon">💰</div>
+                  <div className="metric-body">
+                    <span className="metric-label">LLM-Kosten</span>
+                    <span className="metric-value">{run?.llm_usage?.total_cost_eur ? `${run.llm_usage.total_cost_eur.toFixed(4)}€` : "0€"}</span>
+                    <span className="metric-sub">{run?.llm_usage?.by_model ? Object.entries(run.llm_usage.by_model).map(([m, d]) => `${m.split("/").pop()}: ${d.calls}x ${d.cost_eur.toFixed(4)}€`).join(" · ") : "–"}</span>
+                  </div>
+                </div>
               </div>
 
               {/* Pipeline — horizontal under KPIs */}

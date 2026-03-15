@@ -423,6 +423,7 @@ class AuditService:
         semantic_relations: list[SemanticRelation],
         summary: str,
         analysis_notes: list[str],
+        llm_usage: dict | None = None,
         worker_id: str | None = None,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
@@ -459,6 +460,7 @@ class AuditService:
                 "decision_records": [],
                 "approval_requests": [],
                 "error": None,
+                "llm_usage": llm_usage or {},
             }
         )
         saved = self._repository.upsert_run(run=completed)
