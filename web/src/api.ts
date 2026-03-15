@@ -244,3 +244,117 @@ export async function executeJiraTicketWriteback(
   );
   return parseResponse<AuditRun>(response);
 }
+
+/* ============================================================
+   CLARIFICATION DIALOG API
+   ============================================================ */
+
+export async function createClarificationThread(
+  runId: string,
+  payload: {
+    package_id?: string | null;
+    atomic_fact_id?: string | null;
+    purpose: "truth_clarification" | "rating_explanation" | "action_routing";
+  },
+): Promise<AuditRun> {
+  const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/clarification-threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse<AuditRun>(response);
+}
+
+export async function sendClarificationMessage(
+  runId: string,
+  threadId: string,
+  content: string,
+): Promise<AuditRun> {
+  const response = await fetch(
+    `${API_BASE}/api/audits/runs/${runId}/clarification-threads/${threadId}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  return parseResponse<AuditRun>(response);
+}
+
+export async function confirmTruthFromClarification(
+  runId: string,
+  threadId: string,
+  payload: {
+    truth_canonical_key: string;
+    truth_normalized_value: string;
+    subject_kind: string;
+    subject_key: string;
+    predicate: string;
+    scope_kind?: string;
+    scope_key?: string;
+  },
+): Promise<AuditRun> {
+  const response = await fetch(
+    `${API_BASE}/api/audits/runs/${runId}/clarification-threads/${threadId}/confirm-truth`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return parseResponse<AuditRun>(response);
+}
+
+export async function supersedeTruthFromClarification(
+  runId: string,
+  threadId: string,
+  payload: {
+    existing_truth_id: string;
+    new_canonical_key: string;
+    new_normalized_value: string;
+    new_subject_kind: string;
+    new_subject_key: string;
+    new_predicate: string;
+    new_scope_kind?: string;
+    new_scope_key?: string;
+  },
+): Promise<AuditRun> {
+  const response = await fetch(
+    `${API_BASE}/api/audits/runs/${runId}/clarification-threads/${threadId}/supersede-truth`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return parseResponse<AuditRun>(response);
+}
+
+export async function captureIndicationFromClarification(
+  runId: string,
+  threadId: string,
+  content: string,
+): Promise<AuditRun> {
+  const response = await fetch(
+    `${API_BASE}/api/audits/runs/${runId}/clarification-threads/${threadId}/capture-indication`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  return parseResponse<AuditRun>(response);
+}
+
+export async function dismissClarificationThread(
+  runId: string,
+  threadId: string,
+): Promise<AuditRun> {
+  const response = await fetch(
+    `${API_BASE}/api/audits/runs/${runId}/clarification-threads/${threadId}/dismiss`,
+    {
+      method: "POST",
+    },
+  );
+  return parseResponse<AuditRun>(response);
+}

@@ -9,6 +9,7 @@ import {
   verifyConfluenceAccess,
 } from "./api";
 import RunModal from "./components/RunModal";
+import { ClarificationPanel } from "./components/ClarificationPanel";
 import type {
   AtlassianAuthStatus, AuditLocation, AuditRun, AuditTarget,
   AtomicFactEntry,
@@ -702,6 +703,9 @@ export default function App(): ReactNode {
                                 onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 appBusy={appBusy}
+                                clarificationPanel={
+                                  run ? <ClarificationPanel run={run} packageId={item.pkg.package_id} onRunUpdated={upd} /> : undefined
+                                }
                               />
                             ) : (
                               <WorkCard id={item.f.finding_id}
@@ -999,6 +1003,7 @@ function WorkCard(props: {
   onAccept: () => void; onReject: () => void; onSpecify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
   metaSourceType?: string; metaSourceTypes?: string[];
+  clarificationPanel?: ReactNode;
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
   // Determine the PRIMARY source — the one most likely causing the irregularity
@@ -1106,6 +1111,9 @@ function WorkCard(props: {
           </div>
         )}
       </div>
+
+      {/* Klärungsdialog */}
+      {props.clarificationPanel}
     </article>
   );
 }
