@@ -190,7 +190,7 @@ const EMPTY_AUTH: AtlassianAuthStatus = {
    ============================================================ */
 
 export default function App(): ReactNode {
-  const [view, setView] = useState<"work" | "history">("work");
+  const [view, setView] = useState<"work" | "structure" | "history">("work");
   const [runs, setRuns] = useState<AuditRun[]>([]);
   const [selId, setSelId] = useState("");
   const [boot, setBoot] = useState<BootstrapData | null>(null);
@@ -427,15 +427,19 @@ export default function App(): ReactNode {
           <div className="sidebar-brand-icon">🛡</div>
           <div className="sidebar-brand-text">
             <span className="sidebar-brand-name">FIN-AI Auditor</span>
-            <span className="sidebar-brand-sub">Governance Workbench</span>
+            <span className="sidebar-brand-sub">Governance-Konsole</span>
           </div>
         </div>
 
         <div className="sidebar-nav">
           <button className={`nav-item${view === "work" ? " active" : ""}`} onClick={() => setView("work")}>
-            <span className="nav-icon">⚡</span>
-            <span className="nav-text">Arbeitsfläche</span>
+            <span className="nav-icon">🔍</span>
+            <span className="nav-text">Befund-Auditierung</span>
             {(openCount + pendCount) > 0 && <span className="nav-badge">{openCount + pendCount}</span>}
+          </button>
+          <button className={`nav-item${view === "structure" ? " active" : ""}`} onClick={() => setView("structure")}>
+            <span className="nav-icon">📐</span>
+            <span className="nav-text">Doku-Strukturierung</span>
           </button>
           <button className={`nav-item${view === "history" ? " active" : ""}`} onClick={() => setView("history")}>
             <span className="nav-icon">📋</span>
@@ -466,9 +470,9 @@ export default function App(): ReactNode {
         {/* Header */}
         <header className="header">
           <div className="header-left">
-            <h1>{view === "work" ? "Arbeitsfläche" : "Verlauf"}</h1>
+            <h1>{view === "work" ? "Befund-Auditierung" : view === "structure" ? "Doku-Strukturierung" : "Verlauf"}</h1>
             {view === "work" && run && (
-              <p className="header-sub">{openCount} offene Bewertungen · {activeFacts.length} aktive Fakten · {pendCount} ausstehende Freigaben</p>
+              <p className="header-sub">{openCount} Probleme zu bewerten · {activeFacts.length} bestätigte Fakten · {pendCount} Änderungen zur Freigabe</p>
             )}
           </div>
           <div className="header-right">
@@ -568,6 +572,19 @@ export default function App(): ReactNode {
                     <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE")} Token` : "–"}</span>
                   </div>
                 </div>
+                {boot?.quality_gate?.gold_set && (
+                  <div className={`metric-card ${boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "mc-green" : "mc-amber"}`} title="Automatische Qualitätsprüfung: Werden alle bekannten Testfälle korrekt erkannt?">
+                    <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+                    <div className="metric-body">
+                      <span className="metric-label">Qualitäts-Gate</span>
+                      <span className="metric-value">{boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "✓ Bestanden" : "⚠ Offen"}</span>
+                      <span className="metric-sub">
+                        Ref: {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations}
+                        {boot.quality_gate.delta_recompute ? ` · Δ: ${boot.quality_gate.delta_recompute.matched_expectations}/${boot.quality_gate.delta_recompute.total_expectations}` : ""}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Pipeline — horizontal under KPIs */}
@@ -669,27 +686,17 @@ export default function App(): ReactNode {
                   <section>
                     <div className="section-head">
                       <h2>Offene Probleme</h2>
-                      <span className="section-count">{finalCards.length} von {cards.length} angezeigt</span>
+                      <span className="section-count">{finalCards.length} Entscheidungen ausstehend — sortiert nach Dringlichkeit</span>
                     </div>
-                    <div className="card-stack-nav">
-                      <button className="btn btn-outline btn-sm" disabled={idx === 0} onClick={() => setCardIdx(Math.max(0, idx - 1))}>← Zurück</button>
-                      <span className="text-sm text-muted">{idx + 1} / {finalCards.length}</span>
-                      <button className="btn btn-outline btn-sm" disabled={idx >= finalCards.length - 1} onClick={() => setCardIdx(idx + 1)}>Weiter →</button>
-                    </div>
-                    <div className="card-stack">
-                      {visibleCards.map((group, stackPos) => {
+                    <div className="card-list">
+                      {finalCards.map((group, cardRank) => {
                         const item = group.root;
-                        const zIndex = 10 - stackPos;
-                        const offset = stackPos * 8;
-                        const scale = 1 - stackPos * 0.03;
-                        const opacity = stackPos === 0 ? 1 : 0.7 - stackPos * 0.15;
                         return (
-                          <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id}
-                            className="card-stack-item" style={{ zIndex, transform: `translateY(${offset}px) scale(${scale})`, opacity, pointerEvents: stackPos === 0 ? "auto" : "none" }}>
+                          <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id} className="card-list-item">
                             {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
                             {item.kind === "pkg" ? (
                               <WorkCard id={item.pkg.package_id}
-                                rank={idx + stackPos + 1}
+                                rank={cardRank + 1}
                                 severity={item.pkg.severity_summary} category={item.pkg.category}
                                 title={item.pkg.title} scope={item.pkg.scope_summary}
                                 recommendation={item.pkg.recommendation_summary}
@@ -713,7 +720,7 @@ export default function App(): ReactNode {
                               />
                             ) : (
                               <WorkCard id={item.f.finding_id}
-                                rank={idx + stackPos + 1}
+                                rank={cardRank + 1}
                                 severity={item.f.severity} category={item.f.category}
                                 title={item.f.title} scope={item.f.summary}
                                 recommendation={item.f.recommendation}
@@ -914,67 +921,59 @@ export default function App(): ReactNode {
                 </section>
               )}
 
+              {/* Qualitäts-Gate Detail (aufklappbar) */}
               {boot?.quality_gate?.gold_set && boot?.quality_gate?.delta_recompute && (
-                <section>
-                  <div className="section-head">
-                    <h2>Qualitäts-Gate</h2>
-                    <span className="section-count">
-                      {boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute.passed ? "Gates grün" : "Gate offen"}
-                    </span>
+                <details className="gate-details">
+                  <summary className="gate-summary">Qualitäts-Gate Details</summary>
+                  <div className="gate-grid">
+                    <div className="gate-card">
+                      <div className="gate-card-head">
+                        <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
+                          {boot.quality_gate.gold_set.passed ? "Bestanden" : "Offen"}
+                        </span>
+                        <strong>Referenz-Set</strong>
+                        <span className="badge badge-cat">{boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer</span>
+                      </div>
+                      <ul className="gate-kpis">
+                        <li>Trefferquote: {Math.round(boot.quality_gate.gold_set.recall * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%)</li>
+                        <li>Präzision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%)</li>
+                        <li>Fehlalarme: {boot.quality_gate.gold_set.false_positives} (Max: {boot.quality_gate.gold_set.max_false_positives})</li>
+                      </ul>
+                      {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
+                        <div className="gate-reasons">{boot.quality_gate.gold_set.failure_reasons.join(" · ")}</div>
+                      )}
+                    </div>
+                    <div className="gate-card">
+                      <div className="gate-card-head">
+                        <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
+                          {boot.quality_gate.delta_recompute.passed ? "Bestanden" : "Offen"}
+                        </span>
+                        <strong>Delta-Neubewertung</strong>
+                        <span className="badge badge-cat">{boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Treffer</span>
+                      </div>
+                      <ul className="gate-kpis">
+                        <li>Trefferquote: {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_recall * 100)}%)</li>
+                        <li>Präzision: {Math.round(boot.quality_gate.delta_recompute.precision * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_precision * 100)}%)</li>
+                        <li>Fehlalarme: {boot.quality_gate.delta_recompute.false_positives} (Max: {boot.quality_gate.delta_recompute.max_false_positives})</li>
+                      </ul>
+                      {boot.quality_gate.delta_recompute.failure_reasons.length > 0 && (
+                        <div className="gate-reasons">{boot.quality_gate.delta_recompute.failure_reasons.join(" · ")}</div>
+                      )}
+                    </div>
                   </div>
-                  <article className="wc">
-                    <div className="wc-badges">
-                      <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
-                        {boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}
-                      </span>
-                      <span className="badge badge-cat">
-                        {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer
-                      </span>
-                    </div>
-                    <h3 className="wc-title">Referenz-Set</h3>
-                    <div className="wc-context">
-                      <div className="wc-label">Qualitätsstand</div>
-                      <ul>
-                        <li>Trefferquote: {Math.round(boot.quality_gate.gold_set.recall * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%</li>
-                        <li>Präzision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% von geforderten {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%</li>
-                        <li>Fehlalarme: {boot.quality_gate.gold_set.false_positives} von maximal {boot.quality_gate.gold_set.max_false_positives}</li>
-                      </ul>
-                    </div>
-                    {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
-                      <div className="wc-rec">
-                        <div className="wc-label">Offene Gate-Gründe</div>
-                        <div className="rec-text">{boot.quality_gate.gold_set.failure_reasons.join(" · ")}</div>
-                      </div>
-                    )}
-                  </article>
-                  <article className="wc">
-                    <div className="wc-badges">
-                      <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
-                        {boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}
-                      </span>
-                      <span className="badge badge-cat">
-                        {boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Treffer
-                      </span>
-                    </div>
-                    <h3 className="wc-title">Delta-Recompute</h3>
-                    <div className="wc-context">
-                      <div className="wc-label">Neubewertungs-Qualität</div>
-                      <ul>
-                        <li>Recall: {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% von geforderten {Math.round(boot.quality_gate.delta_recompute.required_recall * 100)}%</li>
-                        <li>Precision: {Math.round(boot.quality_gate.delta_recompute.precision * 100)}% von geforderten {Math.round(boot.quality_gate.delta_recompute.required_precision * 100)}%</li>
-                        <li>False Positives: {boot.quality_gate.delta_recompute.false_positives} von maximal {boot.quality_gate.delta_recompute.max_false_positives}</li>
-                      </ul>
-                    </div>
-                    {boot.quality_gate.delta_recompute.failure_reasons.length > 0 && (
-                      <div className="wc-rec">
-                        <div className="wc-label">Offene Gate-Gründe</div>
-                        <div className="rec-text">{boot.quality_gate.delta_recompute.failure_reasons.join(" · ")}</div>
-                      </div>
-                    )}
-                  </article>
-                </section>
+                </details>
               )}
             </>
+          ) : view === "structure" ? (
+            /* ═══════════════ DOKU-STRUKTURIERUNG ═══════════════ */
+            <div className="structure-placeholder">
+              <div className="empty-state">
+                <div className="empty-icon">📐</div>
+                <h3>Doku-Strukturierung</h3>
+                <p>Hier können Sie die Dokumentenstruktur im Confluence-Bereich reorganisieren: Seiten umsortieren, umbenennen, verlinken und neu gruppieren.</p>
+                <p className="text-muted">Dieser Bereich wird in einer kommenden Version verfügbar sein.</p>
+              </div>
+            </div>
           ) : (
             /* ═══════════════ HISTORY PANEL ═══════════════ */
             <HistoryView run={run} boot={boot} />
