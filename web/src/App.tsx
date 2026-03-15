@@ -1114,7 +1114,12 @@ function WorkCard(props: {
       </div>
 
       {/* Klärungsdialog */}
-      {props.clarificationPanel}
+      {props.clarificationPanel && (
+        <div className="wc-context">
+          <div className="wc-label">Klärung & Rückfragen</div>
+          {props.clarificationPanel}
+        </div>
+      )}
     </article>
   );
 }

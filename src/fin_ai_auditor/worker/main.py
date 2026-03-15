@@ -11,15 +11,24 @@ from fin_ai_auditor.runtime_logging import setup_logging
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
+from fin_ai_auditor.services.operational_readiness import ensure_runtime_ready
 from fin_ai_auditor.services.pipeline_service import AuditPipelineService
 from fin_ai_auditor.services.runtime_observability_service import RuntimeObservabilityService
+from fin_ai_auditor.services.secret_store import build_secret_store
 
 logger = logging.getLogger(__name__)
 
 
 def process_once() -> bool:
     settings = get_settings()
-    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    repository = SQLiteAuditRepository(
+        db_path=settings.database_path,
+        secret_store=build_secret_store(
+            mode=settings.secret_storage_mode,
+            service_name=settings.secret_storage_service_name,
+        ),
+    )
+    ensure_runtime_ready(settings=settings, repository=repository, context="worker")
     audit_service = AuditService(repository=repository, settings=settings)
     atlassian_oauth_service = AtlassianOAuthService(repository=repository, settings=settings)
     observability = RuntimeObservabilityService(repository=repository)

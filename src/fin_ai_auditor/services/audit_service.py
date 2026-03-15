@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from typing import Final
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -966,6 +967,14 @@ class AuditService:
                 existing_preview=payload_preview,
                 brief=brief,
             )
+        target_guard = self._build_writeback_target_guard(
+            target_type=target_type,
+            target_url=effective_target_url,
+            extra_metadata=approval_metadata,
+        )
+        if list(target_guard.get("blockers") or []):
+            raise ValueError("; ".join(str(item).strip() for item in list(target_guard.get("blockers") or []) if str(item).strip()))
+        approval_metadata["target_guard"] = target_guard
         approval_metadata["writeback_verification"] = self._build_writeback_verification_metadata(
             target_type=target_type,
             target_url=effective_target_url,
@@ -1262,6 +1271,20 @@ class AuditService:
             extra_metadata=approval.metadata,
         )
         try:
+            self._assert_writeback_target_allowed(
+                target_type="jira_ticket_create",
+                verification_metadata=verification_metadata,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="jira_ticket_create",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
+        try:
             access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
                 required_scopes={"write:jira-work"}
             )
@@ -1409,6 +1432,20 @@ class AuditService:
             target_url=approval.target_url,
             extra_metadata=approval.metadata,
         )
+        try:
+            self._assert_writeback_target_allowed(
+                target_type="confluence_page_update",
+                verification_metadata=verification_metadata,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="confluence_page_update",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         try:
             access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
                 required_scopes={"write:page:confluence"}
@@ -1575,6 +1612,11 @@ class AuditService:
                 verification["page_id"] = str(preview.get("page_id") or "").strip() or None
                 verification["patch_execution_ready"] = bool(preview.get("execution_ready"))
                 verification["patch_blockers"] = list(preview.get("blockers") or [])
+        verification["target_guard"] = self._build_writeback_target_guard(
+            target_type=target_type,
+            target_url=target_url,
+            extra_metadata=extra_metadata,
+        )
         return verification
 
     @staticmethod
@@ -1599,6 +1641,18 @@ class AuditService:
                 text = str(blocker).strip()
                 if text:
                     blockers.append(text)
+        target_guard = verification_metadata.get("target_guard")
+        if isinstance(target_guard, dict):
+            blockers.extend(
+                str(item).strip()
+                for item in list(target_guard.get("blockers") or [])
+                if str(item).strip()
+            )
+            warnings.extend(
+                str(item).strip()
+                for item in list(target_guard.get("warnings") or [])
+                if str(item).strip()
+            )
         if verification_metadata.get("target_url") in {None, ""}:
             warnings.append("Ziel-URL ist noch nicht explizit gesetzt.")
         if verification_metadata.get("redirect_uri_matches_local_api") is False:
@@ -1608,6 +1662,91 @@ class AuditService:
             "blockers": _dedupe_preserve_order(blockers),
             "warnings": _dedupe_preserve_order(warnings),
         }
+
+    def _build_writeback_target_guard(
+        self,
+        *,
+        target_type: str,
+        target_url: str | None,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_target_url = str(target_url or "").strip() or None
+        blockers: list[str] = []
+        warnings: list[str] = []
+        guard: dict[str, object] = {
+            "mode": self._settings.writeback_target_mode,
+            "target_type": target_type,
+            "target_url": normalized_target_url,
+            "allowed_confluence_space_keys": self._settings.get_allowed_writeback_confluence_space_keys(),
+            "allowed_jira_project_keys": self._settings.get_allowed_writeback_jira_project_keys(),
+        }
+        if self._settings.writeback_target_mode == "disabled":
+            blockers.append("Externer Writeback ist im aktuellen Betriebsmodus deaktiviert.")
+        if target_type == "jira_ticket_create":
+            issue_payload = (extra_metadata or {}).get("jira_issue_payload")
+            project_key = ""
+            if isinstance(issue_payload, dict):
+                fields = issue_payload.get("fields")
+                if isinstance(fields, dict):
+                    project = fields.get("project")
+                    if isinstance(project, dict):
+                        project_key = _normalize_policy_key(project.get("key"))
+            project_key = project_key or _normalize_policy_key(self._settings.fixed_jira_project_key)
+            guard["project_key"] = project_key or None
+            if not project_key:
+                blockers.append("Jira-Writeback hat keinen gueltigen Projekt-Key.")
+            elif project_key not in self._settings.get_allowed_writeback_jira_project_keys():
+                blockers.append(
+                    f"Jira-Writeback auf Projekt {project_key} ist nicht freigegeben."
+                )
+            expected_host = _normalized_host(self._settings.jira_board_url)
+            actual_host = _normalized_host(normalized_target_url)
+            guard["expected_host"] = expected_host
+            guard["actual_host"] = actual_host
+            if expected_host and actual_host and actual_host != expected_host:
+                blockers.append(
+                    f"Jira-Writeback zeigt auf Host {actual_host} statt auf den freigegebenen Host {expected_host}."
+                )
+        elif target_type == "confluence_page_update":
+            preview = (extra_metadata or {}).get("confluence_patch_preview")
+            space_key = ""
+            if isinstance(preview, dict):
+                space_key = _normalize_policy_key(preview.get("space_key"))
+            space_key = space_key or _normalize_policy_key(self._settings.fixed_confluence_space_key)
+            guard["space_key"] = space_key or None
+            if not space_key:
+                blockers.append("Confluence-Writeback hat keinen gueltigen Space-Key.")
+            elif space_key not in self._settings.get_allowed_writeback_confluence_space_keys():
+                blockers.append(
+                    f"Confluence-Writeback auf Space {space_key} ist nicht freigegeben."
+                )
+            expected_host = _normalized_host(self._settings.confluence_home_url)
+            actual_host = _normalized_host(normalized_target_url)
+            guard["expected_host"] = expected_host
+            guard["actual_host"] = actual_host
+            if expected_host and actual_host and actual_host != expected_host:
+                blockers.append(
+                    f"Confluence-Writeback zeigt auf Host {actual_host} statt auf den freigegebenen Host {expected_host}."
+                )
+            if not normalized_target_url:
+                warnings.append("Confluence-Zielseite ist noch nicht als konkrete URL aufgeloest.")
+        guard["blockers"] = _dedupe_preserve_order(blockers)
+        guard["warnings"] = _dedupe_preserve_order(warnings)
+        guard["allowed"] = not bool(guard["blockers"])
+        return guard
+
+    @staticmethod
+    def _assert_writeback_target_allowed(
+        *,
+        target_type: str,
+        verification_metadata: dict[str, object],
+    ) -> None:
+        target_guard = verification_metadata.get("target_guard")
+        if not isinstance(target_guard, dict):
+            raise ValueError(f"{target_type} kann ohne Target-Guard nicht ausgefuehrt werden.")
+        blockers = [str(item).strip() for item in list(target_guard.get("blockers") or []) if str(item).strip()]
+        if blockers:
+            raise ValueError("; ".join(blockers))
 
     @staticmethod
     def _build_writeback_execution_token(
@@ -1972,7 +2111,12 @@ class AuditService:
             for finding in findings
             if finding.category != "architecture_observation"
         ]
-        for finding in prioritize_findings(findings=actionable_findings):
+        prioritized_actionable_findings = prioritize_findings(findings=actionable_findings)
+        finding_priority_ranks = {
+            finding.finding_id: index
+            for index, finding in enumerate(prioritized_actionable_findings)
+        }
+        for finding in prioritized_actionable_findings:
             findings_by_cluster[_package_cluster_key(finding=finding)].append(finding)
         packages: list[DecisionPackage] = []
         for cluster_key, cluster_findings in sorted(findings_by_cluster.items(), key=lambda item: item[0]):
@@ -2031,6 +2175,11 @@ class AuditService:
                 dominant_category = primary_finding.category if primary_finding is not None else _dominant_category(findings=ordered_bucket_findings)
                 severity_summary = _highest_severity(findings=ordered_bucket_findings)
                 primary_finding_id = primary_finding.finding_id if primary_finding is not None else None
+                primary_finding_rank = (
+                    int(finding_priority_ranks.get(primary_finding_id, 999_999))
+                    if primary_finding_id is not None
+                    else 999_999
+                )
                 package_scope_keys = _package_scope_keys_for_findings(findings=ordered_bucket_findings) or set(cluster_scope_keys)
                 primary_scope_key = _primary_scope_key_for_findings(
                     findings=ordered_bucket_findings,
@@ -2437,6 +2586,7 @@ class AuditService:
                             "root_cause_label": root_cause_label(bucket=root_bucket),
                             "root_cause_priority": root_cause_priority(bucket=root_bucket),
                             "primary_finding_id": primary_finding_id,
+                            "primary_finding_rank": primary_finding_rank,
                             "supporting_problem_count": max(len(problems) - 1, 0),
                             "action_lanes": _dedupe_preserve_order(
                                 [
@@ -2464,13 +2614,105 @@ class AuditService:
                                 (primary_finding.metadata.get("causal_group_key") if primary_finding is not None else "")
                                 or cluster_key
                             ),
+                            "grouped_boundary_paths": any(
+                                bool(finding.metadata.get("grouped_boundary_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "boundary_path_type": next(
+                                (
+                                    str(finding.metadata.get("boundary_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("boundary_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "boundary_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "boundary_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("boundary_function_names") or [])
+                                    if str(function_name).strip()
+                                ]
+                            ),
+                            "grouped_eventual_paths": any(
+                                bool(finding.metadata.get("grouped_eventual_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "eventual_path_type": next(
+                                (
+                                    str(finding.metadata.get("eventual_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("eventual_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "eventual_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if bool(finding.metadata.get("grouped_eventual_paths"))
+                                    and finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "eventual_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    if bool(finding.metadata.get("grouped_eventual_paths")) and str(function_name).strip()
+                                ]
+                            ),
+                            "grouped_chain_paths": any(
+                                bool(finding.metadata.get("grouped_chain_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "chain_path_type": next(
+                                (
+                                    str(finding.metadata.get("chain_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("chain_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "chain_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if bool(finding.metadata.get("grouped_chain_paths"))
+                                    and finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "chain_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    if bool(finding.metadata.get("grouped_chain_paths")) and str(function_name).strip()
+                                ]
+                            ),
+                            "chain_line_windows": _dedupe_preserve_order(
+                                [
+                                    str(line_window).strip()
+                                    for finding in ordered_bucket_findings
+                                    for line_window in (finding.metadata.get("sequence_line_windows") or [])
+                                    if bool(finding.metadata.get("grouped_chain_paths")) and str(line_window).strip()
+                                ]
+                            ),
                         },
                     )
                 )
         return sorted(
             packages,
             key=lambda package: (
-                int(package.metadata.get("package_sort_rank") or 999),
+                int(package.metadata.get("package_sort_rank")) if package.metadata.get("package_sort_rank") is not None else 999,
+                int(package.metadata.get("primary_finding_rank")) if package.metadata.get("primary_finding_rank") is not None else 999_999,
                 severity_rank(severity=package.severity_summary),
                 package.title,
             ),
@@ -3418,7 +3660,7 @@ class AuditService:
                 content_hash="sha256:demo-confluence-page",
                 sync_token="confluence:demo-page-1:v1",
                 metadata={
-                    "space_key": run.target.confluence_space_keys[:1],
+                    "space_key": run.target.confluence_space_keys[0] if run.target.confluence_space_keys else None,
                     "confluence_url": self._settings.confluence_home_url,
                 },
             ),
@@ -3609,6 +3851,46 @@ def _severity_rank(severity: str) -> int:
 
 
 def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[AuditFinding]) -> str:
+    grouped_boundary_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        path_count = int(grouped_boundary_finding.metadata.get("path_count") or 0)
+        if path_count > 0:
+            return f"Manuelle Antwortpfade angleichen ({path_count} Entry-Points)"
+        return "Manuelle Antwortpfade angleichen"
+    grouped_eventual_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        title_prefix = str(grouped_eventual_finding.metadata.get("grouped_eventual_package_title") or "").strip()
+        path_count = int(grouped_eventual_finding.metadata.get("path_count") or 0)
+        if title_prefix:
+            if path_count > 0:
+                return f"{title_prefix} ({path_count} Pfade)"
+            return title_prefix
+    grouped_chain_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        path_count = int(grouped_chain_finding.metadata.get("path_count") or 0)
+        if path_count > 0:
+            return f"Reaggregation atomisch schliessen ({path_count} Pfade)"
+        return "Reaggregation atomisch schliessen"
     root_label = root_cause_label(bucket=root_cause_bucket)
     # Use the primary finding's actual human-readable title
     primary_title = ""
@@ -3632,6 +3914,58 @@ def _package_scope_summary(
     semantic_entities: list[SemanticEntity],
     semantic_relations: list[SemanticRelation],
 ) -> str:
+    grouped_boundary_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_boundary_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        return f"Manuelle bsmAnswer-Entry-Points · {path_count} Pfade betroffen{function_suffix}"
+    grouped_eventual_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        scope_label = str(grouped_eventual_finding.metadata.get("grouped_eventual_scope_label") or "").strip()
+        function_names = [
+            str(item).strip()
+            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_eventual_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        if scope_label:
+            return f"{scope_label} · {path_count} Pfade betroffen{function_suffix}"
+    grouped_chain_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_chain_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        return f"Reaggregation-/Rebuild-Pfade · {path_count} Pfade betroffen{function_suffix}"
     categories = _dedupe_preserve_order([finding.category for finding in findings])
     root_label = root_cause_label(bucket=root_cause_bucket)
     semantic_suffix = ""
@@ -3669,6 +4003,65 @@ def _package_recommendation_summary(
     causal_schema_validation_statuses: list[str],
 ) -> str:
     ordered_findings = order_package_findings(findings=findings, package_bucket=root_cause_bucket)
+    grouped_boundary_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
+            if str(item).strip()
+        ]
+        base = (
+            "Die manuellen Antwort-Entry-Points auf einen kanonischen Pfad zusammenziehen und "
+            "phase_run_id/run_id bis zur bsmAnswer-Persistenz konsistent durchreichen."
+        )
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
+    grouped_eventual_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        base = str(grouped_eventual_finding.recommendation or "").strip()
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
+    grouped_chain_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        base = (
+            "Supersede-, Rebuild- und Materialisierungsschritte ueber die Reaggregationspfade in denselben "
+            "transaktionalen Schutzraum ziehen oder eine Ersatzkette aufbauen, bevor die alte Kette deaktiviert wird."
+        )
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
     recommendations = _dedupe_preserve_order([finding.recommendation for finding in ordered_findings if finding.recommendation])
 
     # Build a concise "affected sources" hint
@@ -3784,6 +4177,29 @@ def _claims_for_finding_scope(*, finding: AuditFinding, claims: list[AuditClaimE
         or any(package_scope_key(claim.subject_key) == package_scope_key(target_key) for target_key in target_keys)
     ]
     return matching or list(claims)
+
+
+def _normalized_host(url: str | None) -> str | None:
+    text = str(url or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    host = str(parsed.netloc or parsed.path or "").strip().lower()
+    return host or None
+
+
+def _normalize_policy_key(value: object) -> str:
+    if isinstance(value, (list, tuple, set)):
+        first = next((item for item in value if str(item).strip()), "")
+        return _normalize_policy_key(first)
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return ""
+        first = inner.split(",", 1)[0].strip().strip("'\"")
+        return first.upper()
+    return text.strip("'\"").upper()
 
 
 def _atomic_fact_key(*, finding: AuditFinding) -> str:

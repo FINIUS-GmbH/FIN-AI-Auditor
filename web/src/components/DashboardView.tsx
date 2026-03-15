@@ -1,3 +1,5 @@
+import { categoryLabel } from "../categoryLabels";
+import { eventualPathMeta } from "../eventualPathMeta";
 import type { AuditRun, BootstrapData } from "../types";
 
 type DashboardViewProps = {
@@ -28,8 +30,26 @@ export function DashboardView({
     (sum, r) => sum + r.approval_requests.filter((a) => a.status === "pending").length,
     0
   );
+  const boundaryPathFindings = selectedRun?.findings.filter((f) => f.category === "legacy_path_gap").length ?? 0;
   const totalClaims = selectedRun?.claims.length ?? 0;
   const totalTruths = selectedRun?.truths.filter((t) => t.truth_status === "active").length ?? 0;
+  const groupedAsyncClusters = (selectedRun?.decision_packages ?? [])
+    .filter((pkg) => Boolean(pkg.metadata?.grouped_eventual_paths))
+    .map((pkg) => {
+      const subtype = String(pkg.metadata?.eventual_path_type ?? "").trim();
+      const meta = eventualPathMeta(subtype);
+      return {
+        packageId: pkg.package_id,
+        subtype,
+        label: meta?.label ?? "Async",
+        icon: meta?.icon ?? "⏳",
+        tone: meta?.tone ?? "generic",
+        pathCount: Number(pkg.metadata?.eventual_path_count ?? pkg.metadata?.path_count ?? 0),
+      };
+    })
+    .filter((item) => item.subtype && item.pathCount > 0)
+    .sort((a, b) => b.pathCount - a.pathCount || a.label.localeCompare(b.label, "de-DE"))
+    .slice(0, 3);
 
   const recentFindings = selectedRun?.findings.slice(0, 5) ?? [];
 
@@ -62,7 +82,36 @@ export function DashboardView({
           <span className="metric-value">{totalClaims}</span>
           <span className="metric-hint">{totalTruths} aktive Wahrheiten</span>
         </button>
+        <button className="metric-card mc-copper" onClick={() => onNavigate("findings")} style={{ textAlign: "left", cursor: "pointer" }}>
+          <span className="metric-label">Boundary-Pfade</span>
+          <span className="metric-value">{boundaryPathFindings}</span>
+          <span className="metric-hint">Im ausgewählten Run</span>
+        </button>
       </div>
+
+      {groupedAsyncClusters.length > 0 ? (
+        <div className="async-kpi-section">
+          <div className="async-kpi-head">
+            <strong>Async-Cluster</strong>
+            <span>Nur gruppierte Pfade mit echtem Paket-Signal</span>
+          </div>
+          <div className="async-kpi-grid">
+            {groupedAsyncClusters.map((cluster) => (
+              <button
+                key={cluster.packageId}
+                className={`async-kpi-card async-kpi-${cluster.tone}`}
+                onClick={() => onNavigate("packages")}
+                style={{ textAlign: "left", cursor: "pointer" }}
+              >
+                <span className="async-kpi-kicker">Gruppierter Async-Pfad</span>
+                <span className="async-kpi-label">{cluster.icon} {cluster.label}</span>
+                <span className="async-kpi-value">{cluster.pathCount}</span>
+                <span className="async-kpi-hint">Pfade im ausgewählten Run</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {/* Progress of selected run */}
       {selectedRun ? (
@@ -125,7 +174,7 @@ export function DashboardView({
             <div className="finding-card" key={f.finding_id}>
               <div className="finding-card-header">
                 <span className={`badge badge-${f.severity}`}>{f.severity}</span>
-                <span className="badge badge-category">{f.category}</span>
+                <span className="badge badge-category">{categoryLabel(f.category)}</span>
                 <span className={`badge badge-state badge-${f.resolution_state || "open"}`}>
                   {f.resolution_state || "open"}
                 </span>

@@ -78,6 +78,15 @@ def build_semantic_graph(
                 subject_entity=subject_entity,
             )
         )
+        semantic_entity_ids.extend(
+            _ensure_evidence_chain_step_relations(
+                entity_map=entity_map,
+                relation_map=relation_map,
+                run_id=run_id,
+                claim=claim,
+                subject_entity=subject_entity,
+            )
+        )
 
         claim_context_by_id[claim.claim_id] = {
             "semantic_entity_ids": _dedupe_preserve_order(semantic_entity_ids),
@@ -145,15 +154,34 @@ def build_semantic_graph(
                             )
                         ),
                     ),
-                    "semantic_contract_paths": _contract_path_summaries(
-                        relation_map=relation_map,
-                        entities_by_id=entities_by_id,
-                        entity_ids=set(
-                            _string_list(
-                                claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
-                            )
-                        ),
+                "semantic_contract_paths": _contract_path_summaries(
+                    relation_map=relation_map,
+                    entities_by_id=entities_by_id,
+                    entity_ids=set(
+                        _string_list(
+                            claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
+                        )
                     ),
+                ),
+                "semantic_evidence_chain_paths": _evidence_chain_path_summaries(
+                    relation_map=relation_map,
+                    entities_by_id=entities_by_id,
+                    entity_ids=set(
+                        _string_list(
+                            claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
+                        )
+                    ),
+                ),
+                "semantic_evidence_chain_full_paths": _evidence_chain_full_path_summaries(
+                    claims=[
+                        item.claim
+                        for item in claim_records
+                        if _claim_matches_cluster(
+                            claim=item.claim,
+                            cluster_key=package_scope_key(record.claim.subject_key),
+                        )
+                    ],
+                ),
                 }
             }
         )
@@ -194,7 +222,13 @@ def attach_semantic_context_to_findings(
 
     enriched = []
     for finding in findings:
-        cluster_key = package_scope_key(str(finding.canonical_key or finding.metadata.get("object_key") or finding.title))
+        cluster_anchor = str(
+            finding.metadata.get("subject_key")
+            or finding.metadata.get("object_key")
+            or finding.canonical_key
+            or finding.title
+        )
+        cluster_key = package_scope_key(cluster_anchor)
         related_claims = [
             claim
             for claim in claims
@@ -243,6 +277,12 @@ def attach_semantic_context_to_findings(
             entities_by_id=entities_by_id,
             entity_ids=set(entity_ids),
         )
+        evidence_chain_paths = _evidence_chain_path_summaries(
+            relation_map=relation_map,
+            entities_by_id=entities_by_id,
+            entity_ids=set(entity_ids),
+        )
+        evidence_chain_full_paths = _evidence_chain_full_path_summaries(claims=related_claims)
         enriched.append(
             finding.model_copy(
                 update={
@@ -253,6 +293,8 @@ def attach_semantic_context_to_findings(
                         "semantic_relation_summaries": relation_context,
                         "semantic_section_paths": section_paths,
                         "semantic_contract_paths": contract_paths,
+                        "semantic_evidence_chain_paths": evidence_chain_paths,
+                        "semantic_evidence_chain_full_paths": evidence_chain_full_paths,
                         "semantic_process_context": _process_context_summaries(
                             relation_map=relation_map,
                             entities_by_id=entities_by_id,
@@ -762,6 +804,86 @@ def _ensure_contract_context_relations(
     return _dedupe_preserve_order(entity_ids)
 
 
+def _ensure_evidence_chain_step_relations(
+    *,
+    entity_map: dict[str, SemanticEntity],
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    run_id: str,
+    claim: AuditClaimEntry,
+    subject_entity: SemanticEntity,
+) -> list[str]:
+    if claim.predicate not in {"code_evidence_chain_step", "yaml_evidence_chain_step"}:
+        return []
+    metadata = claim.metadata or {}
+    start_label = str(metadata.get("start_label") or "").strip()
+    end_label = str(metadata.get("end_label") or "").strip()
+    relationship_type = str(metadata.get("relationship_type") or "").strip()
+    if not start_label or not end_label or not relationship_type:
+        return []
+
+    start_entity = _ensure_entity(
+        entity_map=entity_map,
+        run_id=run_id,
+        entity_type="object",
+        canonical_key=start_label,
+        label=start_label,
+        scope_key="EvidenceChain",
+        source_ids=[claim.source_id],
+        metadata={"evidence_chain_node": True},
+    )
+    end_entity = _ensure_entity(
+        entity_map=entity_map,
+        run_id=run_id,
+        entity_type="object",
+        canonical_key=end_label,
+        label=end_label,
+        scope_key="EvidenceChain",
+        source_ids=[claim.source_id],
+        metadata={"evidence_chain_node": True},
+    )
+    _ensure_relation(
+        relation_map=relation_map,
+        run_id=run_id,
+        source_entity_id=start_entity.entity_id,
+        target_entity_id=end_entity.entity_id,
+        relation_type="references",
+        confidence=0.9,
+        metadata={
+            "evidence_chain_step": True,
+            "relationship_type": relationship_type,
+            "hop_kind": metadata.get("hop_kind"),
+            "subject_key": claim.subject_key,
+        },
+    )
+    _ensure_relation(
+        relation_map=relation_map,
+        run_id=run_id,
+        source_entity_id=subject_entity.entity_id,
+        target_entity_id=start_entity.entity_id,
+        relation_type="references",
+        confidence=0.82,
+        metadata={
+            "evidence_chain_subject": True,
+            "evidence_chain_role": "start",
+            "subject_key": claim.subject_key,
+        },
+    )
+    _ensure_relation(
+        relation_map=relation_map,
+        run_id=run_id,
+        source_entity_id=subject_entity.entity_id,
+        target_entity_id=end_entity.entity_id,
+        relation_type="references",
+        confidence=0.82,
+        metadata={
+            "evidence_chain_subject": True,
+            "evidence_chain_role": "end",
+            "subject_key": claim.subject_key,
+        },
+    )
+    return [start_entity.entity_id, end_entity.entity_id]
+
+
 def _ensure_context_entities_from_section_path(
     *,
     entity_map: dict[str, SemanticEntity],
@@ -1044,6 +1166,82 @@ def _contract_path_summaries(
             path_parts.append(_entity_path_label(contract_entity))
             summaries.append(" -> ".join(part for part in path_parts if part))
     return _dedupe_preserve_order(summaries)
+
+
+def _evidence_chain_path_summaries(
+    *,
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    entities_by_id: dict[str, SemanticEntity],
+    entity_ids: set[str],
+) -> list[str]:
+    step_relations = [
+        relation
+        for relation in relation_map.values()
+        if relation.metadata.get("evidence_chain_step") is True
+        and (relation.source_entity_id in entity_ids or relation.target_entity_id in entity_ids)
+    ]
+    if not step_relations:
+        return []
+
+    direct_steps = []
+    for relation in step_relations:
+        source = entities_by_id.get(relation.source_entity_id)
+        target = entities_by_id.get(relation.target_entity_id)
+        if source is None or target is None:
+            continue
+        rel_type = str(relation.metadata.get("relationship_type") or relation.relation_type).strip()
+        direct_steps.append(f"{_entity_path_label(source)} -[{rel_type}]-> {_entity_path_label(target)}")
+
+    adjacency: dict[str, list[tuple[str, str]]] = {}
+    for relation in step_relations:
+        source = entities_by_id.get(relation.source_entity_id)
+        target = entities_by_id.get(relation.target_entity_id)
+        if source is None or target is None:
+            continue
+        rel_type = str(relation.metadata.get("relationship_type") or relation.relation_type).strip()
+        adjacency.setdefault(source.entity_id, []).append((target.entity_id, rel_type))
+
+    chained_paths: list[str] = []
+    for start_id, edges in adjacency.items():
+        start_entity = entities_by_id.get(start_id)
+        if start_entity is None:
+            continue
+        for mid_id, first_rel in edges:
+            mid_entity = entities_by_id.get(mid_id)
+            if mid_entity is None:
+                continue
+            for end_id, second_rel in adjacency.get(mid_id, []):
+                end_entity = entities_by_id.get(end_id)
+                if end_entity is None:
+                    continue
+                chained_paths.append(
+                    f"{_entity_path_label(start_entity)} -[{first_rel}]-> {_entity_path_label(mid_entity)} -[{second_rel}]-> {_entity_path_label(end_entity)}"
+                )
+
+    return _dedupe_preserve_order([*chained_paths, *direct_steps])
+
+
+def _evidence_chain_full_path_summaries(*, claims: Sequence[AuditClaimEntry]) -> list[str]:
+    full_path_claims = [
+        claim
+        for claim in claims
+        if claim.subject_key == "EvidenceChain.full_path"
+        and claim.predicate in {
+            "documented_evidence_chain_full_path",
+            "puml_evidence_chain_full_path",
+            "code_evidence_chain_full_path",
+            "yaml_evidence_chain_full_path",
+        }
+    ]
+    if not full_path_claims:
+        return []
+    return _dedupe_preserve_order(
+        [
+            str(claim.normalized_value or "").strip()
+            for claim in full_path_claims
+            if str(claim.normalized_value or "").strip()
+        ]
+    )
 
 
 def _entities_by_type(

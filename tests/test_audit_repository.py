@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from fin_ai_auditor.config import Settings
@@ -10,6 +11,7 @@ from fin_ai_auditor.domain.models import (
     AuditRun,
     AuditSourceSnapshot,
     AuditTarget,
+    AtlassianOAuthTokenRecord,
     CreateAuditRunRequest,
     DecisionCommentAnalysis,
     DecisionPackage,
@@ -20,6 +22,7 @@ from fin_ai_auditor.domain.models import (
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
+from fin_ai_auditor.services.secret_store import MemorySecretStore
 from fin_ai_auditor.services import audit_repository as audit_repository_module
 
 
@@ -810,3 +813,30 @@ def test_merge_truths_from_specification_never_uses_package_scope_summary_as_sub
     assert created_truths[0].subject_key == "Statement"
     assert created_truths[0].canonical_key == "Statement|user_specification"
     assert "Problemelemente" not in created_truths[0].subject_key
+
+
+def test_repository_keeps_atlassian_tokens_out_of_sqlite_when_secret_store_is_external(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(
+        db_path=tmp_path / "auditor.db",
+        secret_store=MemorySecretStore(),
+    )
+
+    saved = repository.upsert_atlassian_token(
+        token=AtlassianOAuthTokenRecord(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            scope="read:page:confluence write:jira-work",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+    )
+
+    assert saved.access_token == "access-token"
+    assert saved.refresh_token == "refresh-token"
+    with sqlite3.connect(tmp_path / "auditor.db") as connection:
+        row = connection.execute(
+            "SELECT access_token, refresh_token, metadata_json FROM atlassian_oauth_tokens WHERE provider = 'atlassian'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "__external_secret__"
+    assert row[1] == "__external_secret__"
+    assert '"secret_storage_mode": "memory"' in row[2]

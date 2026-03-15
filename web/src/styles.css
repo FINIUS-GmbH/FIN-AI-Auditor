@@ -201,6 +201,21 @@ ul,ol{list-style:none}
 .badge-executed{background:rgba(16,185,129,.15);color:var(--success);border:1px solid rgba(16,185,129,.3);text-transform:none}
 .badge-cancelled{background:var(--superseded-bg);color:var(--superseded);border:1px solid rgba(100,116,139,.2);text-transform:none}
 
+.eventual-chip{display:inline-flex;align-items:center;gap:6px;margin-bottom:var(--sp-sm);padding:4px 10px;border-radius:var(--r-pill);font-size:var(--fs-xs);font-weight:700;letter-spacing:.02em;border:1px solid transparent}
+.eventual-chip-connector{background:rgba(56,189,248,.12);color:#7dd3fc;border-color:rgba(56,189,248,.25)}
+.eventual-chip-manual{background:rgba(251,191,36,.12);color:#fcd34d;border-color:rgba(251,191,36,.22)}
+.eventual-chip-phase{background:rgba(74,222,128,.12);color:#86efac;border-color:rgba(74,222,128,.22)}
+.eventual-chip-reaggregation{background:rgba(167,139,250,.12);color:#c4b5fd;border-color:rgba(167,139,250,.22)}
+.eventual-chip-upload{background:rgba(244,114,182,.12);color:#f9a8d4;border-color:rgba(244,114,182,.22)}
+.eventual-chip-storage{background:rgba(250,204,21,.12);color:#fde047;border-color:rgba(250,204,21,.22)}
+.eventual-chip-registry{background:rgba(96,165,250,.12);color:#93c5fd;border-color:rgba(96,165,250,.22)}
+.eventual-chip-recovery{background:rgba(248,113,113,.12);color:#fca5a5;border-color:rgba(248,113,113,.22)}
+.eventual-chip-run{background:rgba(45,212,191,.12);color:#99f6e4;border-color:rgba(45,212,191,.22)}
+.eventual-chip-worker{background:rgba(251,146,60,.12);color:#fdba74;border-color:rgba(251,146,60,.22)}
+.eventual-chip-ui{background:rgba(129,140,248,.12);color:#a5b4fc;border-color:rgba(129,140,248,.22)}
+.eventual-chip-graph{background:rgba(163,230,53,.12);color:#bef264;border-color:rgba(163,230,53,.22)}
+.eventual-chip-generic{background:rgba(148,163,184,.12);color:#cbd5e1;border-color:rgba(148,163,184,.22)}
+
 /* Source badges */
 .src-badge{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:4px;font-size:var(--fs-2xs);font-weight:600;flex-shrink:0;line-height:1.6}
 .src-code{background:rgba(99,102,241,.12);color:#818cf8}
@@ -479,6 +494,33 @@ ul,ol{list-style:none}
 .metric-label{font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em}
 .metric-value{font-size:var(--fs-xl);font-weight:700;letter-spacing:-0.02em;color:var(--text-primary);line-height:1.05}
 .metric-sub{font-size:var(--fs-xs);color:var(--text-muted);font-weight:500;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.async-kpi-section{margin:-4px 0 var(--sp-xl)}
+.async-kpi-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-md);margin-bottom:var(--sp-sm)}
+.async-kpi-head strong{font-size:var(--fs-sm);color:var(--text-primary)}
+.async-kpi-head span{font-size:var(--fs-xs);color:var(--text-muted)}
+.async-kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-sm)}
+@media(max-width:900px){.async-kpi-grid{grid-template-columns:1fr}}
+.async-kpi-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:var(--sp-md) var(--sp-lg);display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden;transition:border-color var(--tr-base),transform var(--tr-fast)}
+.async-kpi-card::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;border-radius:0 2px 2px 0;background:var(--border-default)}
+.async-kpi-card:hover{border-color:var(--border-default);transform:translateY(-1px)}
+.async-kpi-kicker{font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:.08em}
+.async-kpi-label{font-size:var(--fs-sm);font-weight:600;color:var(--text-primary)}
+.async-kpi-value{font-size:var(--fs-xl);font-weight:700;line-height:1.05;color:var(--text-primary)}
+.async-kpi-hint{font-size:var(--fs-xs);color:var(--text-muted)}
+.async-kpi-connector::before{background:#38bdf8}
+.async-kpi-manual::before{background:#fbbf24}
+.async-kpi-phase::before{background:#4ade80}
+.async-kpi-reaggregation::before{background:#a78bfa}
+.async-kpi-upload::before{background:#f472b6}
+.async-kpi-storage::before{background:#facc15}
+.async-kpi-registry::before{background:#60a5fa}
+.async-kpi-recovery::before{background:#f87171}
+.async-kpi-run::before{background:#2dd4bf}
+.async-kpi-worker::before{background:#fb923c}
+.async-kpi-ui::before{background:#818cf8}
+.async-kpi-graph::before{background:#a3e635}
+.async-kpi-generic::before{background:#94a3b8}
 
 /* Dashboard two-column grid */
 .dashboard-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:var(--sp-lg);margin-bottom:var(--sp-2xl)}

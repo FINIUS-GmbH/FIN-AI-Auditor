@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { categoryLabel } from "../categoryLabels";
 import type { AuditRun } from "../types";
 
 const SRC: Record<string, { icon: string; label: string; cls: string }> = {
@@ -50,7 +51,7 @@ export function HistoryPanel({ run }: Props) {
         <div className="hitem" key={p.package_id}>
           <div className="hitem-head">
             <span className={`badge badge-${p.severity_summary}`}>{p.severity_summary}</span>
-            <span className="badge badge-cat">{p.category}</span>
+            <span className="badge badge-cat">{categoryLabel(p.category)}</span>
             <span className={`badge badge-${p.decision_state}`}>{p.decision_state}</span>
           </div>
           <strong>{p.title}</strong>
@@ -66,7 +67,7 @@ export function HistoryPanel({ run }: Props) {
         <div className="hitem" key={f.finding_id}>
           <div className="hitem-head">
             <span className={`badge badge-${f.severity}`}>{f.severity}</span>
-            <span className="badge badge-cat">{f.category}</span>
+            <span className="badge badge-cat">{categoryLabel(f.category)}</span>
             <span className={`badge badge-${f.resolution_state}`}>{f.resolution_state}</span>
           </div>
           <strong>{f.title}</strong>

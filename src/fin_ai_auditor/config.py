@@ -58,6 +58,16 @@ def _coerce_optional_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _coerce_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 def _strip_env_value(raw: str) -> str:
     value = raw.strip()
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
@@ -85,6 +95,10 @@ def _read_env_file_pairs(path: Path) -> dict[str, str]:
     return pairs
 
 
+def _default_finai_local_repo_path() -> Path:
+    return Path("../FIN-AI")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -94,13 +108,14 @@ class Settings(BaseSettings):
 
     app_name: str = "FIN-AI Auditor"
     env: str = "dev"
+    operational_mode: str = "local_dev"
     host: str = "127.0.0.1"
     port: int = 8088
     storage_dir: Path = Field(default=Path("./data"))
     database_path: Path = Field(default=Path("./data/fin_ai_auditor.db"))
     metamodel_dump_path: Path = Field(default=Path("./data/metamodel/current_dump.json"))
     cors_origins: list[str] = Field(default_factory=lambda: ["http://127.0.0.1:5174", "http://localhost:5174", "http://127.0.0.1:8080", "http://localhost:8080", "http://0.0.0.0:8080"])
-    default_finai_local_repo_path: Path = Field(default=Path("/Users/martinwaelter/GitHub/FIN-AI"))
+    default_finai_local_repo_path: Path = Field(default_factory=_default_finai_local_repo_path)
     default_finai_github_repo_url: str = "https://github.com/FINIUS-GmbH/FIN-AI.git"
     default_finai_github_ref: str = "main"
     fixed_confluence_space_key: str = "FP"
@@ -110,6 +125,14 @@ class Settings(BaseSettings):
     external_resource_access_mode: str = "read_only"
     external_write_requires_user_decision: bool = True
     local_database_is_only_writable_store: bool = True
+    writeback_target_mode: str = "allowlist_only"
+    allowed_writeback_confluence_space_keys: list[str] = Field(default_factory=list)
+    allowed_writeback_jira_project_keys: list[str] = Field(default_factory=list)
+    allow_sqlite_in_prod_like: bool = False
+    allow_insecure_secret_store_in_prod_like: bool = False
+    startup_enforce_runtime_guard: bool = True
+    secret_storage_mode: str = "keyring"
+    secret_storage_service_name: str = "fin-ai-auditor"
     github_token: str | None = None
     atlassian_enabled: bool = True
     atlassian_oauth_client_id: str | None = None
@@ -134,6 +157,47 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("operational_mode")
+    @classmethod
+    def validate_operational_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"local_dev", "pilot", "prod_like"}:
+            raise ValueError("operational_mode muss local_dev, pilot oder prod_like sein.")
+        return normalized
+
+    @field_validator("secret_storage_mode")
+    @classmethod
+    def validate_secret_storage_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"keyring", "database_legacy", "memory"}:
+            raise ValueError("secret_storage_mode muss keyring, database_legacy oder memory sein.")
+        return normalized
+
+    @field_validator("writeback_target_mode")
+    @classmethod
+    def validate_writeback_target_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"disabled", "allowlist_only"}:
+            raise ValueError("writeback_target_mode muss disabled oder allowlist_only sein.")
+        return normalized
+
+    @field_validator("allowed_writeback_confluence_space_keys", "allowed_writeback_jira_project_keys", mode="before")
+    @classmethod
+    def parse_writeback_allowlists(cls, value: object) -> list[str]:
+        return _coerce_string_list(value)
+
+    def get_allowed_writeback_confluence_space_keys(self) -> list[str]:
+        values = [item.upper() for item in self.allowed_writeback_confluence_space_keys if str(item).strip()]
+        if not values and self.fixed_confluence_space_key:
+            values = [str(self.fixed_confluence_space_key).strip().upper()]
+        return list(dict.fromkeys(values))
+
+    def get_allowed_writeback_jira_project_keys(self) -> list[str]:
+        values = [item.upper() for item in self.allowed_writeback_jira_project_keys if str(item).strip()]
+        if not values and self.fixed_jira_project_key:
+            values = [str(self.fixed_jira_project_key).strip().upper()]
+        return list(dict.fromkeys(values))
 
     def get_llm_slot_config(self, slot: int) -> AuditorLLMSlotConfig | None:
         env_map = self._collect_external_env_map()

@@ -91,9 +91,13 @@ OBJECT_HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
 )
 
 READ_VERBS: Final[tuple[str, ...]] = ("get", "list", "load", "read", "fetch", "query", "find", "collect", "resolve")
-WRITE_VERBS: Final[tuple[str, ...]] = ("create", "update", "delete", "write", "persist", "save", "upsert", "merge", "patch")
+WRITE_VERBS: Final[tuple[str, ...]] = ("create", "update", "delete", "write", "persist", "save", "upsert", "merge", "patch", "publish")
 LIFECYCLE_HINTS: Final[tuple[str, ...]] = ("status", "lifecycle", "promotion", "review", "histori", "freigabe")
 POLICY_HINTS: Final[tuple[str, ...]] = ("read_only", "readonly", "allowlist", "approval", "approve", "guard", "scope", "tenant", "policy", "contract")
+PRIMARY_PATH_HINTS: Final[tuple[str, ...]] = ("primary", "main path", "canonical", "hauptpfad", "ssot")
+SECONDARY_PATH_HINTS: Final[tuple[str, ...]] = ("secondary", "side path", "nebenpfad", "alternate", "alternative path")
+FALLBACK_PATH_HINTS: Final[tuple[str, ...]] = ("fallback", "degrade")
+COMPAT_PATH_HINTS: Final[tuple[str, ...]] = ("compat", "compatibility", "v1 path", "legacy api")
 REFERENCE_STOP_MARKERS: Final[tuple[str, ...]] = (
     " is ",
     " sind ",
@@ -2711,6 +2715,14 @@ def _extract_metamodel_metaclass_claims(
                 matched_text=f"{metaclass_name} nutzt Relation {relation_type}",
             )
         )
+    records.extend(
+        _extract_metamodel_lifecycle_claims(
+            document=document,
+            subject_root=metaclass_name,
+            anchor_prefix=subject_key,
+            row=row,
+        )
+    )
     return records
 
 
@@ -2766,6 +2778,14 @@ def _extract_metamodel_function_claims(
                 matched_text=f"{function_name} referenziert Frage {question_key}",
             )
         )
+    records.extend(
+        _extract_metamodel_lifecycle_claims(
+            document=document,
+            subject_root=function_name,
+            anchor_prefix=subject_key,
+            row=row,
+        )
+    )
     return records
 
 
@@ -2790,6 +2810,52 @@ def _extract_metamodel_label_summary_claims(
     ]
 
 
+def _extract_metamodel_lifecycle_claims(
+    *,
+    document: CollectedDocument,
+    subject_root: str,
+    anchor_prefix: str,
+    row: dict[str, object],
+) -> list[ExtractedClaimRecord]:
+    normalized_subject = _slugify(subject_root).replace("_", " ").title().replace(" ", "")
+    if not normalized_subject:
+        return []
+
+    records: list[ExtractedClaimRecord] = []
+    lifecycle_value = str(row.get("lifecycle") or row.get("status_lifecycle") or "").strip()
+    review_status_value = str(
+        row.get("review_status")
+        or row.get("initial_status")
+        or row.get("default_status")
+        or row.get("status")
+        or ""
+    ).strip()
+
+    if lifecycle_value:
+        records.append(
+            _build_metamodel_claim_record(
+                document=document,
+                anchor_value=f"{anchor_prefix}.lifecycle",
+                subject_key=f"{normalized_subject}.lifecycle",
+                predicate="metamodel_lifecycle",
+                normalized_value=lifecycle_value,
+                matched_text=f"{normalized_subject} Lifecycle laut Metamodell: {lifecycle_value}",
+            )
+        )
+    if review_status_value:
+        records.append(
+            _build_metamodel_claim_record(
+                document=document,
+                anchor_value=f"{anchor_prefix}.review_status",
+                subject_key=f"{normalized_subject}.review_status",
+                predicate="metamodel_review_status",
+                normalized_value=review_status_value,
+                matched_text=f"{normalized_subject} Review-Status laut Metamodell: {review_status_value}",
+            )
+        )
+    return records
+
+
 def _build_claim_record(
     *,
     document: CollectedDocument,
@@ -2807,6 +2873,7 @@ def _build_claim_record(
         matched_text=line_text,
         section_path=section_path,
         document=document,
+        extra_metadata=None,
     )
     location = AuditLocation(
         snapshot_id=document.snapshot.snapshot_id,
@@ -2890,6 +2957,7 @@ def _build_metamodel_claim_record(
         matched_text=matched_text,
         section_path="current_dump",
         document=document,
+        extra_metadata=None,
     )
     claim = AuditClaimEntry(
         source_snapshot_id=document.snapshot.snapshot_id,
@@ -3005,6 +3073,23 @@ def _extract_function_claim_records(
                 },
             )
         )
+        records.extend(
+            _path_variant_claim_records_from_structured_record(
+                record=records[-1],
+                document=document,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
+                metadata={
+                    "path_hint": document.path_hint,
+                    "title": document.title,
+                    "ast_extracted": True,
+                    "class_stack": class_stack,
+                    "decorators": decorator_labels,
+                    **_python_function_analysis_metadata(function_analysis=function_analysis, schema_catalog=schema_catalog),
+                },
+            )
+        )
     for subject_key, predicate in _semantic_subclaim_specs(
         subject=subject,
         predicate_prefix="implemented",
@@ -3025,6 +3110,24 @@ def _extract_function_claim_records(
                 line_end=line_end,
                 section_path=section_path,
                 confidence=0.84,
+                metadata={
+                    "path_hint": document.path_hint,
+                    "title": document.title,
+                    "ast_extracted": True,
+                    "class_stack": class_stack,
+                    "decorators": decorator_labels,
+                    "semantic_subclaim": True,
+                    **_python_function_analysis_metadata(function_analysis=function_analysis, schema_catalog=schema_catalog),
+                },
+            )
+        )
+        records.extend(
+            _path_variant_claim_records_from_structured_record(
+                record=records[-1],
+                document=document,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
                 metadata={
                     "path_hint": document.path_hint,
                     "title": document.title,
@@ -3204,6 +3307,7 @@ def _build_structured_claim_record(
         matched_text=matched_text,
         section_path=section_path,
         document=document,
+        extra_metadata=metadata,
     )
     claim = AuditClaimEntry(
         source_snapshot_id=document.snapshot.snapshot_id,
@@ -3241,6 +3345,279 @@ def _build_structured_claim_record(
     )
 
 
+def _path_variant_claim_records_from_structured_record(
+    *,
+    record: ExtractedClaimRecord,
+    document: CollectedDocument,
+    line_start: int,
+    line_end: int,
+    section_path: str,
+    metadata: dict[str, object],
+) -> list[ExtractedClaimRecord]:
+    subject_key = str(record.claim.subject_key or "").strip()
+    if not subject_key.endswith((".write_path", ".read_path", ".policy", ".approval_policy", ".scope_policy")):
+        return []
+
+    variant_role = str(record.claim.metadata.get("path_variant_role") or "").strip()
+    static_paths = _string_list(record.claim.metadata.get("static_call_graph_paths"))
+    qualified_paths = _string_list(record.claim.metadata.get("static_call_graph_qualified_paths"))
+    delegation_paths = _dedupe_preserve_order([*qualified_paths, *static_paths, section_path])
+    family_group_key = _path_family_group_key_from_record(record=record, section_path=section_path)
+    path_strength_score = _path_strength_score_from_record(record=record)
+    inference_signal = _path_inference_signal(
+        variant_role=variant_role,
+        family_group_key=family_group_key,
+        path_strength_score=path_strength_score,
+        delegation_paths=delegation_paths,
+    )
+    if not variant_role and not delegation_paths and not family_group_key:
+        return []
+
+    records: list[ExtractedClaimRecord] = []
+    if variant_role:
+        records.append(
+            _build_structured_claim_record(
+                document=document,
+                subject_key=subject_key,
+                predicate="implemented_path_variant_role",
+                matched_text=variant_role,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
+                confidence=min(float(record.claim.confidence), 0.84),
+                metadata={
+                    **metadata,
+                    "derived_from_claim_id": record.claim.claim_id,
+                    "path_variant_role": variant_role,
+                    "path_variant_claim": True,
+                },
+            )
+        )
+    if family_group_key:
+        records.append(
+            _build_structured_claim_record(
+                document=document,
+                subject_key=subject_key,
+                predicate="implemented_path_family_group",
+                matched_text=family_group_key,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
+                confidence=min(float(record.claim.confidence), 0.82),
+                metadata={
+                    **metadata,
+                    "derived_from_claim_id": record.claim.claim_id,
+                    "path_variant_role": variant_role or None,
+                    "path_variant_claim": True,
+                    "path_family_group_key": family_group_key,
+                },
+            )
+        )
+    records.append(
+        _build_structured_claim_record(
+            document=document,
+            subject_key=subject_key,
+            predicate="implemented_path_strength_score",
+            matched_text=str(path_strength_score),
+            line_start=line_start,
+            line_end=line_end,
+            section_path=section_path,
+            confidence=min(float(record.claim.confidence), 0.8),
+            metadata={
+                **metadata,
+                "derived_from_claim_id": record.claim.claim_id,
+                "path_variant_role": variant_role or None,
+                "path_variant_claim": True,
+                "path_strength_score": path_strength_score,
+            },
+        )
+    )
+    if inference_signal:
+        records.append(
+            _build_structured_claim_record(
+                document=document,
+                subject_key=subject_key,
+                predicate="implemented_path_inference_signal",
+                matched_text=inference_signal,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
+                confidence=min(float(record.claim.confidence), 0.78),
+                metadata={
+                    **metadata,
+                    "derived_from_claim_id": record.claim.claim_id,
+                    "path_variant_role": variant_role or None,
+                    "path_variant_claim": True,
+                    "path_family_group_key": family_group_key or None,
+                    "path_strength_score": path_strength_score,
+                    "path_inference_signal": inference_signal,
+                },
+            )
+        )
+    for path in delegation_paths[:4]:
+        records.append(
+            _build_structured_claim_record(
+                document=document,
+                subject_key=subject_key,
+                predicate="implemented_path_delegate",
+                matched_text=path,
+                line_start=line_start,
+                line_end=line_end,
+                section_path=section_path,
+                confidence=min(float(record.claim.confidence), 0.82),
+                metadata={
+                    **metadata,
+                    "derived_from_claim_id": record.claim.claim_id,
+                    "path_variant_role": variant_role or None,
+                    "path_variant_claim": True,
+                    "delegation_path": path,
+                },
+            )
+        )
+    return records
+
+
+def _path_family_group_key_from_record(*, record: ExtractedClaimRecord, section_path: str) -> str:
+    qualified_paths = _string_list(record.claim.metadata.get("static_call_graph_qualified_paths"))
+    family_keys: list[str] = []
+    for path in qualified_paths:
+        for segment in str(path or "").split("->"):
+            part = str(segment or "").strip()
+            if not part:
+                continue
+            symbol = part.rsplit(".", 1)[0].strip() if "." in part else part
+            if symbol:
+                family_keys.append(symbol)
+    family_keys = _dedupe_preserve_order(family_keys)
+    if family_keys:
+        return "|".join(family_keys)
+
+    qualified_adapter_keys = _qualified_adapter_family_keys_from_record(record=record)
+    if qualified_adapter_keys:
+        return "|".join(qualified_adapter_keys)
+
+    local_paths = _string_list(record.claim.metadata.get("static_call_graph_paths"))
+    local_family_keys: list[str] = []
+    for path in local_paths:
+        for segment in str(path or "").split("->"):
+            part = str(segment or "").strip()
+            if not part:
+                continue
+            symbol = part.split(".", 1)[0].strip()
+            if symbol:
+                local_family_keys.append(symbol)
+    local_family_keys = _dedupe_preserve_order(local_family_keys)
+    if local_family_keys:
+        return "|".join(local_family_keys)
+
+    adapter_keys = _adapter_family_keys_from_record(record=record)
+    if adapter_keys:
+        return "|".join(adapter_keys)
+    return section_path.strip()
+
+
+def _path_strength_score_from_record(*, record: ExtractedClaimRecord) -> int:
+    descriptor = " ".join(
+        [
+            str(record.claim.normalized_value or ""),
+            str(record.claim.subject_key or ""),
+            str(record.claim.predicate or ""),
+            str(record.claim.metadata.get("matched_text") or ""),
+            *[str(item) for item in _string_list(record.claim.metadata.get("static_call_graph_paths"))],
+            *[str(item) for item in _string_list(record.claim.metadata.get("static_call_graph_qualified_paths"))],
+        ]
+    ).replace("_", " ").replace("-", " ").casefold()
+    score = 0
+    positive_tokens = (
+        "approval required",
+        "approval",
+        "guarded",
+        "review",
+        "phase_run_id",
+        "audit envelope",
+        "canonical",
+        "validated",
+    )
+    negative_tokens = (
+        "without approval",
+        "direct write",
+        "direct publish",
+        "bypass",
+        "manual",
+        "compat",
+        "legacy",
+        "fallback",
+        "degraded",
+        "v1",
+        "raw",
+    )
+    for token in positive_tokens:
+        if token in descriptor:
+            score += 2
+    for token in negative_tokens:
+        if token in descriptor:
+            score -= 2
+    if "primary" in descriptor:
+        score += 1
+    if "secondary" in descriptor:
+        score -= 1
+    return score
+
+
+def _path_inference_signal(
+    *,
+    variant_role: str,
+    family_group_key: str,
+    path_strength_score: int,
+    delegation_paths: list[str],
+) -> str:
+    if variant_role:
+        return ""
+    descriptor = " ".join([family_group_key, *delegation_paths]).casefold()
+    if path_strength_score >= 2:
+        return "likely_primary"
+    if path_strength_score <= -2:
+        return "likely_side_path"
+    if any(token in descriptor for token in ("legacy", "compat", "fallback", "degraded", "bypass", "manual", "raw", "v1")):
+        return "likely_side_path"
+    if any(token in descriptor for token in ("primary", "canonical", "review", "approval", "validated")):
+        return "likely_primary"
+    return "neutral"
+
+
+def _qualified_adapter_family_keys_from_record(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values = _string_list(metadata.get("repository_adapter_symbols"))
+    values.extend(_string_list(metadata.get("driver_adapter_symbols")))
+    values.extend(_string_list(metadata.get("constructor_injection_bindings")))
+    family_keys: list[str] = []
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        if "." in candidate:
+            family_keys.append(candidate.rsplit(".", 1)[0].strip())
+        else:
+            family_keys.append(candidate)
+    return _dedupe_preserve_order([key for key in family_keys if key])
+
+
+def _adapter_family_keys_from_record(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values = _string_list(metadata.get("repository_adapters"))
+    values.extend(_string_list(metadata.get("driver_adapters")))
+    values.extend(_string_list(metadata.get("constructor_injection_bindings")))
+    family_keys: list[str] = []
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        symbol = candidate.split(".", 1)[0].strip()
+        if symbol:
+            family_keys.append(symbol)
+    return _dedupe_preserve_order(family_keys)
+
+
 def _is_python_document(*, document: CollectedDocument) -> bool:
     path_hint = str(document.path_hint or document.source_id or "").casefold()
     return path_hint.endswith(".py")
@@ -3264,10 +3641,18 @@ def _normalize_value(value: str) -> str:
 def _normalize_claim_value(*, matched_text: str, predicate: str) -> str:
     compact = _normalize_value(matched_text)
     if "]: " in compact and "[" in compact:
-        compact = compact.split("]: ", 1)[1]
+        candidate = compact.split("]: ", 1)[1]
+        if candidate.strip():
+            compact = candidate
     elif ": " in compact and predicate in compact:
-        compact = compact.split(": ", 1)[1]
-    return compact[:180]
+        candidate = compact.split(": ", 1)[1]
+        if candidate.strip():
+            compact = candidate
+    compact = compact.strip()
+    if compact:
+        return compact[:180]
+    fallback = _normalize_value(matched_text).strip()
+    return fallback[:180] if fallback else predicate[:180]
 
 
 def _claim_structure_metadata(
@@ -3278,6 +3663,7 @@ def _claim_structure_metadata(
     matched_text: str,
     section_path: str,
     document: CollectedDocument,
+    extra_metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     subject_root, _, subject_property = subject_key.partition(".")
     focus_value = _claim_focus_value(normalized_value=normalized_value, matched_text=matched_text)
@@ -3286,6 +3672,12 @@ def _claim_structure_metadata(
     governance_level = _source_governance_level(document=document, predicate=predicate)
     temporal_status = _source_temporal_status(document=document)
     assertion_status = _claim_assertion_status(matched_text=matched_text, document=document)
+    path_variant_role = _path_variant_role(
+        document=document,
+        matched_text=matched_text,
+        section_path=section_path,
+        extra_metadata=extra_metadata,
+    )
     return {
         "claim_subject_root": subject_root or subject_key,
         "claim_property": subject_property or predicate,
@@ -3302,6 +3694,7 @@ def _claim_structure_metadata(
         "claim_section_path": section_path,
         "source_governance_level": governance_level,
         "source_temporal_status": temporal_status,
+        "path_variant_role": path_variant_role or None,
     }
 
 
@@ -3397,7 +3790,10 @@ def _source_authority_from_governance_level(*, governance_level: str, temporal_s
 def _claim_assertion_status(*, matched_text: str, document: CollectedDocument) -> str:
     normalized = str(matched_text or "").casefold()
     descriptor = " ".join([str(document.title or ""), str(document.path_hint or ""), normalized]).casefold()
-    if any(token in normalized for token in ("deprecated", "legacy", "historic", "veraltet", "removed", "entfaellt", "entfällt")):
+    if any(
+        token in descriptor
+        for token in ("deprecated", "legacy", "historic", "veraltet", "removed", "entfaellt", "entfällt")
+    ):
         return "deprecated"
     if any(token in normalized for token in ("not ssot", "kein ssot", "nicht ssot")):
         return "not_ssot"
@@ -3406,6 +3802,63 @@ def _claim_assertion_status(*, matched_text: str, document: CollectedDocument) -
     if any(token in normalized for token in ("excluded", "ausgeschlossen", "without ", "ohne ", "kein ", "keine ", "not ")) and "not null" not in normalized:
         return "excluded"
     return "asserted"
+
+
+def _path_variant_role(
+    *,
+    document: CollectedDocument,
+    matched_text: str,
+    section_path: str,
+    extra_metadata: dict[str, object] | None,
+) -> str:
+    local_descriptor = " ".join(
+        [
+            str(document.title or ""),
+            str(document.path_hint or ""),
+            str(section_path or ""),
+            str(matched_text or ""),
+        ]
+    ).casefold()
+    extended_descriptor = " ".join(
+        [
+            local_descriptor,
+            *_metadata_text_fragments(metadata=extra_metadata),
+        ]
+    ).casefold()
+    if any(token in local_descriptor for token in ("deprecated", "legacy", "historic", "veraltet", "removed", "archive")):
+        return "legacy"
+    if any(token in local_descriptor for token in FALLBACK_PATH_HINTS):
+        return "fallback"
+    if any(token in local_descriptor for token in COMPAT_PATH_HINTS):
+        return "compat"
+    if any(token in local_descriptor for token in SECONDARY_PATH_HINTS):
+        return "secondary"
+    if any(token in local_descriptor for token in PRIMARY_PATH_HINTS):
+        return "primary"
+    if any(token in extended_descriptor for token in ("deprecated", "legacy", "historic", "veraltet", "removed", "archive")):
+        return "legacy"
+    if any(token in extended_descriptor for token in FALLBACK_PATH_HINTS):
+        return "fallback"
+    if any(token in extended_descriptor for token in COMPAT_PATH_HINTS):
+        return "compat"
+    if any(token in extended_descriptor for token in SECONDARY_PATH_HINTS):
+        return "secondary"
+    if any(token in extended_descriptor for token in PRIMARY_PATH_HINTS):
+        return "primary"
+    return ""
+
+
+def _metadata_text_fragments(*, metadata: dict[str, object] | None) -> list[str]:
+    if not metadata:
+        return []
+    fragments: list[str] = []
+    for key in ("static_call_graph_paths", "static_call_graph_qualified_paths", "repository_adapters", "driver_adapters"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            fragments.extend(str(item or "") for item in value)
+        elif value:
+            fragments.append(str(value))
+    return [fragment.strip() for fragment in fragments if str(fragment or "").strip()]
 
 
 def _deduplicate_claim_records(*, records: list[ExtractedClaimRecord]) -> list[ExtractedClaimRecord]:

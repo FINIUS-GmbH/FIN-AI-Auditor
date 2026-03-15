@@ -20,6 +20,7 @@ FindingCategory = Literal[
     "traceability_gap",
     "ownership_gap",
     "policy_conflict",
+    "legacy_path_gap",
     "terminology_collision",
     "low_confidence_review",
     "obsolete_documentation",

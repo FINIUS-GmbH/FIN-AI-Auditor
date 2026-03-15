@@ -30,6 +30,7 @@ CORE_ROOT_CAUSE_BUCKETS: frozenset[str] = frozenset(
 )
 SUPPORTING_DETAIL_CATEGORIES: frozenset[str] = frozenset(
     {
+        "architecture_observation",
         "missing_definition",
         "missing_documentation",
         "traceability_gap",
@@ -98,6 +99,7 @@ def _heuristic_root_cause_bucket(*, finding: AuditFinding) -> str:
     if (
         object_key.endswith((".policy", ".approval_policy", ".scope_policy"))
         or finding.category == "policy_conflict"
+        or finding.category == "legacy_path_gap"
         or any(token in normalized_text for token in ("approval", "guardrail", "policy"))
     ):
         return "policy"
@@ -113,9 +115,10 @@ def _heuristic_root_cause_bucket(*, finding: AuditFinding) -> str:
         or any(token in normalized_text for token in ("bsm.process", "bsm process", "bsm phase", "phase count", "phase source", "phasenmodell"))
     ):
         return "process"
-    if finding.category in {"implementation_drift"}:
+    if finding.category in {"implementation_drift", "legacy_path_gap"}:
         return "implementation"
     if finding.category in {
+        "architecture_observation",
         "missing_definition",
         "missing_documentation",
         "traceability_gap",
@@ -283,7 +286,7 @@ def _detail_penalty(*, finding: AuditFinding) -> int:
 def _primary_conflict_priority(*, finding: AuditFinding) -> int:
     if finding.category in {"contradiction", "policy_conflict"}:
         return 0
-    if finding.category in {"implementation_drift", "missing_implementation"}:
+    if finding.category in {"implementation_drift", "missing_implementation", "legacy_path_gap"}:
         return 1
     if finding.category in SUPPORTING_DETAIL_CATEGORIES:
         return 2

@@ -11,6 +11,8 @@ Das Repo ist bewusst **separat von FIN-AI** gehalten. Es wird nicht mit FIN-AI m
 
 Bis zu einer expliziten User-Entscheidung arbeitet der Auditor gegen externe Systeme strikt **read-only**. Schreibend verwendet werden darf ausschliesslich die eigene lokale SQLite-Datenbank des Auditors.
 
+Projektlokale Agenten-Regeln und Guardrails liegen in [AGENTS.md](./AGENTS.md).
+
 ## Zielbild
 
 FIN-AI Auditor soll fachliche und technische Aussagen in ein kanonisches Claim-Modell ueberfuehren und daraus:
@@ -181,4 +183,6 @@ Wenn `FINAI_LLM_<slot>_*`-Variablen im Auditor-Kontext vorhanden sind, kann die 
 - [Datenmodell](./docs/data-model.md)
 - [Entscheidungs-Pakete und Retrieval](./docs/decision-packages-and-retrieval.md)
 - [Delta und Aufloesungsstrategie](./docs/delta-sync-and-resolution.md)
+- [Forensische Finding-Klassen](./docs/forensic-finding-classes.md)
+- [Forensischer Reifeplan](./docs/forensic-readiness-plan.md)
 - [Roadmap](./docs/roadmap.md)

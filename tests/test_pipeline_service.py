@@ -1456,6 +1456,170 @@ def test_decision_packages_group_cross_scope_findings_by_causal_group() -> None:
     assert statement_fact.related_package_ids == [packages[0].package_id]
 
 
+def test_decision_packages_specialize_grouped_manual_boundary_paths() -> None:
+    finding = AuditFinding(
+        severity="medium",
+        category="legacy_path_gap",
+        title="Manueller Boundary-Pfad propagiert phase_run_id nicht vollstaendig",
+        summary="bsmAnswer.field_propagation zeigt dieselbe Scope-Luecke in 2 manuellen Boundary-Pfaden.",
+        recommendation="Manuelle Antwortpfade auf einen kanonischen Entry-Point zusammenziehen.",
+        canonical_key="bsm_code_risk_group|code_field_propagation_gap|bsmAnswer.field_propagation|manual_answer_entrypoint",
+        metadata={
+            "object_key": "bsmAnswer.field_propagation",
+            "grouped_boundary_paths": True,
+            "boundary_path_type": "manual_answer_entrypoint",
+            "path_count": 2,
+            "boundary_function_names": ["BsmService.capture_ba_answer", "save_ba_answer"],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Manuelle Antwortpfade angleichen (2 Entry-Points)"
+    assert "Manuelle bsmAnswer-Entry-Points" in packages[0].scope_summary
+    assert "2 Pfade betroffen" in packages[0].scope_summary
+    assert "phase_run_id/run_id" in packages[0].recommendation_summary
+    assert "BsmService.capture_ba_answer" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_boundary_paths"] is True
+    assert packages[0].metadata["boundary_path_count"] == 2
+
+
+def test_decision_packages_specialize_grouped_manual_answer_async_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Eventual-Consistency-Luecke im manuellen Antwortpfad",
+        summary="TemporalConsistency.persist_then_enqueue zeigt dieselbe Async-Luecke in 3 Pfaden vom Typ Manueller Antwortpfad.",
+        recommendation="Persistenz und Reaggregations-Trigger fuer manuelle Antwortpfade in denselben Schutzraum ziehen oder den Schreibpfad synchron abschliessen, bevor Folgejobs enqueued werden.",
+        canonical_key="bsm_code_risk_group|code_eventual_consistency_risk|TemporalConsistency.persist_then_enqueue|manual_answer_enqueue",
+        metadata={
+            "object_key": "TemporalConsistency.persist_then_enqueue",
+            "grouped_eventual_paths": True,
+            "eventual_path_type": "manual_answer_enqueue",
+            "grouped_eventual_package_title": "Manuelle Antwortpersistenz atomisch machen",
+            "grouped_eventual_scope_label": "Manuelle Antwort-/Phase-Run-Pfade",
+            "path_count": 3,
+            "sequence_functions": [
+                "delete_manual_answer",
+                "save_phase_run_answer",
+                "update_manual_answer",
+            ],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Manuelle Antwortpersistenz atomisch machen (3 Pfade)"
+    assert "Manuelle Antwort-/Phase-Run-Pfade" in packages[0].scope_summary
+    assert "3 Pfade betroffen" in packages[0].scope_summary
+    assert "Reaggregations-Trigger" in packages[0].recommendation_summary
+    assert "save_phase_run_answer" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_eventual_paths"] is True
+    assert packages[0].metadata["eventual_path_count"] == 3
+
+
+def test_decision_packages_specialize_grouped_connector_ingestion_async_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Eventual-Consistency-Luecke im Connector-/Ingestion-Pfad",
+        summary="TemporalConsistency.persist_then_enqueue zeigt dieselbe Async-Luecke in 4 Pfaden vom Typ Connector-/Ingestion-Pfad.",
+        recommendation="Connector-nahe Persistenz und Folgejobs absichern.",
+        canonical_key="bsm_code_risk_group|code_eventual_consistency_risk|TemporalConsistency.persist_then_enqueue|connector_ingestion_enqueue",
+        metadata={
+            "object_key": "TemporalConsistency.persist_then_enqueue",
+            "grouped_eventual_paths": True,
+            "eventual_path_type": "connector_ingestion_enqueue",
+            "grouped_eventual_package_title": "Connector-/Ingestion-Pfade atomisch machen",
+            "grouped_eventual_scope_label": "Connector-/Ingestion-Pfade",
+            "path_count": 4,
+            "sequence_functions": [
+                "execute_connector_sync",
+                "ingest_stream",
+                "persist_and_ingest_binary",
+                "persist_and_ingest_markdown",
+            ],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Connector-/Ingestion-Pfade atomisch machen (4 Pfade)"
+    assert "Connector-/Ingestion-Pfade" in packages[0].scope_summary
+    assert "4 Pfade betroffen" in packages[0].scope_summary
+    assert "Connector-nahe Persistenz" in packages[0].recommendation_summary
+    assert "execute_connector_sync" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_eventual_paths"] is True
+    assert packages[0].metadata["eventual_path_count"] == 4
+
+
+def test_decision_packages_specialize_grouped_reaggregation_chain_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Reaggregation unterbricht die aktive BSM-Kette",
+        summary="TemporalConsistency.supersede_then_rebuild zeigt dieselbe Kettenunterbrechung in 3 Reaggregationspfaden.",
+        recommendation="Supersede- und Rebuild-Schritte transaktional koppeln.",
+        canonical_key="bsm_code_risk_group|code_chain_interruption_risk|TemporalConsistency.supersede_then_rebuild|reaggregation_rebuild_path",
+        metadata={
+            "object_key": "TemporalConsistency.supersede_then_rebuild",
+            "grouped_chain_paths": True,
+            "chain_path_type": "reaggregation_rebuild_path",
+            "path_count": 3,
+            "sequence_functions": [
+                "materialize_statement_chain",
+                "rebuild_chain",
+                "rebuild_review_chain",
+            ],
+            "sequence_line_windows": ["L2→L3", "L41→L47"],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Reaggregation atomisch schliessen (3 Pfade)"
+    assert "Reaggregation-/Rebuild-Pfade" in packages[0].scope_summary
+    assert "3 Pfade betroffen" in packages[0].scope_summary
+    assert "transaktionalen Schutzraum" in packages[0].recommendation_summary
+    assert "rebuild_chain" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_chain_paths"] is True
+    assert packages[0].metadata["chain_path_count"] == 3
+
+
+def test_decision_packages_preserve_primary_finding_priority_for_equal_bucket_packages() -> None:
+    prioritized_finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Zulu kommt spaeter alphabetisch",
+        summary="Higher priority by object key.",
+        recommendation="Prioritized recommendation.",
+        canonical_key="A.scope",
+        metadata={
+            "object_key": "A.scope",
+        },
+    )
+    alphabetic_title_finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Alpha kommt frueher alphabetisch",
+        summary="Lower priority by object key.",
+        recommendation="Alphabetic recommendation.",
+        canonical_key="B.scope",
+        metadata={
+            "object_key": "B.scope",
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(
+        findings=[alphabetic_title_finding, prioritized_finding],
+        claims=[],
+        truths=[],
+    )
+
+    assert packages[0].title == "Zulu kommt spaeter alphabetisch"
+    assert packages[0].metadata["primary_finding_rank"] < packages[1].metadata["primary_finding_rank"]
+
+
 def test_atomic_fact_status_update_synchronizes_packages(tmp_path: Path) -> None:
     finding = AuditFinding(
         severity="high",

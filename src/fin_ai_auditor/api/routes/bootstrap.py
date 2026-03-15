@@ -12,6 +12,11 @@ from fin_ai_auditor.services.gold_set_benchmark import (
     evaluate_reference_delta_gold_set,
     evaluate_reference_gold_set,
 )
+from fin_ai_auditor.services.operational_readiness import (
+    build_go_live_gate_summary,
+    build_operational_alert_summary,
+    build_runtime_guard,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -24,6 +29,8 @@ def bootstrap(
     settings = get_settings()
     configured_llm_slots = settings.get_configured_llm_slots()
     direct_metamodel = settings.get_direct_metamodel_config()
+    default_repo_path = settings.default_finai_local_repo_path
+    defaults_are_portable = not default_repo_path.is_absolute()
     runtime_access = atlassian_service.get_runtime_access_status()
     atlassian_status = runtime_access["auth_status"]
     granted_scopes = set(runtime_access["granted_scopes"])
@@ -46,8 +53,31 @@ def bootstrap(
     )
     gold_set_gate = evaluate_reference_gold_set()
     delta_gate = evaluate_reference_delta_gold_set()
+    runtime_guard = build_runtime_guard(settings=settings, repository=repository, context="api")
+    persistence_profile = runtime_guard["persistence_profile"]
+    observability = repository.get_runtime_observability_summary()
+    worker_recovery = repository.get_stale_run_recovery_summary(now_iso=utc_now_iso())
+    operational_alerts = build_operational_alert_summary(
+        observability=observability,
+        worker_recovery=worker_recovery,
+    )
+    go_live_gate = build_go_live_gate_summary(
+        runtime_guard=runtime_guard,
+        gold_set_gate={
+            "passed": gold_set_gate.passed,
+            "failure_reasons": gold_set_gate.failure_reasons,
+        },
+        delta_gate={
+            "passed": delta_gate.passed,
+            "failure_reasons": delta_gate.failure_reasons,
+        },
+        alert_summary=operational_alerts,
+        confluence_live_read_ready=confluence_live_read_ready,
+        jira_writeback_ready=jira_write_scope_ready,
+    )
     return {
         "app_name": settings.app_name,
+        "operational_mode": settings.operational_mode,
         "defaults": {
             "github_repo_url": settings.default_finai_github_repo_url,
             "local_repo_path": str(settings.default_finai_local_repo_path),
@@ -73,6 +103,9 @@ def bootstrap(
             "mode": settings.external_resource_access_mode,
             "external_write_requires_user_decision": settings.external_write_requires_user_decision,
             "local_database_is_only_writable_store": settings.local_database_is_only_writable_store,
+            "writeback_target_mode": settings.writeback_target_mode,
+            "allowed_confluence_space_keys": settings.get_allowed_writeback_confluence_space_keys(),
+            "allowed_jira_project_keys": settings.get_allowed_writeback_jira_project_keys(),
             "summary": (
                 "Bis zu einer expliziten User-Entscheidung erfolgen alle Analysezugriffe auf GitHub, "
                 "Confluence und Metamodell ausschliesslich lesend. Jira wird in diesem Modus nicht "
@@ -80,6 +113,9 @@ def bootstrap(
                 "Schreibend genutzt werden darf nur die lokale FIN-AI Auditor Datenbank."
             ),
         },
+        "secret_storage": repository.get_secret_storage_summary(),
+        "persistence_profile": persistence_profile,
+        "runtime_guard": runtime_guard,
         "capabilities": {
             "local_repo_enabled": True,
             "fixed_atlassian_sources": True,
@@ -109,6 +145,20 @@ def bootstrap(
             ],
         },
         "operational_readiness": {
+            "deployment_profile": {
+                "operational_mode": settings.operational_mode,
+                "portable_defaults": defaults_are_portable,
+                "notes": (
+                    ["Defaults sind relativ gehalten und dadurch ohne benutzerspezifischen Pfad portabler."]
+                    if defaults_are_portable
+                    else [
+                        "Der Default-Repo-Pfad ist noch workstation-spezifisch und sollte fuer Team-Betrieb explizit gesetzt werden."
+                    ]
+                ),
+            },
+            "secret_storage": repository.get_secret_storage_summary(),
+            "persistence_profile": persistence_profile,
+            "runtime_guard": runtime_guard,
             "atlassian_oauth": {
                 "ready": atlassian_oauth_ready,
                 "granted_scopes": sorted(granted_scopes),
@@ -159,8 +209,23 @@ def bootstrap(
                     ]
                 ),
             },
+            "writeback_target_policy": {
+                "ready": settings.writeback_target_mode != "disabled",
+                "mode": settings.writeback_target_mode,
+                "allowed_confluence_space_keys": settings.get_allowed_writeback_confluence_space_keys(),
+                "allowed_jira_project_keys": settings.get_allowed_writeback_jira_project_keys(),
+                "notes": (
+                    ["Externer Writeback ist komplett deaktiviert."]
+                    if settings.writeback_target_mode == "disabled"
+                    else [
+                        "Externer Writeback ist nur fuer explizit freigegebene Confluence-Spaces und Jira-Projekte erlaubt."
+                    ]
+                ),
+            },
+            "operational_alerts": operational_alerts,
+            "go_live_gate": go_live_gate,
         },
-        "observability": repository.get_runtime_observability_summary(),
+        "observability": observability,
         "atomic_fact_registry": repository.get_atomic_fact_registry_summary(),
         "quality_gate": {
             "gold_set": {
@@ -192,7 +257,9 @@ def bootstrap(
                 "failure_reasons": delta_gate.failure_reasons,
             },
         },
-        "worker_recovery": repository.get_stale_run_recovery_summary(now_iso=utc_now_iso()),
+        "worker_recovery": worker_recovery,
+        "go_live_gate": go_live_gate,
+        "operational_alerts": operational_alerts,
         "confluence_analysis_cache": repository.get_confluence_analysis_cache_summary(),
         "atlassian_auth": atlassian_status.model_dump(mode="json"),
     }
