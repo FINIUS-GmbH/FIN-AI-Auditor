@@ -36,6 +36,19 @@ const STATUS_LABEL: Record<string, string> = {
   dismissed: "Verworfen",
 };
 
+function latestUserAnswer(thread: ClarificationThread | null): string {
+  if (!thread) {
+    return "";
+  }
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message.role === "user" && message.message_type === "answer") {
+      return message.content.trim();
+    }
+  }
+  return "";
+}
+
 function relativeTime(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
   const mins = Math.floor(diff / 60000);
@@ -57,6 +70,7 @@ export function ClarificationPanel({
 }: ClarificationPanelProps): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+  const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -81,14 +95,20 @@ export function ClarificationPanel({
   /* ---- Actions ---- */
 
   async function handleStartThread(): Promise<void> {
+    if (!draft.trim()) {
+      alert("Bitte geben Sie im Kommentarfeld eine Präzisierung ein, bevor Sie 'Klärung anfordern' klicken.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const updated = await createClarificationThread(run.run_id, {
+      const updatedRun = await createClarificationThread(run.run_id, {
         package_id: packageId,
         purpose: "truth_clarification",
+        initial_content: draft.trim(),
       });
-      onRunUpdated(updated);
+      onRunUpdated(updatedRun);
+      setDraft("");
       setExpanded(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Fehler beim Starten");
@@ -142,13 +162,18 @@ export function ClarificationPanel({
 
   async function handleCaptureIndication(msg: ClarificationMessage): Promise<void> {
     if (!thread) return;
+    const userStatement = latestUserAnswer(thread);
+    if (!userStatement) {
+      setError("Es gibt keine Nutzeräußerung, die als Hinweis gespeichert werden kann.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const updated = await captureIndicationFromClarification(
         run.run_id,
         thread.thread_id,
-        msg.content,
+        userStatement,
       );
       onRunUpdated(updated);
     } catch (e) {
@@ -162,7 +187,10 @@ export function ClarificationPanel({
     if (!thread) return;
     const meta = msg.metadata ?? {};
     const existingTruthId = (meta.conflicting_truth_id as string) || "";
-    if (!existingTruthId) return;
+    if (!existingTruthId) {
+      setError("Konflikt-Metadaten fehlen. Die bestehende Wahrheit kann nicht ersetzt werden.");
+      return;
+    }
 
     setBusy(true);
     setError(null);
@@ -300,13 +328,24 @@ export function ClarificationPanel({
   // No thread yet — show start button
   if (!thread) {
     return (
-      <div className="clar-panel clar-panel-empty">
+      <div className="clar-panel clar-panel-empty wc-specify-area">
+        <div className="wc-specify-label">Noch unklar? Klärung anfordern</div>
+        <p className="wc-specify-hint">Beschreiben Sie, was unklar ist oder was der Auditor genauer untersuchen soll. Nach vollständiger Klärung erhalten Sie eine überarbeitete Entscheidungskarte.</p>
+        <textarea
+          className="clar-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="Was genau soll geklärt oder genauer untersucht werden?"
+          disabled={busy}
+        />
+        {error && <div className="clar-error">{error}</div>}
         <button
-          className="btn clar-btn-start"
+          className="btn btn-specify clar-btn-start"
+          style={{ width: "fit-content", marginTop: "12px" }}
           disabled={busy}
           onClick={() => void handleStartThread()}
         >
-          {busy ? "Startet…" : "Klärung starten"}
+          {busy ? "Startet…" : "Klärung anfordern"}
         </button>
       </div>
     );

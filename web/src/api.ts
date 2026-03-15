@@ -100,7 +100,7 @@ export async function submitDecisionComment(runId: string, commentText: string):
 export async function submitPackageDecision(
   runId: string,
   packageId: string,
-  action: "accept" | "reject" | "specify",
+  action: "accept" | "reject",
   commentText?: string,
 ): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/packages/${packageId}/decisions`, {
@@ -255,6 +255,7 @@ export async function createClarificationThread(
     package_id?: string | null;
     atomic_fact_id?: string | null;
     purpose: "truth_clarification" | "rating_explanation" | "action_routing";
+    initial_content?: string | null;
   },
 ): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/clarification-threads`, {

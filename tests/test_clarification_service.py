@@ -83,6 +83,22 @@ class TestThreadLifecycle:
         assert thread.messages[0].role in ("system", "assistant")
         assert thread.messages[0].message_type == "question"
 
+    def test_open_thread_with_initial_message_is_atomic(self, tmp_path: Path) -> None:
+        _, _, cs, run_id, pkg = _make_env(tmp_path)
+
+        result = cs.open_thread(
+            run_id=run_id,
+            package_id=pkg.package_id,
+            purpose="truth_clarification",
+            initial_content="Bitte klaeren, ob API X aktiv ist.",
+        )
+
+        assert len(result.clarification_threads) == 1
+        thread = result.clarification_threads[0]
+        assert [message.role for message in thread.messages[:2]] == ["assistant", "user"]
+        assert thread.messages[1].content == "Bitte klaeren, ob API X aktiv ist."
+        assert thread.metadata == {}
+
     def test_process_answer_adds_messages(self, tmp_path: Path) -> None:
         _, _, cs, run_id, pkg = _make_env(tmp_path)
 
@@ -146,6 +162,13 @@ class TestDefinitiveTruth:
         assert thread.status == "resolved"
         assert thread.triggered_delta_recompute is True
         assert len(thread.created_truth_ids) == 1
+        superseded_packages = [p for p in r3.decision_packages if p.decision_state == "superseded"]
+        revised_packages = [
+            p for p in r3.decision_packages if p.metadata.get("revision_of") == pkg.package_id
+        ]
+        assert len(superseded_packages) == 1
+        assert len(revised_packages) == 1
+        assert revised_packages[0].metadata.get("clarification_thread_id") == tid
 
     def test_confirm_truth_adds_confirmation_message(self, tmp_path: Path) -> None:
         _, _, cs, run_id, pkg = _make_env(tmp_path)
@@ -204,6 +227,18 @@ class TestIndicationCapture:
         outcome_msgs = [m for m in thread.messages if m.outcome_type == "indication_captured"]
         assert len(outcome_msgs) >= 1
 
+    def test_capture_indication_uses_latest_user_answer_when_content_blank(self, tmp_path: Path) -> None:
+        _, _, cs, run_id, pkg = _make_env(tmp_path)
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+        cs.process_answer(run_id=run_id, thread_id=tid, content="API X scheint aktiv")
+
+        r2 = cs.capture_indication(run_id=run_id, thread_id=tid, content="   ")
+
+        dialog_claims = [c for c in r2.claims if c.source_id == f"clarification:{tid}"]
+        assert dialog_claims[-1].normalized_value == "API X scheint aktiv"
+
 
 # ── 4. Conflict detection ────────────────────────────────────
 
@@ -251,6 +286,9 @@ class TestConflictDetection:
         conflict_msgs = [m for m in thread2.messages if m.message_type == "conflict_resolution"]
         assert len(conflict_msgs) >= 1
         assert "aktiv" in conflict_msgs[0].content.lower() or "bestehende" in conflict_msgs[0].content.lower()
+        assert conflict_msgs[0].metadata["conflicting_truth_id"] == r2.truths[0].truth_id
+        assert conflict_msgs[0].metadata["proposed_canonical_key"] == "api.status"
+        assert conflict_msgs[0].metadata["proposed_normalized_value"] == "deprecated"
 
 
 # ── 5. Supersede mechanism ───────────────────────────────────
@@ -325,6 +363,11 @@ class TestSupersedeFlow:
         thread2 = r5.clarification_threads[1]
         assert thread2.status == "resolved"
         assert thread2.triggered_delta_recompute is True
+        revised_packages = [
+            p for p in r5.decision_packages if p.metadata.get("revision_of") == pkg2.package_id
+        ]
+        assert len(revised_packages) == 1
+        assert revised_packages[0].metadata.get("clarification_thread_id") == tid2
 
 
 # ── 6. Cross-thread context ──────────────────────────────────
