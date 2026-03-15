@@ -65,6 +65,29 @@ class _FakeJiraClient:
         return _FakeResponse({"id": "10001", "key": "FINAI-321"})
 
 
+class _FallbackIssueTypeJiraClient(_FakeJiraClient):
+    def get(self, url: str, params: dict[str, object] | None = None, headers: dict[str, str] | None = None) -> _FakeResponse:
+        if url.endswith("/oauth/token/accessible-resources"):
+            return super().get(url, params=params, headers=headers)
+        if url.endswith("/rest/api/3/issue/createmeta/FINAI/issuetypes"):
+            return _FakeResponse(
+                {
+                    "issueTypes": [
+                        {"id": "10067", "name": "Task", "subtask": False},
+                        {"id": "10068", "name": "Epic", "subtask": False},
+                    ]
+                }
+            )
+        raise AssertionError(f"Unexpected GET URL: {url} params={params} headers={headers or self._headers}")
+
+    def post(self, url: str, json: dict[str, object] | None = None) -> _FakeResponse:
+        assert url == "https://api.atlassian.com/ex/jira/cloud-jira-1/rest/api/3/issue"
+        assert isinstance(json, dict)
+        fields = json.get("fields") or {}
+        assert fields.get("issuetype") == {"name": "Task"}
+        return _FakeResponse({"id": "10002", "key": "FINAI-322"})
+
+
 class _FakeOAuthService:
     def get_valid_access_token_or_raise(self, *, required_scopes: set[str] | None = None) -> str:
         assert required_scopes == {"write:jira-work"}
@@ -123,6 +146,27 @@ def test_jira_connector_creates_ticket_via_accessible_resources(monkeypatch, tmp
 
     assert result.issue_key == "FINAI-321"
     assert result.issue_url == "https://finius.atlassian.net/browse/FINAI-321"
+
+
+def test_jira_connector_falls_back_to_project_issue_type(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("fin_ai_auditor.services.connectors.jira_connector.httpx.Client", _FallbackIssueTypeJiraClient)
+    settings = Settings(database_path=tmp_path / "auditor.db", metamodel_dump_path=tmp_path / "metamodel.json")
+    connector = JiraTicketingConnector(settings=settings)
+
+    result = connector.create_ticket(
+        target=JiraTicketTarget(project_key="FINAI", board_url=settings.jira_board_url),
+        issue_payload={
+            "fields": {
+                "project": {"key": "FINAI"},
+                "issuetype": {"name": "Story"},
+                "summary": "Test",
+            }
+        },
+        access_token="access-token",
+    )
+
+    assert result.issue_key == "FINAI-322"
+    assert result.verification_metadata["resolved_issue_type"] == "Task"
 
 
 def test_audit_service_executes_approved_jira_writeback(tmp_path: Path) -> None:

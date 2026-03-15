@@ -67,11 +67,17 @@ class JiraTicketingConnector:
                 target=target,
                 access_token=access_token,
             )
+            normalized_payload, resolved_issue_type = _normalize_issue_payload_for_target(
+                client=client,
+                api_base_url=access_context.api_base_url,
+                project_key=target.project_key,
+                issue_payload=issue_payload,
+            )
             response = _request_with_retry(
                 client=client,
                 method="POST",
                 url=f"{access_context.api_base_url}/rest/api/3/issue",
-                json=issue_payload,
+                json=normalized_payload,
             )
             payload = response.json()
         if not isinstance(payload, dict):
@@ -93,6 +99,7 @@ class JiraTicketingConnector:
                 "resource_scopes": list(access_context.resource_scopes or []),
                 "api_base_url": access_context.api_base_url,
                 "site_base_url": access_context.site_base_url,
+                "resolved_issue_type": resolved_issue_type,
             },
         )
 
@@ -177,6 +184,96 @@ def _target_host(*, settings: Settings, target: JiraTicketTarget) -> str:
     if settings_host:
         return settings_host
     return urlparse(str(settings.confluence_home_url or "")).netloc.casefold()
+
+
+def _normalize_issue_payload_for_target(
+    *,
+    client: httpx.Client,
+    api_base_url: str,
+    project_key: str,
+    issue_payload: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    normalized_payload = dict(issue_payload)
+    fields = dict(normalized_payload.get("fields") or {})
+    requested_issue_type = dict(fields.get("issuetype") or {})
+    requested_name = str(requested_issue_type.get("name") or "").strip()
+    requested_id = str(requested_issue_type.get("id") or "").strip()
+    available_types = _fetch_creatable_issue_types(
+        client=client,
+        api_base_url=api_base_url,
+        project_key=project_key,
+    )
+    if not available_types:
+        normalized_payload["fields"] = fields
+        return normalized_payload, requested_name or requested_id or None
+    available_names = {
+        str(item.get("name") or "").strip().casefold(): str(item.get("name") or "").strip()
+        for item in available_types
+        if str(item.get("name") or "").strip()
+    }
+    available_ids = {
+        str(item.get("id") or "").strip(): str(item.get("name") or "").strip()
+        for item in available_types
+        if str(item.get("id") or "").strip()
+    }
+    if requested_id and requested_id in available_ids:
+        normalized_payload["fields"] = fields
+        return normalized_payload, available_ids[requested_id] or requested_id
+    if requested_name and requested_name.casefold() in available_names:
+        normalized_payload["fields"] = fields
+        return normalized_payload, available_names[requested_name.casefold()] or requested_name
+    resolved_issue_type = _select_preferred_issue_type(available_types=available_types)
+    if resolved_issue_type is not None:
+        fields["issuetype"] = {"name": resolved_issue_type}
+    normalized_payload["fields"] = fields
+    return normalized_payload, resolved_issue_type
+
+
+def _fetch_creatable_issue_types(
+    *,
+    client: httpx.Client,
+    api_base_url: str,
+    project_key: str,
+) -> list[dict[str, Any]]:
+    response = _request_with_retry(
+        client=client,
+        method="GET",
+        url=f"{api_base_url}/rest/api/3/issue/createmeta/{project_key}/issuetypes",
+    )
+    payload = response.json()
+    if not isinstance(payload, dict):
+        return []
+    issue_types = payload.get("issueTypes")
+    if not isinstance(issue_types, list):
+        return []
+    return [item for item in issue_types if isinstance(item, dict)]
+
+
+def _select_preferred_issue_type(*, available_types: list[dict[str, Any]]) -> str | None:
+    preferred_names = ("Task", "Story", "Bug", "Feature", "Epic", "Idee")
+    non_subtasks = [
+        item
+        for item in available_types
+        if not bool(item.get("subtask"))
+    ]
+    normalized_non_subtasks = {
+        str(item.get("name") or "").strip().casefold(): str(item.get("name") or "").strip()
+        for item in non_subtasks
+        if str(item.get("name") or "").strip()
+    }
+    for preferred in preferred_names:
+        resolved = normalized_non_subtasks.get(preferred.casefold())
+        if resolved:
+            return resolved
+    for item in non_subtasks:
+        name = str(item.get("name") or "").strip()
+        if name:
+            return name
+    for item in available_types:
+        name = str(item.get("name") or "").strip()
+        if name:
+            return name
+    return None
 
 
 def _request_with_retry(

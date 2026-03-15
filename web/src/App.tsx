@@ -510,88 +510,36 @@ export default function App(): ReactNode {
             <>
               {/* ── Dashboard Overview — always visible ── */}
               <div className="metrics-row">
-                <div className="metric-card mc-blue">
-                  <div className="metric-icon">📄</div>
-                  <div className="metric-body">
-                    <span className="metric-label">Quellen</span>
-                    <span className="metric-value">{run?.source_snapshots.length ?? 0}</span>
-                    <span className="metric-sub">{run ? `${run.claims.length} Behauptungen` : "–"}</span>
-                  </div>
-                </div>
                 <div className="metric-card mc-amber">
                   <div className="metric-icon">🔍</div>
                   <div className="metric-body">
-                    <span className="metric-label">Befunde</span>
+                    <span className="metric-label">Unstimmigkeiten</span>
                     <span className="metric-value">{run?.findings.length ?? 0}</span>
-                    <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "–"; })() : "–"}</span>
+                    <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "Keine kritischen"; })() : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-purple">
                   <div className="metric-icon">📦</div>
                   <div className="metric-body">
-                    <span className="metric-label">Pakete</span>
-                    <span className="metric-value">{run?.decision_packages.length ?? 0}</span>
-                    <span className="metric-sub">{run ? `${run.decision_records.length} Entscheidungen` : "–"}</span>
+                    <span className="metric-label">Offene Entscheidungen</span>
+                    <span className="metric-value">{openPkgs.length}</span>
+                    <span className="metric-sub">{run ? `${pendApps.length} Freigaben ausstehend` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-green">
                   <div className="metric-icon">✅</div>
                   <div className="metric-body">
-                    <span className="metric-label">Freigaben</span>
-                    <span className="metric-value">{pendApps.length}</span>
-                    <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt` : "–"}</span>
+                    <span className="metric-label">Entschieden</span>
+                    <span className="metric-value">{run ? run.decision_packages.filter(p => p.decision_state !== "open").length : 0}</span>
+                    <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-teal">
-                  <div className="metric-icon">🔤</div>
-                  <div className="metric-body">
-                    <span className="metric-label">Token</span>
-                    <span className="metric-value">{run?.llm_usage?.total_prompt_tokens || run?.llm_usage?.total_completion_tokens ? ((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE") : "0"}</span>
-                    <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${(run.llm_usage.total_prompt_tokens ?? 0).toLocaleString("de-DE")} Eingabe · ${(run.llm_usage.total_completion_tokens ?? 0).toLocaleString("de-DE")} Ausgabe` : "–"}</span>
-                  </div>
-                </div>
-                <div className="metric-card mc-rose">
                   <div className="metric-icon">💰</div>
                   <div className="metric-body">
-                    <span className="metric-label">LLM-Kosten</span>
-                    <span className="metric-value">{run?.llm_usage?.total_cost_eur ? `${run.llm_usage.total_cost_eur.toFixed(4)}€` : "0€"}</span>
-                    <span className="metric-sub">{run?.llm_usage?.by_model ? Object.entries(run.llm_usage.by_model).map(([m, d]) => `${m.split("/").pop()}: ${d.calls}x ${d.cost_eur.toFixed(4)}€`).join(" · ") : "–"}</span>
-                  </div>
-                </div>
-                <div className="metric-card mc-purple">
-                  <div className="metric-icon">🧩</div>
-                  <div className="metric-body">
-                    <span className="metric-label">Faktenregister</span>
-                    <span className="metric-value">{boot?.atomic_fact_registry?.unique_fact_count ?? 0}</span>
-                    <span className="metric-sub">
-                      {boot?.atomic_fact_registry
-                        ? `${boot.atomic_fact_registry.recurring_fact_count} wiederkehrend · ${boot.atomic_fact_registry.reopened_fact_count} wiedereröffnet`
-                        : "–"}
-                    </span>
-                  </div>
-                </div>
-                <div className="metric-card mc-green">
-                  <div className="metric-icon">🎯</div>
-                  <div className="metric-body">
-                    <span className="metric-label">Referenz-Set</span>
-                    <span className="metric-value">{boot?.quality_gate?.gold_set ? `${Math.round((boot.quality_gate.gold_set.precision ?? 0) * 100)}%` : "–"}</span>
-                    <span className="metric-sub">
-                      {boot?.quality_gate?.gold_set
-                        ? `${Math.round((boot.quality_gate.gold_set.recall ?? 0) * 100)}% Trefferquote · ${boot.quality_gate.gold_set.passed ? "Gate grün" : "Gate offen"}`
-                        : "–"}
-                    </span>
-                  </div>
-                </div>
-                <div className="metric-card mc-green">
-                  <div className="metric-icon">Δ</div>
-                  <div className="metric-body">
-                    <span className="metric-label">Delta-Prüfung</span>
-                    <span className="metric-value">{boot?.quality_gate?.delta_recompute ? `${Math.round((boot.quality_gate.delta_recompute.precision ?? 0) * 100)}%` : "–"}</span>
-                    <span className="metric-sub">
-                      {boot?.quality_gate?.delta_recompute
-                        ? `${Math.round((boot.quality_gate.delta_recompute.recall ?? 0) * 100)}% Trefferquote · ${boot.quality_gate.delta_recompute.passed ? "Gate grün" : "Gate offen"}`
-                        : "–"}
-                    </span>
+                    <span className="metric-label">Token & Kosten</span>
+                    <span className="metric-value">{run?.llm_usage?.total_cost_eur ? `${run.llm_usage.total_cost_eur.toFixed(2)}€` : "0€"}</span>
+                    <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE")} Token` : "–"}</span>
                   </div>
                 </div>
               </div>

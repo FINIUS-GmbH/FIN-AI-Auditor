@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from typing import Final
+from uuid import uuid4
 
 import httpx
 
@@ -374,10 +375,11 @@ class AuditService:
         run = self.get_run(run_id=run_id)
         if run is None:
             raise ValueError(f"Audit-Run nicht gefunden: {run_id}")
-        findings = self._build_demo_findings(run=run)
+        demo_snapshot_ids = self._build_demo_snapshot_ids()
+        findings = self._build_demo_findings(run=run, snapshot_ids=demo_snapshot_ids)
         links = self._build_demo_links(findings=findings)
-        snapshots = self._build_demo_snapshots(run=run)
-        claims = self._build_demo_claims(run=run)
+        snapshots = self._build_demo_snapshots(run=run, snapshot_ids=demo_snapshot_ids)
+        claims = self._build_demo_claims(run=run, snapshot_ids=demo_snapshot_ids)
         truths = self._build_demo_truths()
         packages = self._build_decision_packages(
             findings=findings,
@@ -1575,7 +1577,16 @@ class AuditService:
             }
         )
 
-    def _build_demo_findings(self, *, run: AuditRun) -> list[AuditFinding]:
+    @staticmethod
+    def _build_demo_snapshot_ids() -> dict[str, str]:
+        return {
+            "repo": f"snapshot_repo_demo_{uuid4().hex}",
+            "confluence": f"snapshot_confluence_demo_{uuid4().hex}",
+            "local_doc": f"snapshot_local_docs_demo_{uuid4().hex}",
+            "metamodel": f"snapshot_metamodel_demo_{uuid4().hex}",
+        }
+
+    def _build_demo_findings(self, *, run: AuditRun, snapshot_ids: dict[str, str]) -> list[AuditFinding]:
         repo_hint = run.target.local_repo_path or run.target.github_repo_url or "UNKNOWN"
         space_hint = run.target.confluence_space_keys[0] if run.target.confluence_space_keys else "UNKNOWN"
         return [
@@ -1593,7 +1604,7 @@ class AuditService:
                 ),
                 locations=[
                     AuditLocation(
-                        snapshot_id="snapshot_repo_demo",
+                        snapshot_id=snapshot_ids["repo"],
                         source_type="github_file",
                         source_id="demo-code-1",
                         title="Repo-Snapshot",
@@ -1610,7 +1621,7 @@ class AuditService:
                         metadata={"origin": "demo", "role": "implemented_path"},
                     ),
                     AuditLocation(
-                        snapshot_id="snapshot_confluence_demo",
+                        snapshot_id=snapshot_ids["confluence"],
                         source_type="confluence_page",
                         source_id="demo-page-1",
                         title=f"Confluence Space {space_hint}",
@@ -1643,7 +1654,7 @@ class AuditService:
                 recommendation="Objektkarte um Lifecycle, Scope und erlaubte Read-/Write-Operationen erweitern.",
                 locations=[
                     AuditLocation(
-                        snapshot_id="snapshot_local_docs_demo",
+                        snapshot_id=snapshot_ids["local_doc"],
                         source_type="local_doc",
                         source_id="demo-doc-1",
                         title="Lokale Planungsdoku",
@@ -1666,10 +1677,10 @@ class AuditService:
             ),
         ]
 
-    def _build_demo_claims(self, *, run: AuditRun) -> list[AuditClaimEntry]:
+    def _build_demo_claims(self, *, run: AuditRun, snapshot_ids: dict[str, str]) -> list[AuditClaimEntry]:
         return [
             AuditClaimEntry(
-                source_snapshot_id="snapshot_repo_demo",
+                source_snapshot_id=snapshot_ids["repo"],
                 source_type="github_file",
                 source_id="demo-code-1",
                 subject_kind="object_property",
@@ -1684,7 +1695,7 @@ class AuditService:
                 metadata={"origin": "demo"},
             ),
             AuditClaimEntry(
-                source_snapshot_id="snapshot_confluence_demo",
+                source_snapshot_id=snapshot_ids["confluence"],
                 source_type="confluence_page",
                 source_id="demo-page-1",
                 subject_kind="object_property",
@@ -1698,7 +1709,7 @@ class AuditService:
                 metadata={"origin": "demo"},
             ),
             AuditClaimEntry(
-                source_snapshot_id="snapshot_local_docs_demo",
+                source_snapshot_id=snapshot_ids["local_doc"],
                 source_type="local_doc",
                 source_id="demo-doc-1",
                 subject_kind="object_property",
@@ -1712,7 +1723,7 @@ class AuditService:
                 metadata={"origin": "demo"},
             ),
             AuditClaimEntry(
-                source_snapshot_id="snapshot_metamodel_demo",
+                source_snapshot_id=snapshot_ids["metamodel"],
                 source_type="metamodel",
                 source_id="finai-current-dump",
                 subject_kind="process",
@@ -3186,11 +3197,11 @@ class AuditService:
             )
         ]
 
-    def _build_demo_snapshots(self, *, run: AuditRun) -> list[AuditSourceSnapshot]:
+    def _build_demo_snapshots(self, *, run: AuditRun, snapshot_ids: dict[str, str]) -> list[AuditSourceSnapshot]:
         repo_hint = run.target.local_repo_path or run.target.github_repo_url or "UNKNOWN"
         return [
             AuditSourceSnapshot(
-                snapshot_id="snapshot_repo_demo",
+                snapshot_id=snapshot_ids["repo"],
                 source_type="github_file",
                 source_id="demo-code-1",
                 revision_id=run.target.github_ref,
@@ -3199,7 +3210,7 @@ class AuditService:
                 metadata={"repo_path": repo_hint, "kind": "local_repo_or_remote"},
             ),
             AuditSourceSnapshot(
-                snapshot_id="snapshot_confluence_demo",
+                snapshot_id=snapshot_ids["confluence"],
                 source_type="confluence_page",
                 source_id="demo-page-1",
                 revision_id="v1",
@@ -3211,7 +3222,7 @@ class AuditService:
                 },
             ),
             AuditSourceSnapshot(
-                snapshot_id="snapshot_local_docs_demo",
+                snapshot_id=snapshot_ids["local_doc"],
                 source_type="local_doc",
                 source_id="demo-doc-1",
                 revision_id="working-tree",
@@ -3220,7 +3231,7 @@ class AuditService:
                 metadata={"path_hint": "docs/roadmap.md"},
             ),
             AuditSourceSnapshot(
-                snapshot_id="snapshot_metamodel_demo",
+                snapshot_id=snapshot_ids["metamodel"],
                 source_type="metamodel",
                 source_id="finai-current-dump",
                 revision_id="latest",

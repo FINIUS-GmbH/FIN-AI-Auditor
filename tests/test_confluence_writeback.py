@@ -241,6 +241,52 @@ def test_create_confluence_approval_request_stores_patch_preview(tmp_path: Path)
     assert approval.payload_preview
 
 
+def test_demo_completion_can_run_multiple_times_without_snapshot_id_collision(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+
+    first = service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    second = service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+
+    first_completed = service.complete_run_with_demo_findings(run_id=first.run_id)
+    second_completed = service.complete_run_with_demo_findings(run_id=second.run_id)
+
+    assert len(first_completed.source_snapshots) == 4
+    assert len(second_completed.source_snapshots) == 4
+    assert {snapshot.snapshot_id for snapshot in first_completed.source_snapshots}.isdisjoint(
+        {snapshot.snapshot_id for snapshot in second_completed.source_snapshots}
+    )
+
+
 def test_audit_service_executes_approved_confluence_writeback(tmp_path: Path) -> None:
     settings = Settings(
         database_path=tmp_path / "auditor.db",
