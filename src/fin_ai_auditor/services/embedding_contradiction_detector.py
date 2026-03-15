@@ -37,14 +37,17 @@ def detect_cross_document_contradictions(
     claim_records: list[ExtractedClaimRecord],
     allow_remote_embeddings: bool,
     progress_callback: Callable[[str], None] | None = None,
+    db_path: str | None = None,
 ) -> list[AuditFinding]:
     """Find semantically similar but value-conflicting claims across sources.
 
     Strategy:
-    1. Embed all claim texts (parallelized API calls)
-    2. Find high-similarity pairs across different source types (numpy vectorized)
-    3. Check if their normalized values conflict
-    4. Generate findings for confirmed contradictions
+    1. Check embedding cache for already-embedded claims (delta optimization)
+    2. Embed only NEW claim texts (parallelized API calls)
+    3. Store new embeddings in cache for next run
+    4. Find high-similarity pairs across different source types (numpy vectorized)
+    5. Check if their normalized values conflict
+    6. Generate findings for confirmed contradictions
     """
     if not allow_remote_embeddings:
         logger.info("embedding_contradiction_skipped", extra={
@@ -80,37 +83,79 @@ def detect_cross_document_contradictions(
         for r in eligible
     ]
 
-    # Embed in parallel batches
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # ── Delta-caching: only embed uncached claims ──
+    import hashlib
+    text_hashes = [hashlib.sha256(t.encode("utf-8")).hexdigest()[:24] for t in claim_texts]
+    cached_embeddings: dict[str, list[float]] = {}
+    cache_svc = None
 
-    batches = [claim_texts[i:i + BATCH_SIZE] for i in range(0, len(claim_texts), BATCH_SIZE)]
-    batch_results: dict[int, list[list[float]]] = {}
+    if db_path:
+        from pathlib import Path
+        from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
+        cache_svc = PipelineCacheService(db_path=Path(db_path))
+        cached_embeddings = cache_svc.get_cached_embeddings(text_hashes=text_hashes)
 
-    def _embed_batch(batch_idx: int, batch: list[str]) -> tuple[int, list[list[float]]]:
-        try:
-            return batch_idx, client.embed_documents(batch)
-        except Exception as exc:
-            logger.warning("embedding_batch_failed", extra={"event_payload": {"batch": batch_idx, "error": str(exc)}})
-            return batch_idx, [[] for _ in batch]
+    # Identify which texts need embedding
+    uncached_indices = [i for i, h in enumerate(text_hashes) if h not in cached_embeddings]
+    cached_count = len(claim_texts) - len(uncached_indices)
+    total_claims = len(claim_texts)
 
-    with ThreadPoolExecutor(max_workers=EMBED_PARALLELISM) as pool:
-        futures = {pool.submit(_embed_batch, idx, batch): idx for idx, batch in enumerate(batches)}
-        completed_batches = 0
-        total_claims = len(claim_texts)
-        for future in as_completed(futures):
-            batch_idx, embeddings = future.result()
-            batch_results[batch_idx] = embeddings
-            completed_batches += 1
-            embedded_so_far = min(completed_batches * BATCH_SIZE, total_claims)
+    if progress_callback:
+        progress_callback(f"Embedding-Cache: {cached_count}/{total_claims} Claims aus Cache geladen, {len(uncached_indices)} neu zu berechnen")
+    logger.info("embedding_cache_stats", extra={"event_name": "embedding_cache_stats", "event_payload": {"total": total_claims, "cached": cached_count, "to_embed": len(uncached_indices)}})
+
+    # Build the full embedding list — fill cached ones directly
+    all_embeddings: list[list[float]] = [[] for _ in claim_texts]
+    for i, h in enumerate(text_hashes):
+        if h in cached_embeddings:
+            all_embeddings[i] = cached_embeddings[h]
+
+    # Embed only uncached claims
+    if uncached_indices:
+        uncached_texts = [claim_texts[i] for i in uncached_indices]
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        batches = [uncached_texts[i:i + BATCH_SIZE] for i in range(0, len(uncached_texts), BATCH_SIZE)]
+        batch_results: dict[int, list[list[float]]] = {}
+
+        def _embed_batch(batch_idx: int, batch: list[str]) -> tuple[int, list[list[float]]]:
+            try:
+                return batch_idx, client.embed_documents(batch)
+            except Exception as exc:
+                logger.warning("embedding_batch_failed", extra={"event_payload": {"batch": batch_idx, "error": str(exc)}})
+                return batch_idx, [[] for _ in batch]
+
+        with ThreadPoolExecutor(max_workers=EMBED_PARALLELISM) as pool:
+            futures = {pool.submit(_embed_batch, idx, batch): idx for idx, batch in enumerate(batches)}
+            completed_batches = 0
+            for future in as_completed(futures):
+                batch_idx, embeddings = future.result()
+                batch_results[batch_idx] = embeddings
+                completed_batches += 1
+                embedded_so_far = min(completed_batches * BATCH_SIZE, len(uncached_texts))
+                if progress_callback:
+                    progress_callback(f"Embedding: {embedded_so_far}/{len(uncached_texts)} neue Claims verarbeitet ({completed_batches}/{len(batches)} Batches)")
+
+        # Reassemble uncached embeddings into full list
+        uncached_flat: list[list[float]] = []
+        for idx in range(len(batches)):
+            uncached_flat.extend(batch_results.get(idx, [[] for _ in batches[idx]]))
+
+        # Store new embeddings in cache
+        new_cache_entries: dict[str, list[float]] = {}
+        for local_idx, global_idx in enumerate(uncached_indices):
+            emb = uncached_flat[local_idx] if local_idx < len(uncached_flat) else []
+            all_embeddings[global_idx] = emb
+            if emb:  # Only cache non-empty embeddings
+                new_cache_entries[text_hashes[global_idx]] = emb
+
+        if cache_svc and new_cache_entries:
+            cache_svc.set_cached_embeddings(entries=new_cache_entries)
             if progress_callback:
-                progress_callback(f"Embedding: {embedded_so_far}/{total_claims} Claims verarbeitet ({completed_batches}/{len(batches)} Batches)")
+                progress_callback(f"{len(new_cache_entries)} neue Embeddings im Cache gespeichert")
 
-    # Reassemble in order
-    all_embeddings: list[list[float]] = []
-    for idx in range(len(batches)):
-        all_embeddings.extend(batch_results.get(idx, [[] for _ in batches[idx]]))
-
-    if not all_embeddings or not any(all_embeddings):
+    if not any(all_embeddings):
         return []
 
     logger.info(

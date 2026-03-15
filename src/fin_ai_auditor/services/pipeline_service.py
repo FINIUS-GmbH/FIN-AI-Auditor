@@ -307,6 +307,7 @@ class AuditPipelineService:
             claim_records=claim_records,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
             progress_callback=_on_embedding_progress,
+            db_path=str(self._audit_service.repository._db_path),
         )
         logger.info("pipeline_embedding_contradictions", extra={"event_name": "pipeline_embedding_contradictions", "event_payload": {"found": len(embedding_findings)}})
         if embedding_findings:

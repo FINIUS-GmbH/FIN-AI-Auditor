@@ -104,6 +104,49 @@ class PipelineCacheService:
             )
             return result.rowcount
 
+    # ── Embedding Vector Cache ──────────────────────────────────────
+
+    def _ensure_embedding_cache_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                embedding_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    def get_cached_embeddings(self, *, text_hashes: list[str]) -> dict[str, list[float]]:
+        """Batch-retrieve cached embedding vectors by text hash."""
+        if not text_hashes:
+            return {}
+        with self._connection() as conn:
+            self._ensure_embedding_cache_table(conn)
+            results: dict[str, list[float]] = {}
+            # Query in chunks of 500 to avoid SQLite variable limit
+            for i in range(0, len(text_hashes), 500):
+                chunk = text_hashes[i:i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT text_hash, embedding_json FROM embedding_cache WHERE text_hash IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    results[row["text_hash"]] = json.loads(row["embedding_json"])
+            return results
+
+    def set_cached_embeddings(self, *, entries: dict[str, list[float]]) -> None:
+        """Batch-store embedding vectors keyed by text hash."""
+        if not entries:
+            return
+        with self._connection() as conn:
+            self._ensure_embedding_cache_table(conn)
+            now = utc_now_iso()
+            conn.executemany(
+                "INSERT OR REPLACE INTO embedding_cache (text_hash, embedding_json, created_at) VALUES (?, ?, ?)",
+                [(h, json.dumps(v), now) for h, v in entries.items()],
+            )
+        logger.info("embedding_cache_stored", extra={"event_name": "embedding_cache_stored", "event_payload": {"count": len(entries)}})
+
     # ── Cache Key Builders ──────────────────────────────────────────
 
     @staticmethod
@@ -138,3 +181,8 @@ class PipelineCacheService:
         if snapshot_hash:
             return snapshot_hash
         return f"sha256:{hashlib.sha256(document.body.encode('utf-8')).hexdigest()}"
+
+    @staticmethod
+    def embedding_text_hash(text: str) -> str:
+        """Hash a claim text for embedding cache lookup."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
