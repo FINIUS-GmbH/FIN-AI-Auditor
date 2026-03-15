@@ -55,6 +55,33 @@ export type OperationalReadinessItem = {
   notes: string[];
 };
 
+export type OperationalAlertSummary = {
+  status: "ok" | "warning" | "critical";
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  notes: string[];
+  observability_signals: {
+    trace_count: number;
+    metric_sample_count: number;
+    recent_error_span_count: number;
+  };
+  recovery_signals: {
+    reclaimable_run_count: number;
+  };
+};
+
+export type GoLiveGateSummary = {
+  ready: boolean;
+  blocking_gates: string[];
+  checks: Array<{
+    gate: string;
+    label: string;
+    passed: boolean;
+    notes: string[];
+  }>;
+};
+
 export type AtomicFactRegistrySummary = {
   total_entries: number;
   unique_fact_count: number;
@@ -147,15 +174,36 @@ export type BootstrapData = {
   resource_access_policy: ResourceAccessPolicy;
   capabilities: BootstrapCapabilities;
   operational_readiness: {
+    deployment_profile?: {
+      operational_mode: string;
+      portable_defaults: boolean;
+      notes: string[];
+    };
+    secret_storage?: Record<string, unknown>;
+    persistence_profile?: Record<string, unknown>;
+    runtime_guard?: Record<string, unknown>;
     atlassian_oauth: OperationalReadinessItem;
     confluence_live_read: OperationalReadinessItem;
     jira_writeback: OperationalReadinessItem;
+    writeback_target_policy?: Record<string, unknown>;
+    operational_alerts?: OperationalAlertSummary;
+    go_live_gate?: GoLiveGateSummary;
   };
   atomic_fact_registry: AtomicFactRegistrySummary;
   quality_gate: {
     gold_set: GoldSetQualityGate;
     delta_recompute: GoldSetQualityGate;
   };
+  observability?: {
+    trace_count: number;
+    metric_sample_count: number;
+    recent_error_span_count: number;
+  };
+  worker_recovery?: {
+    reclaimable_run_count: number;
+  };
+  go_live_gate?: GoLiveGateSummary;
+  operational_alerts?: OperationalAlertSummary;
   atlassian_auth: AtlassianAuthStatus;
 };
 
@@ -457,6 +505,7 @@ export type AuditFinding = {
   severity: "critical" | "high" | "medium" | "low";
   category:
     | "contradiction"
+    | "architecture_observation"
     | "clarification_needed"
     | "missing_definition"
     | "missing_documentation"
@@ -465,6 +514,7 @@ export type AuditFinding = {
     | "read_write_gap"
     | "traceability_gap"
     | "ownership_gap"
+    | "legacy_path_gap"
     | "policy_conflict"
     | "terminology_collision"
     | "low_confidence_review"

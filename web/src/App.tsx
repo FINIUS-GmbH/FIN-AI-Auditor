@@ -8,8 +8,10 @@ import {
   submitDecisionComment, submitPackageDecision, updateAtomicFactStatus,
   verifyConfluenceAccess,
 } from "./api";
+import { categoryLabel } from "./categoryLabels";
 import RunModal from "./components/RunModal";
 import { ClarificationPanel } from "./components/ClarificationPanel";
+import DocStructureView from "./components/DocStructureView";
 import type {
   AtlassianAuthStatus, AuditLocation, AuditRun, AuditTarget,
   AtomicFactEntry,
@@ -37,16 +39,18 @@ const SEVERITY_DE: Record<string, string> = {
   critical: "Kritisch", high: "Hoch", medium: "Mittel", low: "Gering",
 };
 const CATEGORY_DE: Record<string, string> = {
-  contradiction: "⚠️ Widerspruch", gap: "💭 Lücke", inconsistency: "🔀 Inkonsistenz",
-  missing_implementation: "❌ Fehlende Umsetzung", missing_documentation: "📝 Fehlende Doku",
-  missing_definition: "❓ Definitionslücke", stale_documentation: "📅 Veraltete Doku",
-  policy_violation: "🛡️ Richtlinienverstoß", policy_conflict: "🛡️ Richtlinienkonflikt",
-  process_gap: "⚙️ Prozesslücke", semantic_drift: "🎯 Semantische Abweichung",
-  implementation_drift: "🔧 Implementierungsabweichung", traceability_gap: "🔗 Nachverfolgbarkeitslücke",
-  clarification_needed: "❓ Klärungsbedarf", stale_source: "📅 Veraltete Quelle",
-  read_write_gap: "↔️ Read/Write-Lücke", ownership_gap: "👥 Ownership-Lücke",
-  terminology_collision: "🧭 Begriffskollision", low_confidence_review: "🔍 Niedrige Sicherheit",
-  obsolete_documentation: "🗃️ Obsolete Doku", open_decision: "🧩 Offene Entscheidung",
+  contradiction: categoryLabel("contradiction"), gap: categoryLabel("gap"), inconsistency: categoryLabel("inconsistency"),
+  architecture_observation: categoryLabel("architecture_observation"),
+  missing_implementation: categoryLabel("missing_implementation"), missing_documentation: categoryLabel("missing_documentation"),
+  missing_definition: categoryLabel("missing_definition"), stale_documentation: categoryLabel("stale_documentation"),
+  policy_violation: categoryLabel("policy_violation"), policy_conflict: categoryLabel("policy_conflict"),
+  process_gap: categoryLabel("process_gap"), semantic_drift: categoryLabel("semantic_drift"),
+  implementation_drift: categoryLabel("implementation_drift"), traceability_gap: categoryLabel("traceability_gap"),
+  clarification_needed: categoryLabel("clarification_needed"), stale_source: categoryLabel("stale_source"),
+  read_write_gap: categoryLabel("read_write_gap"), ownership_gap: categoryLabel("ownership_gap"),
+  legacy_path_gap: categoryLabel("legacy_path_gap"),
+  terminology_collision: categoryLabel("terminology_collision"), low_confidence_review: categoryLabel("low_confidence_review"),
+  obsolete_documentation: categoryLabel("obsolete_documentation"), open_decision: categoryLabel("open_decision"),
 };
 function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? v; }
 
@@ -233,7 +237,15 @@ export default function App(): ReactNode {
     [run],
   );
   const pkgFids = useMemo(() => { const s = new Set<string>(); openPkgs.forEach((p) => p.related_finding_ids.forEach((id) => s.add(id))); return s; }, [openPkgs]);
-  const soloFindings = useMemo(() => (run?.findings ?? []).filter((f) => (!f.resolution_state || f.resolution_state === "open") && !pkgFids.has(f.finding_id)), [run, pkgFids]);
+  const soloFindings = useMemo(
+    () => (run?.findings ?? []).filter(
+      (f) =>
+        (!f.resolution_state || f.resolution_state === "open") &&
+        !pkgFids.has(f.finding_id) &&
+        f.category !== "architecture_observation",
+    ),
+    [run, pkgFids],
+  );
   const openCount = openPkgs.length + soloFindings.length;
   const pendCount = pendApps.length;
   const [cardIdx, setCardIdx] = useState(0);
@@ -301,7 +313,7 @@ export default function App(): ReactNode {
     finally { setCommentBusy(false); setCardIdx(i => i); /* triggers re-render; card list shrinks so it auto-adjusts */ }
   }
 
-  async function doPkg(id: string, a: "accept" | "reject" | "specify", c?: string) {
+  async function doPkg(id: string, a: "accept" | "reject", c?: string) {
     if (!run) return; setPkgBusy(id); setPkgErr("");
     try { upd(await submitPackageDecision(run.run_id, id, a, c)); /* card list will shrink, cardIdx stays → shows next */ }
     catch (e) { setPkgErr(String(e)); }
@@ -474,6 +486,9 @@ export default function App(): ReactNode {
             {view === "work" && run && (
               <p className="header-sub">{openCount} Probleme zu bewerten · {activeFacts.length} bestätigte Fakten · {pendCount} Änderungen zur Freigabe</p>
             )}
+            {view === "structure" && (
+              <p className="header-sub">Confluence-Dokumentation analysieren · Struktur bewerten · Fachlich / Technisch trennen</p>
+            )}
           </div>
           <div className="header-right">
             {run && (
@@ -553,7 +568,15 @@ export default function App(): ReactNode {
                   <div className="metric-body">
                     <span className="metric-label">Fehler</span>
                     <span className="metric-value">{run ? run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Drift, veraltete Quellen</span>
+                    <span className="metric-sub">Drift und veraltete Quellen</span>
+                  </div>
+                </div>
+                <div className="metric-card mc-copper">
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18"/><path d="M7 8h6a3 3 0 1 1 0 6H9"/><path d="M9 14h7a3 3 0 1 1 0 6H7"/></svg></div>
+                  <div className="metric-body">
+                    <span className="metric-label">Boundary-Pfade</span>
+                    <span className="metric-value">{run ? run.findings.filter(f => f.category === "legacy_path_gap").length : 0}</span>
+                    <span className="metric-sub">Manuelle oder Legacy-Entry-Points</span>
                   </div>
                 </div>
                 <div className="metric-card">
@@ -572,19 +595,6 @@ export default function App(): ReactNode {
                     <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE")} Token` : "–"}</span>
                   </div>
                 </div>
-                {boot?.quality_gate?.gold_set && (
-                  <div className={`metric-card ${boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "mc-green" : "mc-amber"}`} title="Automatische Qualitätsprüfung: Werden alle bekannten Testfälle korrekt erkannt?">
-                    <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
-                    <div className="metric-body">
-                      <span className="metric-label">Qualitäts-Gate</span>
-                      <span className="metric-value">{boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "✓ Bestanden" : "⚠ Offen"}</span>
-                      <span className="metric-sub">
-                        Ref: {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations}
-                        {boot.quality_gate.delta_recompute ? ` · Δ: ${boot.quality_gate.delta_recompute.matched_expectations}/${boot.quality_gate.delta_recompute.total_expectations}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Pipeline — horizontal under KPIs */}
@@ -721,11 +731,9 @@ export default function App(): ReactNode {
                                 analysisContext={packageContextLines(item.pkg)}
                                 nextActions={packageNextActions(item.pkg)}
                                 elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
-                                feedback={draft(item.pkg.package_id)} onFeedback={v => setDraft(item.pkg.package_id, v)}
                                 busy={pkgBusy === item.pkg.package_id || commentBusy}
-                                onAccept={() => void doPkg(item.pkg.package_id, "accept", draft(item.pkg.package_id) || undefined)}
-                                onReject={() => void doPkg(item.pkg.package_id, "reject", draft(item.pkg.package_id) || undefined)}
-                                onSpecify={() => { const d = draft(item.pkg.package_id); if (!d?.trim()) { alert("Bitte geben Sie im Kommentarfeld eine Präzisierung ein, bevor Sie 'Präzisieren' klicken."); return; } void doPkg(item.pkg.package_id, "specify", d); }}
+                                onAccept={() => void doPkg(item.pkg.package_id, "accept")}
+                                onReject={() => void doPkg(item.pkg.package_id, "reject")}
                                 onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
                                 appBusy={appBusy}
@@ -751,10 +759,9 @@ export default function App(): ReactNode {
                                 metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
                                 metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
                                 elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
-                                feedback={draft(item.f.finding_id)} onFeedback={v => setDraft(item.f.finding_id, v)}
                                 busy={commentBusy}
-                                onAccept={() => { const d = draft(item.f.finding_id); void doComment(d ? `[ANNEHMEN] ${item.f.finding_id}: ${d}` : `[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
-                                onReject={() => { const d = draft(item.f.finding_id); void doComment(d ? `[ABLEHNEN] ${item.f.finding_id}: ${d}` : `[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                onAccept={() => { void doComment(`[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                onReject={() => { void doComment(`[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
                               />
                             )}
                           </div>
@@ -936,59 +943,10 @@ export default function App(): ReactNode {
                 </section>
               )}
 
-              {/* Qualitäts-Gate Detail (aufklappbar) */}
-              {boot?.quality_gate?.gold_set && boot?.quality_gate?.delta_recompute && (
-                <details className="gate-details">
-                  <summary className="gate-summary">Qualitäts-Gate Details</summary>
-                  <div className="gate-grid">
-                    <div className="gate-card">
-                      <div className="gate-card-head">
-                        <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
-                          {boot.quality_gate.gold_set.passed ? "Bestanden" : "Offen"}
-                        </span>
-                        <strong>Referenz-Set</strong>
-                        <span className="badge badge-cat">{boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer</span>
-                      </div>
-                      <ul className="gate-kpis">
-                        <li>Trefferquote: {Math.round(boot.quality_gate.gold_set.recall * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%)</li>
-                        <li>Präzision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%)</li>
-                        <li>Fehlalarme: {boot.quality_gate.gold_set.false_positives} (Max: {boot.quality_gate.gold_set.max_false_positives})</li>
-                      </ul>
-                      {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
-                        <div className="gate-reasons">{boot.quality_gate.gold_set.failure_reasons.join(" · ")}</div>
-                      )}
-                    </div>
-                    <div className="gate-card">
-                      <div className="gate-card-head">
-                        <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
-                          {boot.quality_gate.delta_recompute.passed ? "Bestanden" : "Offen"}
-                        </span>
-                        <strong>Delta-Neubewertung</strong>
-                        <span className="badge badge-cat">{boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Treffer</span>
-                      </div>
-                      <ul className="gate-kpis">
-                        <li>Trefferquote: {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_recall * 100)}%)</li>
-                        <li>Präzision: {Math.round(boot.quality_gate.delta_recompute.precision * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_precision * 100)}%)</li>
-                        <li>Fehlalarme: {boot.quality_gate.delta_recompute.false_positives} (Max: {boot.quality_gate.delta_recompute.max_false_positives})</li>
-                      </ul>
-                      {boot.quality_gate.delta_recompute.failure_reasons.length > 0 && (
-                        <div className="gate-reasons">{boot.quality_gate.delta_recompute.failure_reasons.join(" · ")}</div>
-                      )}
-                    </div>
-                  </div>
-                </details>
-              )}
             </>
           ) : view === "structure" ? (
             /* ═══════════════ DOKU-STRUKTURIERUNG ═══════════════ */
-            <div className="structure-placeholder">
-              <div className="empty-state">
-                <div className="empty-icon">📐</div>
-                <h3>Doku-Strukturierung</h3>
-                <p>Hier können Sie die Dokumentenstruktur im Confluence-Bereich reorganisieren: Seiten umsortieren, umbenennen, verlinken und neu gruppieren.</p>
-                <p className="text-muted">Dieser Bereich wird in einer kommenden Version verfügbar sein.</p>
-              </div>
-            </div>
+            <DocStructureView run={run} boot={boot} sp={sp} />
           ) : (
             /* ═══════════════ HISTORY PANEL ═══════════════ */
             <HistoryView run={run} boot={boot} />
@@ -1020,14 +978,14 @@ function WorkCard(props: {
   elements: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
   analysisContext?: string[];
   nextActions?: string[];
-  feedback: string; onFeedback: (v: string) => void; busy: boolean;
-  onAccept: () => void; onReject: () => void; onSpecify?: () => void;
+  positiveConsequences?: string[];
+  negativeConsequences?: string[];
+  busy: boolean;
+  onAccept: () => void; onReject: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
   metaSourceType?: string; metaSourceTypes?: string[];
   clarificationPanel?: ReactNode;
   rank?: number;
-  positiveConsequences?: string[];
-  negativeConsequences?: string[];
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
   // Determine the PRIMARY source — the one most likely causing the irregularity
@@ -1154,16 +1112,6 @@ function WorkCard(props: {
           </div>
         )}
       </div>
-
-      {/* Präzisierung */}
-      {props.onSpecify && (
-        <div className="wc-specify-area">
-          <div className="wc-specify-label">Noch unklar? Klärung anfordern</div>
-          <p className="wc-specify-hint">Beschreiben Sie, was unklar ist oder was der Auditor genauer untersuchen soll. Nach vollständiger Klärung erhalten Sie eine überarbeitete Entscheidungskarte.</p>
-          <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Was genau soll geklärt oder genauer untersucht werden?" />
-          <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Klärung anfordern</button>
-        </div>
-      )}
 
       {/* Klärungsdialog */}
       {props.clarificationPanel}
@@ -1350,6 +1298,57 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
               {" "}Präzision {Math.round(boot.quality_gate.delta_recompute.precision * 100)}%
             </p>
           </div>
+        </section>
+      )}
+
+      {(boot?.go_live_gate || boot?.operational_alerts) && (
+        <section className="hsection">
+          <h2 className="hsection-title">
+            Betriebsfreigabe
+            <span className="hsection-count">
+              {boot?.go_live_gate?.ready ? "bereit" : "offen"}
+            </span>
+          </h2>
+          {boot?.go_live_gate && (
+            <div className="hitem">
+              <div className="hitem-head">
+                <span className={`badge badge-${boot.go_live_gate.ready ? "approved" : "pending"}`}>
+                  {boot.go_live_gate.ready ? "Go-Live-Gate grün" : "Go-Live-Gate offen"}
+                </span>
+              </div>
+              <strong>Operative Freigabe</strong>
+              <p>
+                {boot.go_live_gate.checks.filter((check) => check.passed).length}/{boot.go_live_gate.checks.length} Gates erfüllt
+              </p>
+              {boot.go_live_gate.blocking_gates.length > 0 && (
+                <ul>
+                  {boot.go_live_gate.blocking_gates.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+          {boot?.operational_alerts && (
+            <div className="hitem">
+              <div className="hitem-head">
+                <span className={`badge badge-${boot.operational_alerts.status === "ok" ? "approved" : "pending"}`}>
+                  {boot.operational_alerts.status === "ok" ? "Operative Signale ruhig" : "Operative Signale offen"}
+                </span>
+              </div>
+              <strong>Monitoring & Recovery</strong>
+              <p>
+                Traces {boot.operational_alerts.observability_signals.trace_count} ·
+                {" "}Metriken {boot.operational_alerts.observability_signals.metric_sample_count} ·
+                {" "}Fehlerspans 24h {boot.operational_alerts.observability_signals.recent_error_span_count} ·
+                {" "}stale/reclaimbar {boot.operational_alerts.recovery_signals.reclaimable_run_count}
+              </p>
+              {(boot.operational_alerts.blockers.length > 0 || boot.operational_alerts.warnings.length > 0) && (
+                <ul>
+                  {boot.operational_alerts.blockers.map((item) => <li key={`b:${item}`}>Blocker: {item}</li>)}
+                  {boot.operational_alerts.warnings.map((item) => <li key={`w:${item}`}>Warnung: {item}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
         </section>
       )}
 
