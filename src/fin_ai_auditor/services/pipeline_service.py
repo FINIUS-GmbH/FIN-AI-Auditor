@@ -278,18 +278,49 @@ class AuditPipelineService:
             impacted_scope_keys=impacted_scope_keys,
         )
         logger.info("pipeline_findings_generated", extra={"event_name": "pipeline_findings_generated", "event_payload": {"findings": len(findings), "links": len(finding_links)}})
+        self._audit_service.update_run_progress(
+            run_id=run.run_id,
+            step_key="finding_generation",
+            progress_pct=80,
+            current_activity=f"Deterministische Findings erzeugt: {len(findings)}. Embedding-Widerspruchssuche startet.",
+            step_status="running",
+            detail=f"{len(findings)} Findings aus Claim-Analyse generiert.",
+            worker_id=worker_id,
+        )
 
         # Embedding-based cross-document contradiction detection
         from fin_ai_auditor.services.embedding_contradiction_detector import detect_cross_document_contradictions
+
+        def _on_embedding_progress(msg: str) -> None:
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="finding_generation",
+                progress_pct=81,
+                current_activity=msg,
+                step_status="running",
+                detail=msg,
+                worker_id=worker_id,
+            )
+
         embedding_findings = detect_cross_document_contradictions(
             settings=self._settings,
             claim_records=claim_records,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
+            progress_callback=_on_embedding_progress,
         )
         logger.info("pipeline_embedding_contradictions", extra={"event_name": "pipeline_embedding_contradictions", "event_payload": {"found": len(embedding_findings)}})
         if embedding_findings:
             findings.extend(embedding_findings)
             notes.append(f"Embedding-Widerspruchserkennung: {len(embedding_findings)} semantische Widersprueche gefunden.")
+        self._audit_service.update_run_progress(
+            run_id=run.run_id,
+            step_key="finding_generation",
+            progress_pct=83,
+            current_activity=f"Embedding-Analyse abgeschlossen ({len(embedding_findings)} Widersprueche). BSM-Domain-Pruefung laeuft.",
+            step_status="running",
+            detail=f"Embedding: {len(embedding_findings)} semantische Widersprueche.",
+            worker_id=worker_id,
+        )
 
         # Deterministic BSM domain contradiction detection
         from fin_ai_auditor.services.bsm_domain_contradiction_detector import detect_bsm_domain_contradictions
@@ -309,6 +340,15 @@ class AuditPipelineService:
         if doc_gap_findings:
             findings.extend(doc_gap_findings)
             notes.append(f"Dokumentationsluecken-Erkennung: {len(doc_gap_findings)} fehlende Confluence-Seiten identifiziert.")
+        self._audit_service.update_run_progress(
+            run_id=run.run_id,
+            step_key="finding_generation",
+            progress_pct=86,
+            current_activity=f"Insgesamt {len(findings)} Findings erzeugt. Semantischer Kontext wird angehaengt.",
+            step_status="running",
+            detail=f"BSM: {len(bsm_findings)}, Doku-Luecken: {len(doc_gap_findings)}. Semantische Anreicherung laeuft.",
+            worker_id=worker_id,
+        )
 
         findings = attach_semantic_context_to_findings(
             findings=findings,

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Sequence
+from typing import Callable, Sequence
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 SIMILARITY_HIGH = 0.85     # Very similar claims — likely about the same thing
 SIMILARITY_MEDIUM = 0.70   # Moderately similar — worth checking
 BATCH_SIZE = 200           # Embeddings per API call
-EMBED_PARALLELISM = 5      # Concurrent embedding API calls
+EMBED_PARALLELISM = 3      # Concurrent embedding API calls (reduced to avoid rate limits)
 
 
 def detect_cross_document_contradictions(
@@ -36,6 +36,7 @@ def detect_cross_document_contradictions(
     settings: Settings,
     claim_records: list[ExtractedClaimRecord],
     allow_remote_embeddings: bool,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> list[AuditFinding]:
     """Find semantically similar but value-conflicting claims across sources.
 
@@ -94,9 +95,15 @@ def detect_cross_document_contradictions(
 
     with ThreadPoolExecutor(max_workers=EMBED_PARALLELISM) as pool:
         futures = {pool.submit(_embed_batch, idx, batch): idx for idx, batch in enumerate(batches)}
+        completed_batches = 0
+        total_claims = len(claim_texts)
         for future in as_completed(futures):
             batch_idx, embeddings = future.result()
             batch_results[batch_idx] = embeddings
+            completed_batches += 1
+            embedded_so_far = min(completed_batches * BATCH_SIZE, total_claims)
+            if progress_callback:
+                progress_callback(f"Embedding: {embedded_so_far}/{total_claims} Claims verarbeitet ({completed_batches}/{len(batches)} Batches)")
 
     # Reassemble in order
     all_embeddings: list[list[float]] = []
@@ -143,9 +150,12 @@ def detect_cross_document_contradictions(
     findings: list[AuditFinding] = []
     seen_pairs: set[frozenset[str]] = set()
     chunk_rows = 500  # process 500 rows at a time
+    total_chunks = math.ceil(n / chunk_rows)
 
-    for row_start in range(0, n, chunk_rows):
+    for chunk_idx, row_start in enumerate(range(0, n, chunk_rows)):
         row_end = min(row_start + chunk_rows, n)
+        if progress_callback:
+            progress_callback(f"Similarity-Vergleich: Chunk {chunk_idx + 1}/{total_chunks} ({row_start}/{n} Vektoren)")
         sim_block = mat_normed[row_start:row_end] @ mat_normed.T  # (chunk, N)
 
         # Find pairs above threshold
