@@ -497,6 +497,62 @@ export type LlmUsage = {
   total_cost_eur?: number;
 };
 
+// ── Clarification Dialog ──
+
+export type ClarificationPurpose =
+  | "truth_clarification"
+  | "rating_explanation"
+  | "action_routing";
+
+export type ClarificationThreadStatus = "active" | "resolved" | "dismissed";
+
+export type ClarificationOutcomeType =
+  | "truth_confirmed"
+  | "truth_superseded"
+  | "indication_captured"
+  | "context_only"
+  | "conflict_kept";
+
+export type ClarificationMessage = {
+  message_id: string;
+  role: "system" | "assistant" | "user";
+  message_type:
+    | "question"
+    | "answer"
+    | "resolution"
+    | "explanation"
+    | "truth_confirmation"
+    | "conflict_resolution";
+  content: string;
+  created_at: string;
+  referenced_claim_ids: string[];
+  referenced_truth_ids: string[];
+  referenced_finding_ids: string[];
+  outcome_type: ClarificationOutcomeType | null;
+  created_truth_id: string | null;
+  created_claim_id: string | null;
+  superseded_truth_id: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type ClarificationThread = {
+  thread_id: string;
+  run_id: string;
+  package_id: string | null;
+  atomic_fact_id: string | null;
+  purpose: ClarificationPurpose;
+  status: ClarificationThreadStatus;
+  messages: ClarificationMessage[];
+  created_at: string;
+  resolved_at: string | null;
+  resolution_summary: string | null;
+  created_truth_ids: string[];
+  created_claim_ids: string[];
+  superseded_truth_ids: string[];
+  triggered_delta_recompute: boolean;
+  metadata: Record<string, unknown>;
+};
+
 export type AuditRun = {
   run_id: string;
   status: "planned" | "running" | "completed" | "failed";
@@ -519,6 +575,7 @@ export type AuditRun = {
   source_snapshots: AuditSourceSnapshot[];
   findings: AuditFinding[];
   finding_links: AuditFindingLink[];
+  clarification_threads: ClarificationThread[];
   llm_usage?: LlmUsage;
   error?: string | null;
 };

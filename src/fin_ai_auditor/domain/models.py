@@ -35,6 +35,7 @@ AuditAnalysisLogSource = Literal[
     "truth_update",
     "impact_analysis",
     "recommendation_regeneration",
+    "clarification_dialog",
 ]
 ImplementedChangeType = Literal["confluence_page_updated", "jira_ticket_created"]
 ImplementedChangeStatus = Literal["applied", "failed"]
@@ -53,7 +54,7 @@ ClaimSourceAuthority = Literal[
     "heuristic",
 ]
 TruthStatus = Literal["active", "superseded", "rejected"]
-TruthSourceKind = Literal["user_specification", "user_acceptance", "system_inference"]
+TruthSourceKind = Literal["user_specification", "user_acceptance", "system_inference", "clarification_dialog"]
 SchemaTruthStatus = Literal[
     "confirmed_ssot",
     "provisional_target",
@@ -70,6 +71,30 @@ ApprovalTargetType = Literal["confluence_page_update", "jira_ticket_create"]
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed", "cancelled"]
 ConfluencePatchOperationType = Literal["append_after_heading", "append_to_page"]
 ConfluencePatchMarkerKind = Literal["remove", "correct", "confirm", "insert"]
+
+# ── Clarification Dialog types ──
+ClarificationPurpose = Literal[
+    "truth_clarification",
+    "rating_explanation",
+    "action_routing",
+]
+ClarificationThreadStatus = Literal["active", "resolved", "dismissed"]
+ClarificationMessageRole = Literal["system", "assistant", "user"]
+ClarificationMessageType = Literal[
+    "question",
+    "answer",
+    "resolution",
+    "explanation",
+    "truth_confirmation",
+    "conflict_resolution",
+]
+ClarificationOutcomeType = Literal[
+    "truth_confirmed",
+    "truth_superseded",
+    "indication_captured",
+    "context_only",
+    "conflict_kept",
+]
 SemanticEntityType = Literal[
     "object",
     "process",
@@ -176,6 +201,14 @@ def new_segment_id() -> str:
 
 def new_auth_state_id() -> str:
     return f"oauth_state_{uuid4().hex}"
+
+
+def new_clarification_thread_id() -> str:
+    return f"clarify_{uuid4().hex}"
+
+
+def new_clarification_message_id() -> str:
+    return f"clmsg_{uuid4().hex}"
 
 
 def new_semantic_entity_id() -> str:
@@ -636,6 +669,42 @@ class DecisionProblemElement(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+# ── Clarification Dialog models ──
+
+class ClarificationMessage(BaseModel):
+    message_id: str = Field(default_factory=new_clarification_message_id)
+    role: ClarificationMessageRole
+    message_type: ClarificationMessageType
+    content: str = Field(min_length=1)
+    created_at: str = Field(default_factory=utc_now_iso)
+    referenced_claim_ids: list[str] = Field(default_factory=list)
+    referenced_truth_ids: list[str] = Field(default_factory=list)
+    referenced_finding_ids: list[str] = Field(default_factory=list)
+    outcome_type: ClarificationOutcomeType | None = None
+    created_truth_id: str | None = None
+    created_claim_id: str | None = None
+    superseded_truth_id: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ClarificationThread(BaseModel):
+    thread_id: str = Field(default_factory=new_clarification_thread_id)
+    run_id: str = Field(min_length=1)
+    package_id: str | None = None
+    atomic_fact_id: str | None = None
+    purpose: ClarificationPurpose
+    status: ClarificationThreadStatus = "active"
+    messages: list[ClarificationMessage] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    resolved_at: str | None = None
+    resolution_summary: str | None = None
+    created_truth_ids: list[str] = Field(default_factory=list)
+    created_claim_ids: list[str] = Field(default_factory=list)
+    superseded_truth_ids: list[str] = Field(default_factory=list)
+    triggered_delta_recompute: bool = False
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class DecisionPackage(BaseModel):
     package_id: str = Field(default_factory=new_package_id)
     title: str = Field(min_length=1)
@@ -700,6 +769,7 @@ class AuditRun(BaseModel):
     source_snapshots: list[AuditSourceSnapshot] = Field(default_factory=list)
     semantic_entities: list[SemanticEntity] = Field(default_factory=list)
     semantic_relations: list[SemanticRelation] = Field(default_factory=list)
+    clarification_threads: list[ClarificationThread] = Field(default_factory=list)
     findings: list[AuditFinding] = Field(default_factory=list)
     finding_links: list[AuditFindingLink] = Field(default_factory=list)
     llm_usage: dict = Field(default_factory=dict)
@@ -761,6 +831,50 @@ class RecordJiraTicketCreatedRequest(BaseModel):
     ticket_key: str = Field(min_length=1)
     ticket_url: str = Field(min_length=1)
     related_finding_ids: list[str] = Field(default_factory=list)
+
+
+# ── Clarification Dialog request models ──
+
+class CreateClarificationThreadRequest(BaseModel):
+    package_id: str | None = None
+    atomic_fact_id: str | None = None
+    purpose: ClarificationPurpose
+
+    @model_validator(mode="after")
+    def exactly_one_anchor(self) -> "CreateClarificationThreadRequest":
+        if not self.package_id and not self.atomic_fact_id:
+            raise ValueError("Entweder package_id oder atomic_fact_id muss gesetzt sein.")
+        if self.package_id and self.atomic_fact_id:
+            raise ValueError("Nur package_id ODER atomic_fact_id, nicht beides.")
+        return self
+
+
+class SendClarificationMessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ConfirmTruthFromClarificationRequest(BaseModel):
+    """Doppelte Bestätigung: 100% sicher, gilt ausnahmslos."""
+    truth_canonical_key: str = Field(min_length=1)
+    truth_normalized_value: str = Field(min_length=1)
+    subject_kind: str = Field(min_length=1)
+    subject_key: str = Field(min_length=1)
+    predicate: str = Field(min_length=1)
+    scope_kind: str = Field(default="global")
+    scope_key: str = Field(default="*")
+    confirmed_absolute: bool = Field(default=True)
+
+
+class SupersedeTruthFromClarificationRequest(BaseModel):
+    """Bestehende Wahrheit durch neue ersetzen."""
+    existing_truth_id: str = Field(min_length=1)
+    new_canonical_key: str = Field(min_length=1)
+    new_normalized_value: str = Field(min_length=1)
+    new_subject_kind: str = Field(min_length=1)
+    new_subject_key: str = Field(min_length=1)
+    new_predicate: str = Field(min_length=1)
+    new_scope_kind: str = Field(default="global")
+    new_scope_key: str = Field(default="*")
 
 
 class AuditRunListResponse(BaseModel):

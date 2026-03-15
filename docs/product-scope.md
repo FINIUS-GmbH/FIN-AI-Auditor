@@ -44,9 +44,14 @@ Das Produkt soll Spezifikations-, Dokumentations- und Implementierungsdrift sich
 
 Die naechste inhaltliche Prioritaet ist:
 
-- echte Jira-/Confluence-E2E-Verifikation gegen kontrollierte Testziele
 - Last-, Recovery- und Wiederanlauf-Haertung fuer den Dauerbetrieb
 - abschliessende Pilot- und Go-Live-Gates fuer produktive Nutzung
+- Nachkalibrierung nur noch dort, wo Pilot-Faelle echte False Positives oder False Negatives zeigen
+
+Die produktionsnahe E2E-Verifikation gegen kontrollierte Testziele wurde am **15. Maerz 2026** lokal erfolgreich durchgefuehrt:
+
+- Jira-Writeback gegen Projekt `FINAI`
+- Confluence-Writeback gegen die Testseite `FIN-AI Testing` (`page_id 2654426`)
 
 ## Nicht-Ziele fuer den Start
 
