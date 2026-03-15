@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 def connect_database(*, db_path: Path) -> sqlite3.Connection:
@@ -40,6 +40,7 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
                 progress_json TEXT NOT NULL DEFAULT '{}',
                 analysis_log_json TEXT NOT NULL DEFAULT '[]',
                 implemented_changes_json TEXT NOT NULL DEFAULT '[]',
+                clarification_threads_json TEXT NOT NULL DEFAULT '[]',
                 lease_owner TEXT,
                 lease_expires_at TEXT,
                 last_heartbeat_at TEXT,
@@ -455,6 +456,8 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             _ensure_schema_truth_entries_table(connection=connection)
         if current < 16:
             _ensure_atomic_fact_entries_table(connection=connection)
+        if current < 17:
+            _ensure_clarification_threads_column(connection=connection)
         connection.execute(
             """
             INSERT INTO schema_meta(key, value)
@@ -681,3 +684,9 @@ def _ensure_pipeline_cache_table(*, connection: sqlite3.Connection) -> None:
 def _column_exists(*, connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
     rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     return any(str(row["name"]) == column_name for row in rows)
+
+
+def _ensure_clarification_threads_column(*, connection: sqlite3.Connection) -> None:
+    if _column_exists(connection=connection, table_name="audit_runs", column_name="clarification_threads_json"):
+        return
+    connection.execute("ALTER TABLE audit_runs ADD COLUMN clarification_threads_json TEXT NOT NULL DEFAULT '[]'")

@@ -52,7 +52,8 @@ class SQLiteAuditRepository:
             rows = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, llm_usage_json, summary, error
+                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       llm_usage_json, summary, error
                 FROM audit_runs
                 ORDER BY created_at DESC
                 """
@@ -64,7 +65,8 @@ class SQLiteAuditRepository:
             row = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, llm_usage_json, summary, error
+                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       llm_usage_json, summary, error
                 FROM audit_runs
                 WHERE run_id = ?
                 """,
@@ -80,9 +82,10 @@ class SQLiteAuditRepository:
                 """
                 INSERT INTO audit_runs(
                     run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                    progress_json, analysis_log_json, implemented_changes_json, llm_usage_json, summary, error
+                    progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                    llm_usage_json, summary, error
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status = excluded.status,
                     target_json = excluded.target_json,
@@ -93,6 +96,7 @@ class SQLiteAuditRepository:
                     progress_json = excluded.progress_json,
                     analysis_log_json = excluded.analysis_log_json,
                     implemented_changes_json = excluded.implemented_changes_json,
+                    clarification_threads_json = excluded.clarification_threads_json,
                     llm_usage_json = excluded.llm_usage_json,
                     summary = excluded.summary,
                     error = excluded.error
@@ -108,6 +112,7 @@ class SQLiteAuditRepository:
                     run.progress.model_dump_json(),
                     _dump_json_list(run.analysis_log),
                     _dump_json_list(run.implemented_changes),
+                    _dump_json_list(run.clarification_threads),
                     json.dumps(run.llm_usage),
                     run.summary,
                     run.error,
@@ -1431,6 +1436,9 @@ class SQLiteAuditRepository:
                 "progress": json.loads(row["progress_json"] or "{}"),
                 "analysis_log": json.loads(row["analysis_log_json"] or "[]"),
                 "implemented_changes": json.loads(row["implemented_changes_json"] or "[]"),
+                "clarification_threads": json.loads(
+                    row["clarification_threads_json"] or "[]"
+                ) if "clarification_threads_json" in row.keys() else [],
                 "claims": self._load_claims(connection=connection, run_id=run_id),
                 "truths": self._load_truths(connection=connection, run_id=run_id),
                 "schema_truths": self._load_schema_truths(connection=connection, run_id=run_id),

@@ -1,0 +1,782 @@
+"""Clarification Dialog Service — paketgebundener Klärungsdialog.
+
+Drei-Stufen-Evidenzmodell:
+  💎 Definitive Wahrheit — doppelte Bestätigung, ausnahmslos
+  🔹 Indiz — erhöhte Confidence, kein Override
+  💬 Kontextwissen — nur Protokoll
+
+Der Dialog ist lokal an eine Karte gebunden,
+aber jede Erkenntnis fließt global in das Gesamtsystem.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from fin_ai_auditor.domain.models import (
+    AuditAnalysisLogEntry,
+    AuditClaimEntry,
+    AuditRun,
+    ClarificationMessage,
+    ClarificationOutcomeType,
+    ClarificationThread,
+    DecisionPackage,
+    TruthLedgerEntry,
+    utc_now_iso,
+    new_claim_id,
+    new_truth_id,
+)
+
+if TYPE_CHECKING:
+    from fin_ai_auditor.services.audit_service import AuditService
+
+logger = logging.getLogger(__name__)
+
+# ── Constants ──
+MAX_MESSAGES_PER_THREAD = 10
+MAX_QUESTIONS_PER_STEP = 3
+INDICATION_CONFIDENCE = 0.80
+
+
+class ClarificationService:
+    """Manages clarification dialogs bound to decision packages or atomic facts."""
+
+    def __init__(self, *, audit_service: AuditService) -> None:
+        self._audit = audit_service
+
+    # ──────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────
+
+    def open_thread(
+        self,
+        *,
+        run_id: str,
+        package_id: str | None = None,
+        atomic_fact_id: str | None = None,
+        purpose: str,
+    ) -> AuditRun:
+        """Open a new clarification thread and generate the first question."""
+        run = self._require_run(run_id)
+        self._validate_anchor(run, package_id=package_id, atomic_fact_id=atomic_fact_id)
+
+        # Build context from the package/fact and all prior threads
+        context_summary = self._build_cross_thread_context(run)
+        anchor_context = self._build_anchor_context(run, package_id=package_id, atomic_fact_id=atomic_fact_id)
+        first_question = self._generate_initial_question(
+            purpose=purpose,
+            anchor_context=anchor_context,
+            global_context=context_summary,
+        )
+
+        thread = ClarificationThread(
+            run_id=run_id,
+            package_id=package_id,
+            atomic_fact_id=atomic_fact_id,
+            purpose=purpose,
+            messages=[first_question],
+        )
+
+        log_entry = AuditAnalysisLogEntry(
+            source_type="clarification_dialog",
+            title="Klärungsdialog gestartet",
+            message=f"Neuer Klärungsdialog ({purpose}) für "
+                    f"{'Paket ' + (package_id or '') if package_id else 'Fakt ' + (atomic_fact_id or '')}.",
+            derived_changes=[f"Thread {thread.thread_id} wurde eröffnet."],
+            impact_summary=["Erkenntnisse aus diesem Dialog können alle Bewertungen beeinflussen."],
+            metadata={
+                "thread_id": thread.thread_id,
+                "purpose": purpose,
+                "package_id": package_id,
+                "atomic_fact_id": atomic_fact_id,
+            },
+        )
+
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "clarification_threads": [*run.clarification_threads, thread],
+                "analysis_log": [*run.analysis_log, log_entry],
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    def process_answer(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        content: str,
+    ) -> AuditRun:
+        """Process a user answer and optionally generate follow-up question or truth proposal."""
+        run = self._require_run(run_id)
+        thread = self._require_thread(run, thread_id)
+        self._check_message_limit(thread)
+
+        # Add user message
+        user_msg = ClarificationMessage(
+            role="user",
+            message_type="answer",
+            content=content,
+        )
+
+        # Extract potential indications from the answer
+        indications = self._extract_indications(content, run, thread)
+
+        # Build follow-up: either a truth proposal, follow-up question, or resolution suggestion
+        follow_up = self._generate_follow_up(
+            thread=thread,
+            user_answer=content,
+            indications=indications,
+            run=run,
+        )
+
+        new_messages = [user_msg, *follow_up]
+        updated_thread = thread.model_copy(
+            update={"messages": [*thread.messages, *new_messages]}
+        )
+
+        return self._update_thread_in_run(run, updated_thread)
+
+    def confirm_truth(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        truth_canonical_key: str,
+        truth_normalized_value: str,
+        subject_kind: str,
+        subject_key: str,
+        predicate: str,
+        scope_kind: str = "global",
+        scope_key: str = "*",
+    ) -> AuditRun:
+        """Confirm a definitive truth after double-confirmation (100% sure, no exceptions)."""
+        run = self._require_run(run_id)
+        thread = self._require_thread(run, thread_id)
+
+        # Check for conflicts with existing truths
+        conflicts = self._find_truth_conflicts(
+            run=run,
+            canonical_key=truth_canonical_key,
+        )
+
+        if conflicts:
+            # Don't create truth yet — return a conflict resolution prompt
+            conflict_msg = ClarificationMessage(
+                role="assistant",
+                message_type="conflict_resolution",
+                content=self._format_conflict_prompt(conflicts, truth_canonical_key, truth_normalized_value),
+                referenced_truth_ids=[t.truth_id for t in conflicts],
+            )
+            updated_thread = thread.model_copy(
+                update={"messages": [*thread.messages, conflict_msg]}
+            )
+            return self._update_thread_in_run(run, updated_thread)
+
+        # No conflicts — create truth directly
+        return self._create_truth_from_dialog(
+            run=run,
+            thread=thread,
+            canonical_key=truth_canonical_key,
+            normalized_value=truth_normalized_value,
+            subject_kind=subject_kind,
+            subject_key=subject_key,
+            predicate=predicate,
+            scope_kind=scope_kind,
+            scope_key=scope_key,
+        )
+
+    def supersede_truth(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        existing_truth_id: str,
+        new_canonical_key: str,
+        new_normalized_value: str,
+        new_subject_kind: str,
+        new_subject_key: str,
+        new_predicate: str,
+        new_scope_kind: str = "global",
+        new_scope_key: str = "*",
+    ) -> AuditRun:
+        """Supersede an existing truth with a new one from clarification dialog."""
+        run = self._require_run(run_id)
+        thread = self._require_thread(run, thread_id)
+
+        # Find the truth being superseded
+        old_truth = next((t for t in run.truths if t.truth_id == existing_truth_id), None)
+        if old_truth is None:
+            raise ValueError(f"Wahrheit nicht gefunden: {existing_truth_id}")
+
+        # Create new truth
+        new_truth = TruthLedgerEntry(
+            canonical_key=new_canonical_key,
+            subject_kind=new_subject_kind,
+            subject_key=new_subject_key,
+            predicate=new_predicate,
+            normalized_value=new_normalized_value,
+            scope_kind=new_scope_kind,
+            scope_key=new_scope_key,
+            source_kind="clarification_dialog",
+            supersedes_truth_id=existing_truth_id,
+            metadata={
+                "clarification_thread_id": thread.thread_id,
+                "superseded_truth_id": existing_truth_id,
+                "confirmed_absolute": True,
+            },
+        )
+
+        # Mark old truth as superseded
+        updated_truths = []
+        for t in run.truths:
+            if t.truth_id == existing_truth_id:
+                updated_truths.append(t.model_copy(update={"truth_status": "superseded"}))
+            else:
+                updated_truths.append(t)
+        updated_truths.append(new_truth)
+
+        # Resolution message
+        resolution_msg = ClarificationMessage(
+            role="assistant",
+            message_type="resolution",
+            content=f"Wahrheit ersetzt: '{old_truth.predicate} = {old_truth.normalized_value}' "
+                    f"→ '{new_predicate} = {new_normalized_value}'.",
+            outcome_type="truth_superseded",
+            referenced_truth_ids=[existing_truth_id, new_truth.truth_id],
+            created_truth_id=new_truth.truth_id,
+            superseded_truth_id=existing_truth_id,
+        )
+
+        updated_thread = thread.model_copy(
+            update={
+                "messages": [*thread.messages, resolution_msg],
+                "status": "resolved",
+                "resolved_at": utc_now_iso(),
+                "resolution_summary": resolution_msg.content,
+                "created_truth_ids": [*thread.created_truth_ids, new_truth.truth_id],
+                "superseded_truth_ids": [*thread.superseded_truth_ids, existing_truth_id],
+                "triggered_delta_recompute": True,
+            }
+        )
+
+        log_entry = AuditAnalysisLogEntry(
+            source_type="clarification_dialog",
+            title="Wahrheit ersetzt durch Klärungsdialog",
+            message=f"'{old_truth.predicate} = {old_truth.normalized_value}' → '{new_predicate} = {new_normalized_value}'",
+            related_finding_ids=list(thread.messages[0].referenced_finding_ids) if thread.messages else [],
+            derived_changes=[
+                f"Wahrheit {existing_truth_id} wurde auf 'superseded' gesetzt.",
+                f"Neue Wahrheit {new_truth.truth_id} wurde angelegt.",
+            ],
+            impact_summary=[
+                "Alle Entscheidungspakete werden anhand der neuen Wahrheit neu bewertet.",
+            ],
+            metadata={
+                "thread_id": thread.thread_id,
+                "old_truth_id": existing_truth_id,
+                "new_truth_id": new_truth.truth_id,
+            },
+        )
+
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "truths": updated_truths,
+                "clarification_threads": self._replace_thread(run.clarification_threads, updated_thread),
+                "analysis_log": [*run.analysis_log, log_entry],
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    def capture_indication(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        content: str,
+    ) -> AuditRun:
+        """Capture user statement as an indication (elevated confidence claim, not truth)."""
+        run = self._require_run(run_id)
+        thread = self._require_thread(run, thread_id)
+
+        # Create an indication claim
+        subject_key = self._derive_subject_key(thread, run)
+        fingerprint = f"clarification:{thread.thread_id}:{content[:50]}"
+        indication_claim = AuditClaimEntry(
+            claim_id=new_claim_id(),
+            source_type="user_truth",
+            source_id=f"clarification:{thread.thread_id}",
+            subject_kind="clarification_indication",
+            subject_key=subject_key,
+            predicate="user_indication",
+            normalized_value=content,
+            scope_kind="global",
+            scope_key="*",
+            confidence=INDICATION_CONFIDENCE,
+            fingerprint=fingerprint,
+            status="active",
+            assertion_status="asserted",
+            metadata={
+                "clarification_thread_id": thread.thread_id,
+                "indication_type": "user_statement",
+                "not_confirmed_as_truth": True,
+            },
+        )
+
+        indication_msg = ClarificationMessage(
+            role="assistant",
+            message_type="resolution",
+            content=f"Als Indiz gespeichert: \"{content}\". Fließt in Bewertung ein, überschreibt aber keine bestehende Wahrheit.",
+            outcome_type="indication_captured",
+            created_claim_id=indication_claim.claim_id,
+        )
+
+        updated_thread = thread.model_copy(
+            update={
+                "messages": [*thread.messages, indication_msg],
+                "created_claim_ids": [*thread.created_claim_ids, indication_claim.claim_id],
+            }
+        )
+
+        log_entry = AuditAnalysisLogEntry(
+            source_type="clarification_dialog",
+            title="Indiz aus Klärungsdialog erfasst",
+            message=f"Nutzeraussage als Indiz gespeichert: \"{content[:100]}{'...' if len(content) > 100 else ''}\"",
+            derived_changes=[f"Claim {indication_claim.claim_id} mit Confidence {INDICATION_CONFIDENCE} angelegt."],
+            impact_summary=["Beeinflusst Scoring, überschreibt keine Wahrheiten."],
+            metadata={"thread_id": thread.thread_id, "claim_id": indication_claim.claim_id},
+        )
+
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "claims": [*run.claims, indication_claim],
+                "clarification_threads": self._replace_thread(run.clarification_threads, updated_thread),
+                "analysis_log": [*run.analysis_log, log_entry],
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    def dismiss_thread(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+    ) -> AuditRun:
+        """Close a thread without results. History is preserved as context."""
+        run = self._require_run(run_id)
+        thread = self._require_thread(run, thread_id)
+
+        dismiss_msg = ClarificationMessage(
+            role="system",
+            message_type="resolution",
+            content="Klärungsdialog wurde ohne Ergebnis geschlossen. Gesprächsprotokoll bleibt als Kontextwissen erhalten.",
+            outcome_type="context_only",
+        )
+
+        updated_thread = thread.model_copy(
+            update={
+                "messages": [*thread.messages, dismiss_msg],
+                "status": "dismissed",
+                "resolved_at": utc_now_iso(),
+            }
+        )
+
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "clarification_threads": self._replace_thread(run.clarification_threads, updated_thread),
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    # ──────────────────────────────────────
+    # Private helpers
+    # ──────────────────────────────────────
+
+    def _require_run(self, run_id: str) -> AuditRun:
+        run = self._audit.get_run(run_id=run_id)
+        if run is None:
+            raise ValueError(f"Audit-Run nicht gefunden: {run_id}")
+        return run
+
+    def _require_thread(self, run: AuditRun, thread_id: str) -> ClarificationThread:
+        thread = next(
+            (t for t in run.clarification_threads if t.thread_id == thread_id),
+            None,
+        )
+        if thread is None:
+            raise ValueError(f"Klärungsdialog nicht gefunden: {thread_id}")
+        if thread.status != "active":
+            raise ValueError(f"Klärungsdialog ist bereits geschlossen: {thread.status}")
+        return thread
+
+    def _validate_anchor(
+        self,
+        run: AuditRun,
+        *,
+        package_id: str | None,
+        atomic_fact_id: str | None,
+    ) -> None:
+        if package_id:
+            if not any(p.package_id == package_id for p in run.decision_packages):
+                raise ValueError(f"Entscheidungspaket nicht gefunden: {package_id}")
+        if atomic_fact_id:
+            if not any(f.atomic_fact_id == atomic_fact_id for f in run.atomic_facts):
+                raise ValueError(f"Atomarer Fakt nicht gefunden: {atomic_fact_id}")
+
+    def _check_message_limit(self, thread: ClarificationThread) -> None:
+        if len(thread.messages) >= MAX_MESSAGES_PER_THREAD:
+            raise ValueError(
+                f"Maximale Nachrichtenanzahl ({MAX_MESSAGES_PER_THREAD}) erreicht. "
+                f"Bitte schließen Sie den Dialog ab."
+            )
+
+    def _update_thread_in_run(self, run: AuditRun, updated_thread: ClarificationThread) -> AuditRun:
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "clarification_threads": self._replace_thread(
+                    run.clarification_threads, updated_thread
+                ),
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    @staticmethod
+    def _replace_thread(
+        threads: list[ClarificationThread],
+        updated: ClarificationThread,
+    ) -> list[ClarificationThread]:
+        return [
+            updated if t.thread_id == updated.thread_id else t
+            for t in threads
+        ]
+
+    # ── Context Building ──
+
+    def _build_cross_thread_context(self, run: AuditRun) -> str:
+        """Collect global knowledge from all prior threads for LLM context injection."""
+        lines: list[str] = []
+
+        # Confirmed truths from all threads
+        for thread in run.clarification_threads:
+            if thread.status != "resolved":
+                continue
+            lines.append(f"Klärung #{thread.thread_id[:12]} ({thread.purpose}):")
+            if thread.created_truth_ids:
+                for tid in thread.created_truth_ids:
+                    truth = next((t for t in run.truths if t.truth_id == tid), None)
+                    if truth:
+                        lines.append(f"  → Wahrheit: {truth.predicate} = {truth.normalized_value}")
+            if thread.superseded_truth_ids:
+                lines.append(f"  → {len(thread.superseded_truth_ids)} Wahrheit(en) ersetzt")
+            if thread.created_claim_ids:
+                lines.append(f"  → {len(thread.created_claim_ids)} Indiz(ien) erfasst")
+            if thread.resolution_summary:
+                lines.append(f"  Ergebnis: {thread.resolution_summary}")
+
+        # Include indications from clarification dialogs
+        dialog_claims = [
+            c for c in run.claims
+            if c.source_id and c.source_id.startswith("clarification:")
+        ]
+        if dialog_claims:
+            lines.append(f"\n{len(dialog_claims)} Indizien aus vorherigen Dialogen:")
+            for claim in dialog_claims[:5]:
+                lines.append(f"  🔹 {claim.predicate}: {claim.normalized_value}")
+
+        return "\n".join(lines) if lines else "Keine vorherigen Klärungen vorhanden."
+
+    def _build_anchor_context(
+        self,
+        run: AuditRun,
+        *,
+        package_id: str | None,
+        atomic_fact_id: str | None,
+    ) -> str:
+        """Build context specific to the anchored package or fact."""
+        lines: list[str] = []
+
+        if package_id:
+            pkg = next((p for p in run.decision_packages if p.package_id == package_id), None)
+            if pkg:
+                lines.append(f"Paket: {pkg.title}")
+                lines.append(f"Kategorie: {pkg.category} | Severity: {pkg.severity_summary}")
+                lines.append(f"Scope: {pkg.scope_summary}")
+                lines.append(f"Empfehlung: {pkg.recommendation_summary}")
+
+                # Related claims
+                related_claims = [
+                    c for c in run.claims
+                    if any(fid in (c.metadata.get("finding_id", "") if isinstance(c.metadata, dict) else "")
+                           for fid in pkg.related_finding_ids)
+                ]
+                if related_claims:
+                    lines.append(f"\nZugehörige Claims ({len(related_claims)}):")
+                    for claim in related_claims[:5]:
+                        lines.append(f"  - {claim.predicate}: {claim.object_value} (Quelle: {claim.source_type})")
+
+                # Related findings
+                related_findings = [
+                    f for f in run.findings
+                    if f.finding_id in pkg.related_finding_ids
+                ]
+                if related_findings:
+                    lines.append(f"\nZugehörige Findings ({len(related_findings)}):")
+                    for finding in related_findings[:5]:
+                        lines.append(f"  - [{finding.severity}] {finding.title}")
+
+                # Problem elements
+                if pkg.problem_elements:
+                    lines.append(f"\nProblemelemente ({len(pkg.problem_elements)}):")
+                    for pe in pkg.problem_elements[:3]:
+                        lines.append(f"  - {pe.short_explanation} (Confidence: {pe.confidence:.0%})")
+
+        elif atomic_fact_id:
+            fact = next((f for f in run.atomic_facts if f.atomic_fact_id == atomic_fact_id), None)
+            if fact:
+                lines.append(f"Fakt: {fact.fact_key}")
+                lines.append(f"Zusammenfassung: {fact.summary}")
+                lines.append(f"Status: {fact.status} | Aktionsspur: {fact.action_lane}")
+
+        return "\n".join(lines) if lines else "Kein Kontext verfügbar."
+
+    # ── Question Generation ──
+
+    def _generate_initial_question(
+        self,
+        *,
+        purpose: str,
+        anchor_context: str,
+        global_context: str,
+    ) -> ClarificationMessage:
+        """Generate the first question for a new clarification thread.
+
+        Currently uses template-based generation.
+        Future: LLM-based with slot-filling from context.
+        """
+        if purpose == "truth_clarification":
+            content = (
+                "In diesem Paket gibt es widersprüchliche Aussagen. "
+                "Bitte klären Sie, welche der folgenden Aussagen fachlich korrekt ist.\n\n"
+                f"{anchor_context}"
+            )
+        elif purpose == "rating_explanation":
+            content = (
+                "Sie möchten verstehen, warum dieses Paket so bewertet wurde. "
+                "Hier ist der Kontext der Bewertung:\n\n"
+                f"{anchor_context}"
+            )
+        elif purpose == "action_routing":
+            content = (
+                "Für dieses Paket muss eine Folgeaktion festgelegt werden. "
+                "Soll die Korrektur in Dokumentation, Code oder als Artefakt erfolgen?\n\n"
+                f"{anchor_context}"
+            )
+        else:
+            content = f"Klärungsdialog gestartet.\n\n{anchor_context}"
+
+        return ClarificationMessage(
+            role="assistant",
+            message_type="question",
+            content=content,
+        )
+
+    def _generate_follow_up(
+        self,
+        *,
+        thread: ClarificationThread,
+        user_answer: str,
+        indications: list[dict[str, str]],
+        run: AuditRun,
+    ) -> list[ClarificationMessage]:
+        """Generate follow-up messages based on user answer.
+
+        Returns 1-3 messages: optionally an explanation + a follow-up question or truth proposal.
+        """
+        messages: list[ClarificationMessage] = []
+
+        # If we extracted indications, propose them
+        if indications:
+            for indication in indications[:MAX_QUESTIONS_PER_STEP]:
+                messages.append(ClarificationMessage(
+                    role="assistant",
+                    message_type="truth_confirmation",
+                    content=(
+                        f"Sie haben angegeben: \"{indication.get('statement', user_answer)}\"\n\n"
+                        f"Soll das als DEFINITIVE Wahrheit gelten?\n"
+                        f"Das heißt: Diese Aussage gilt ausnahmslos und beeinflusst ALLE Bewertungen.\n\n"
+                        f"💎 Wenn ja: Bestätigen Sie über 'Als Wahrheit bestätigen'\n"
+                        f"🔹 Wenn nein: Speichern Sie es über 'Nur als Hinweis'"
+                    ),
+                ))
+                break  # Only one truth proposal at a time
+
+        # If no indication was extracted, ask a follow-up
+        if not messages:
+            question_count = sum(1 for m in thread.messages if m.message_type == "question")
+            if question_count < MAX_QUESTIONS_PER_STEP:
+                messages.append(ClarificationMessage(
+                    role="assistant",
+                    message_type="question",
+                    content=(
+                        "Verstanden. Gibt es noch weitere Aspekte, die Sie zu diesem Punkt klären möchten? "
+                        "Oder möchten Sie den Dialog abschließen?"
+                    ),
+                ))
+
+        return messages
+
+    # ── Indication Extraction ──
+
+    def _extract_indications(
+        self,
+        content: str,
+        run: AuditRun,
+        thread: ClarificationThread,
+    ) -> list[dict[str, str]]:
+        """Extract potential truth-like statements from user answer.
+
+        Currently uses simple heuristics. Future: LLM-based extraction.
+        """
+        indications: list[dict[str, str]] = []
+
+        # Simple heuristic: if the answer is a clear statement (not a question),
+        # and it's substantive enough, treat it as a potential indication
+        content_stripped = content.strip()
+        if (
+            len(content_stripped) > 15
+            and not content_stripped.endswith("?")
+            and not content_stripped.lower().startswith(("ja", "nein", "ok", "danke"))
+        ):
+            indications.append({
+                "statement": content_stripped,
+                "source": "user_input",
+            })
+
+        return indications
+
+    # ── Truth Conflict Detection ──
+
+    def _find_truth_conflicts(
+        self,
+        *,
+        run: AuditRun,
+        canonical_key: str,
+    ) -> list[TruthLedgerEntry]:
+        """Find existing active truths that would conflict with a new one."""
+        return [
+            t for t in run.truths
+            if t.canonical_key == canonical_key
+            and t.truth_status == "active"
+        ]
+
+    def _format_conflict_prompt(
+        self,
+        conflicts: list[TruthLedgerEntry],
+        new_key: str,
+        new_value: str,
+    ) -> str:
+        lines = [
+            f"⚠️ Es gibt bereits eine bestehende Wahrheit zum Thema '{new_key}':\n"
+        ]
+        for truth in conflicts:
+            lines.append(
+                f"  Bestehend: {truth.predicate} = {truth.normalized_value} "
+                f"(Quelle: {truth.source_kind})"
+            )
+        lines.append(f"\n  Neu vorgeschlagen: {new_key} = {new_value}")
+        lines.append("\nSoll die bestehende Wahrheit ersetzt werden?")
+        return "\n".join(lines)
+
+    # ── Truth Creation ──
+
+    def _create_truth_from_dialog(
+        self,
+        *,
+        run: AuditRun,
+        thread: ClarificationThread,
+        canonical_key: str,
+        normalized_value: str,
+        subject_kind: str,
+        subject_key: str,
+        predicate: str,
+        scope_kind: str,
+        scope_key: str,
+    ) -> AuditRun:
+        """Create a definitive truth from clarification dialog."""
+        new_truth = TruthLedgerEntry(
+            canonical_key=canonical_key,
+            subject_kind=subject_kind,
+            subject_key=subject_key,
+            predicate=predicate,
+            normalized_value=normalized_value,
+            scope_kind=scope_kind,
+            scope_key=scope_key,
+            source_kind="clarification_dialog",
+            metadata={
+                "clarification_thread_id": thread.thread_id,
+                "confirmed_absolute": True,
+            },
+        )
+
+        resolution_msg = ClarificationMessage(
+            role="assistant",
+            message_type="resolution",
+            content=f"✅ Definitive Wahrheit bestätigt: '{predicate} = {normalized_value}'. "
+                    f"Gilt ausnahmslos. Alle Bewertungen werden aktualisiert.",
+            outcome_type="truth_confirmed",
+            created_truth_id=new_truth.truth_id,
+            referenced_truth_ids=[new_truth.truth_id],
+        )
+
+        updated_thread = thread.model_copy(
+            update={
+                "messages": [*thread.messages, resolution_msg],
+                "status": "resolved",
+                "resolved_at": utc_now_iso(),
+                "resolution_summary": f"{predicate} = {normalized_value}",
+                "created_truth_ids": [*thread.created_truth_ids, new_truth.truth_id],
+                "triggered_delta_recompute": True,
+            }
+        )
+
+        log_entry = AuditAnalysisLogEntry(
+            source_type="clarification_dialog",
+            title="Wahrheit aus Klärungsdialog bestätigt",
+            message=f"'{predicate} = {normalized_value}' wurde als definitive Wahrheit bestätigt.",
+            derived_changes=[f"Wahrheit {new_truth.truth_id} wurde im Truth Ledger angelegt."],
+            impact_summary=["Alle Entscheidungspakete werden anhand der neuen Wahrheit neu bewertet."],
+            metadata={
+                "thread_id": thread.thread_id,
+                "truth_id": new_truth.truth_id,
+                "canonical_key": canonical_key,
+            },
+        )
+
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "truths": [*run.truths, new_truth],
+                "clarification_threads": self._replace_thread(run.clarification_threads, updated_thread),
+                "analysis_log": [*run.analysis_log, log_entry],
+            }
+        )
+        return self._audit.repository.upsert_run(run=updated)
+
+    # ── Helpers ──
+
+    @staticmethod
+    def _derive_subject_key(thread: ClarificationThread, run: AuditRun) -> str:
+        """Derive a subject_key from the thread's anchor."""
+        if thread.package_id:
+            pkg = next((p for p in run.decision_packages if p.package_id == thread.package_id), None)
+            return pkg.scope_summary if pkg else thread.package_id
+        if thread.atomic_fact_id:
+            fact = next((f for f in run.atomic_facts if f.atomic_fact_id == thread.atomic_fact_id), None)
+            return fact.fact_key if fact else thread.atomic_fact_id
+        return "unknown"

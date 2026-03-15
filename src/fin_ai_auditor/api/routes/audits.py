@@ -6,6 +6,8 @@ from fin_ai_auditor.api.dependencies import get_audit_service
 from fin_ai_auditor.domain.models import (
     AuditRun,
     AuditRunListResponse,
+    ConfirmTruthFromClarificationRequest,
+    CreateClarificationThreadRequest,
     CreateWritebackApprovalRequest,
     CreateAuditRunRequest,
     CreateDecisionCommentRequest,
@@ -13,9 +15,12 @@ from fin_ai_auditor.domain.models import (
     RecordConfluencePageUpdateRequest,
     RecordJiraTicketCreatedRequest,
     ResolveWritebackApprovalRequest,
+    SendClarificationMessageRequest,
+    SupersedeTruthFromClarificationRequest,
     UpdateAtomicFactStatusRequest,
 )
 from fin_ai_auditor.services.audit_service import AuditService
+from fin_ai_auditor.services.clarification_service import ClarificationService
 
 router = APIRouter(prefix="/api/audits", tags=["audits"])
 
@@ -207,3 +212,122 @@ def reset_audit_database(
     """Drop all audit runs, findings, packages, and truths. Keeps OAuth tokens."""
     service.reset_all_runs()
     return {"ok": True, "message": "Alle Audit-Runs wurden geloescht."}
+
+
+# ── Clarification Dialog ──
+
+def _get_clarification_service(service: AuditService = Depends(get_audit_service)) -> ClarificationService:
+    return ClarificationService(audit_service=service)
+
+
+@router.post("/runs/{run_id}/clarification-threads", response_model=AuditRun)
+def create_clarification_thread(
+    run_id: str,
+    payload: CreateClarificationThreadRequest,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.open_thread(
+            run_id=run_id,
+            package_id=payload.package_id,
+            atomic_fact_id=payload.atomic_fact_id,
+            purpose=payload.purpose,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/clarification-threads/{thread_id}/messages", response_model=AuditRun)
+def send_clarification_message(
+    run_id: str,
+    thread_id: str,
+    payload: SendClarificationMessageRequest,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.process_answer(
+            run_id=run_id,
+            thread_id=thread_id,
+            content=payload.content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/clarification-threads/{thread_id}/confirm-truth", response_model=AuditRun)
+def confirm_truth_from_clarification(
+    run_id: str,
+    thread_id: str,
+    payload: ConfirmTruthFromClarificationRequest,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.confirm_truth(
+            run_id=run_id,
+            thread_id=thread_id,
+            truth_canonical_key=payload.truth_canonical_key,
+            truth_normalized_value=payload.truth_normalized_value,
+            subject_kind=payload.subject_kind,
+            subject_key=payload.subject_key,
+            predicate=payload.predicate,
+            scope_kind=payload.scope_kind,
+            scope_key=payload.scope_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/clarification-threads/{thread_id}/supersede-truth", response_model=AuditRun)
+def supersede_truth_from_clarification(
+    run_id: str,
+    thread_id: str,
+    payload: SupersedeTruthFromClarificationRequest,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.supersede_truth(
+            run_id=run_id,
+            thread_id=thread_id,
+            existing_truth_id=payload.existing_truth_id,
+            new_canonical_key=payload.new_canonical_key,
+            new_normalized_value=payload.new_normalized_value,
+            new_subject_kind=payload.new_subject_kind,
+            new_subject_key=payload.new_subject_key,
+            new_predicate=payload.new_predicate,
+            new_scope_kind=payload.new_scope_kind,
+            new_scope_key=payload.new_scope_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/clarification-threads/{thread_id}/capture-indication", response_model=AuditRun)
+def capture_indication_from_clarification(
+    run_id: str,
+    thread_id: str,
+    payload: SendClarificationMessageRequest,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.capture_indication(
+            run_id=run_id,
+            thread_id=thread_id,
+            content=payload.content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/clarification-threads/{thread_id}/dismiss", response_model=AuditRun)
+def dismiss_clarification_thread(
+    run_id: str,
+    thread_id: str,
+    cs: ClarificationService = Depends(_get_clarification_service),
+) -> AuditRun:
+    try:
+        return cs.dismiss_thread(
+            run_id=run_id,
+            thread_id=thread_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
