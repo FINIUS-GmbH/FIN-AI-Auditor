@@ -572,3 +572,181 @@ class TestHeuristicExtraction:
         assert meta["confidence_grade"] == "definite"
         assert "extraction_confidence" in meta
         assert float(meta["extraction_confidence"]) >= 0.9
+
+
+# ── 10. LLM integration path ─────────────────────────────────
+
+class TestLLMIntegration:
+    """Tests for the LLM extraction path using mocks."""
+
+    def _make_env_with_llm(self, tmp_path: Path):
+        """Bootstrap environment with mocked LLM settings."""
+        from unittest.mock import MagicMock, AsyncMock, patch
+
+        repo, audit_svc, _, run_id, pkg = _make_env(tmp_path)
+
+        # Create mock settings with LLM slots
+        settings = MagicMock()
+        settings.confluence_home_url = ""
+        settings.fixed_jira_project_key = ""
+
+        mock_slot = MagicMock()
+        mock_slot.model = "gpt-4o"
+        mock_slot.deployment = None
+        mock_slot.slot = 1
+        settings.get_configured_llm_slots.return_value = [mock_slot]
+
+        cs = ClarificationService(audit_service=audit_svc, settings=settings)
+        return repo, audit_svc, cs, run_id, pkg, settings
+
+    def test_llm_extraction_produces_truth_proposal(self, tmp_path: Path) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        repo, _, cs, run_id, pkg, _ = self._make_env_with_llm(tmp_path)
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+
+        # Mock the LLM extraction to return a structured result
+        from fin_ai_auditor.services.clarification_service import _LLMIndicationResult, _LLMIndicationItem
+
+        mock_result = _LLMIndicationResult(
+            indications=[
+                _LLMIndicationItem(
+                    statement="Das API ist definitiv aktiv",
+                    confidence=0.95,
+                    canonical_key_hint="api.status",
+                    scope_kind="service",
+                    is_definite=True,
+                    is_negation=False,
+                )
+            ],
+            follow_up_question="",
+            extraction_notes="Definitive Aussage extrahiert.",
+        )
+
+        with patch.object(cs, "_get_llm_client") as mock_client_factory:
+            mock_client = AsyncMock()
+            mock_client.structured_output = AsyncMock(return_value=mock_result)
+            mock_client_factory.return_value = mock_client
+
+            r2 = cs.process_answer(
+                run_id=run_id, thread_id=tid,
+                content="Das API ist definitiv aktiv"
+            )
+
+        thread = r2.clarification_threads[0]
+        truth_msgs = [m for m in thread.messages if m.message_type == "truth_confirmation"]
+        assert len(truth_msgs) >= 1
+        assert "definitiv" in truth_msgs[0].content.lower() or "klare" in truth_msgs[0].content.lower()
+        # Metadata should include LLM-derived canonical_key_hint
+        assert truth_msgs[0].metadata.get("canonical_key_hint") == "api.status"
+        assert truth_msgs[0].metadata.get("confidence_grade") == "definite"
+
+    def test_llm_failure_falls_back_to_heuristic(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        repo, _, cs, run_id, pkg, _ = self._make_env_with_llm(tmp_path)
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+
+        # Mock the LLM to raise an exception
+        with patch.object(cs, "_get_llm_client", side_effect=RuntimeError("LLM unavailable")):
+            r2 = cs.process_answer(
+                run_id=run_id, thread_id=tid,
+                content="Das System muss grundsätzlich den Status 'aktiv' verwenden."
+            )
+
+        # Should still work via heuristic fallback
+        thread = r2.clarification_threads[0]
+        truth_msgs = [m for m in thread.messages if m.message_type == "truth_confirmation"]
+        assert len(truth_msgs) >= 1  # Heuristic should detect "grundsätzlich" as definite
+
+    def test_llm_follow_up_question_used(self, tmp_path: Path) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        repo, _, cs, run_id, pkg, _ = self._make_env_with_llm(tmp_path)
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+
+        # Mock LLM returning no indications but a follow-up question
+        from fin_ai_auditor.services.clarification_service import _LLMIndicationResult
+
+        mock_result = _LLMIndicationResult(
+            indications=[],
+            follow_up_question="Können Sie genauer angeben, welchen Status das API im Produktivbetrieb hat?",
+            extraction_notes="Keine substantielle Aussage gefunden.",
+        )
+
+        with patch.object(cs, "_get_llm_client") as mock_client_factory:
+            mock_client = AsyncMock()
+            mock_client.structured_output = AsyncMock(return_value=mock_result)
+            mock_client_factory.return_value = mock_client
+
+            r2 = cs.process_answer(run_id=run_id, thread_id=tid, content="hmm, gute frage")
+
+        thread = r2.clarification_threads[0]
+        # Should use the LLM-generated follow-up question
+        question_msgs = [m for m in thread.messages if m.message_type == "question" and m.role == "assistant"]
+        last_q = question_msgs[-1]
+        assert "Produktivbetrieb" in last_q.content
+        assert last_q.metadata.get("generated_by") == "llm"
+
+    def test_no_llm_when_settings_is_none(self, tmp_path: Path) -> None:
+        # Standard env without settings — should never attempt LLM
+        _, _, cs, run_id, pkg = _make_env(tmp_path)
+
+        assert cs._has_llm() is False
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+
+        # Should work fine with heuristic only
+        r2 = cs.process_answer(
+            run_id=run_id, thread_id=tid,
+            content="Das API muss immer aktiviert sein."
+        )
+
+        thread = r2.clarification_threads[0]
+        assert len(thread.messages) >= 2  # At minimum: question + user msg + follow-up
+
+    def test_llm_canonical_key_hint_in_metadata(self, tmp_path: Path) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        repo, _, cs, run_id, pkg, _ = self._make_env_with_llm(tmp_path)
+
+        r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
+        tid = r1.clarification_threads[0].thread_id
+
+        from fin_ai_auditor.services.clarification_service import _LLMIndicationResult, _LLMIndicationItem
+
+        mock_result = _LLMIndicationResult(
+            indications=[
+                _LLMIndicationItem(
+                    statement="Statement write_path ist review-pflichtig",
+                    confidence=0.88,
+                    canonical_key_hint="statement.write_path.review_gate",
+                    scope_kind="entity",
+                    is_definite=False,
+                    is_negation=False,
+                )
+            ],
+        )
+
+        with patch.object(cs, "_get_llm_client") as mock_client_factory:
+            mock_client = AsyncMock()
+            mock_client.structured_output = AsyncMock(return_value=mock_result)
+            mock_client_factory.return_value = mock_client
+
+            r2 = cs.process_answer(
+                run_id=run_id, thread_id=tid,
+                content="Statement write_path ist review-pflichtig"
+            )
+
+        thread = r2.clarification_threads[0]
+        truth_msgs = [m for m in thread.messages if m.message_type == "truth_confirmation"]
+        assert len(truth_msgs) >= 1
+        assert truth_msgs[0].metadata.get("canonical_key_hint") == "statement.write_path.review_gate"
+        assert truth_msgs[0].metadata.get("confidence_grade") == "assertion"

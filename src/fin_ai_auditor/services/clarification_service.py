@@ -11,8 +11,11 @@ aber jede Erkenntnis fließt global in das Gesamtsystem.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, Field
 
 from fin_ai_auditor.domain.models import (
     AuditAnalysisLogEntry,
@@ -29,6 +32,7 @@ from fin_ai_auditor.domain.models import (
 )
 
 if TYPE_CHECKING:
+    from fin_ai_auditor.config import Settings
     from fin_ai_auditor.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
@@ -37,13 +41,49 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGES_PER_THREAD = 10
 MAX_QUESTIONS_PER_STEP = 3
 INDICATION_CONFIDENCE = 0.80
+LLM_EXTRACTION_TIMEOUT_S = 30.0
+
+
+# ── Pydantic schemas for LLM structured output ──
+
+class _LLMIndicationItem(BaseModel):
+    """A single extracted indication from user input."""
+    statement: str = Field(description="The core factual assertion from the user")
+    confidence: float = Field(ge=0.0, le=1.0, description="Extraction confidence 0.0-1.0")
+    canonical_key_hint: str = Field(default="", description="Suggested canonical key, e.g. 'api.status'")
+    scope_kind: str = Field(default="global", description="Scope category: global, module, service, entity")
+    is_definite: bool = Field(default=False, description="True if user expressed absolute certainty")
+    is_negation: bool = Field(default=False, description="True if user expressed an exclusion/prohibition")
+
+
+class _LLMIndicationResult(BaseModel):
+    """Structured output from LLM indication extraction."""
+    indications: list[_LLMIndicationItem] = Field(default_factory=list)
+    follow_up_question: str = Field(
+        default="",
+        description="A context-aware follow-up question to ask the user, or empty if extraction is sufficient",
+    )
+    extraction_notes: str = Field(default="", description="Internal extraction notes")
+
+
+class _LLMFollowUpResult(BaseModel):
+    """Structured output from LLM follow-up question generation."""
+    question: str = Field(description="The follow-up question to ask")
+    question_type: str = Field(default="clarification", description="Type: clarification, confirmation, summary")
 
 
 class ClarificationService:
     """Manages clarification dialogs bound to decision packages or atomic facts."""
 
-    def __init__(self, *, audit_service: AuditService) -> None:
+    def __init__(
+        self,
+        *,
+        audit_service: AuditService,
+        settings: Settings | None = None,
+    ) -> None:
         self._audit = audit_service
+        self._settings = settings
+        self._llm_client = None  # Lazy-initialized
 
     # ──────────────────────────────────────
     # Public API
@@ -109,7 +149,10 @@ class ClarificationService:
         thread_id: str,
         content: str,
     ) -> AuditRun:
-        """Process a user answer and optionally generate follow-up question or truth proposal."""
+        """Process a user answer and optionally generate follow-up question or truth proposal.
+
+        Tries LLM-based extraction first, falls back to heuristic if unavailable.
+        """
         run = self._require_run(run_id)
         thread = self._require_thread(run, thread_id)
         self._check_message_limit(thread)
@@ -121,8 +164,26 @@ class ClarificationService:
             content=content,
         )
 
-        # Extract potential indications from the answer
-        indications = self._extract_indications(content, run, thread)
+        # Try LLM extraction first, fall back to heuristic
+        indications: list[dict[str, str]] | None = None
+        llm_follow_up_question: str = ""
+
+        if self._has_llm():
+            try:
+                llm_result = self._run_async(
+                    self._llm_extract_indications(content, run, thread)
+                )
+                if llm_result is not None:
+                    indications = llm_result.get("indications")
+                    llm_follow_up_question = llm_result.get("follow_up_question", "")
+            except Exception as exc:
+                logger.warning(
+                    "LLM indication extraction failed, using heuristic fallback: %s", exc
+                )
+
+        # Heuristic fallback
+        if indications is None:
+            indications = self._extract_indications(content, run, thread)
 
         # Build follow-up: either a truth proposal, follow-up question, or resolution suggestion
         follow_up = self._generate_follow_up(
@@ -130,6 +191,7 @@ class ClarificationService:
             user_answer=content,
             indications=indications,
             run=run,
+            llm_follow_up_question=llm_follow_up_question,
         )
 
         new_messages = [user_msg, *follow_up]
@@ -605,6 +667,7 @@ class ClarificationService:
         user_answer: str,
         indications: list[dict[str, str]],
         run: AuditRun,
+        llm_follow_up_question: str = "",
     ) -> list[ClarificationMessage]:
         """Generate follow-up messages based on user answer.
 
@@ -643,6 +706,7 @@ class ClarificationService:
                         "confidence_grade": confidence_grade,
                         "extraction_confidence": float(indication.get("confidence", "0.65")),
                         "detected_patterns": indication.get("detected_patterns", []),
+                        "canonical_key_hint": indication.get("canonical_key_hint", ""),
                     },
                 ))
                 break  # Only one truth proposal at a time
@@ -651,14 +715,23 @@ class ClarificationService:
         if not messages:
             question_count = sum(1 for m in thread.messages if m.message_type == "question")
             if question_count < MAX_QUESTIONS_PER_STEP:
-                messages.append(ClarificationMessage(
-                    role="assistant",
-                    message_type="question",
-                    content=(
-                        "Verstanden. Gibt es noch weitere Aspekte, die Sie zu diesem Punkt klären möchten? "
-                        "Oder möchten Sie den Dialog abschließen?"
-                    ),
-                ))
+                # Use LLM-generated follow-up if available
+                if llm_follow_up_question:
+                    messages.append(ClarificationMessage(
+                        role="assistant",
+                        message_type="question",
+                        content=llm_follow_up_question,
+                        metadata={"generated_by": "llm"},
+                    ))
+                else:
+                    messages.append(ClarificationMessage(
+                        role="assistant",
+                        message_type="question",
+                        content=(
+                            "Verstanden. Gibt es noch weitere Aspekte, die Sie zu diesem Punkt klären möchten? "
+                            "Oder möchten Sie den Dialog abschließen?"
+                        ),
+                    ))
 
         return messages
 
@@ -795,31 +868,158 @@ class ClarificationService:
 
         return indications
 
+    # ── LLM Integration ──
+
+    def _has_llm(self) -> bool:
+        """Check if LLM extraction is available."""
+        if self._settings is None:
+            return False
+        slot = self._select_clarification_slot()
+        return slot is not None
+
+    def _select_clarification_slot(self) -> int | None:
+        """Select a suitable LLM slot for clarification (non-embedding, non-OCR)."""
+        if self._settings is None:
+            return None
+        for slot in self._settings.get_configured_llm_slots():
+            model_hint = f"{slot.model} {slot.deployment or ''}".casefold()
+            if "embedding" in model_hint or "document-ai" in model_hint or "ocr" in model_hint:
+                continue
+            return int(slot.slot)
+        return None
+
+    def _get_llm_client(self):
+        """Lazy-initialize and return LLM client."""
+        if self._llm_client is None:
+            from fin_ai_auditor.llm import LiteLLMClient
+            slot = self._select_clarification_slot()
+            if slot is None or self._settings is None:
+                raise RuntimeError("Kein LLM-Slot für Klärungsdialoge konfiguriert.")
+            self._llm_client = LiteLLMClient(settings=self._settings, default_slot=slot)
+        return self._llm_client
+
+    @staticmethod
+    def _run_async(coro):
+        """Run an async coroutine from sync context."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            # Already inside an event loop (e.g. FastAPI) — use nest_asyncio or run in thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result(timeout=LLM_EXTRACTION_TIMEOUT_S + 5)
+        return asyncio.run(coro)
+
     async def _llm_extract_indications(
         self,
         content: str,
         run: AuditRun,
         thread: ClarificationThread,
-    ) -> list[dict[str, str]] | None:
-        """LLM-based indication extraction (Phase 5 — future integration point).
+    ) -> dict | None:
+        """LLM-based indication extraction.
 
-        Returns None if LLM is not available or extraction fails,
-        in which case the caller should fall back to heuristic extraction.
-
-        Expected to be wired up when Settings-based LLM slot resolution
-        becomes available in the ClarificationService constructor.
+        Returns a dict with 'indications' (list) and 'follow_up_question' (str),
+        or None if extraction fails / no LLM available.
         """
-        # Stub — returns None to signal heuristic fallback
-        # TODO: Wire up LiteLLMClient with structured_output to extract:
-        #   - statement: The core factual assertion
-        #   - confidence: How confident the extraction is (0.0-1.0)
-        #   - canonical_key_hint: Suggested canonical key for this statement
-        #   - scope_kind: inferred scope category
-        #   - is_definite: whether user expressed absolute certainty
-        logger.debug(
-            "LLM indication extraction not yet configured — using heuristic fallback."
+        from fin_ai_auditor.llm import ChatMessage, GenerationConfig
+
+        client = self._get_llm_client()
+        slot = self._select_clarification_slot()
+
+        # Build context
+        anchor_context = self._build_anchor_context(
+            run, package_id=thread.package_id, atomic_fact_id=thread.atomic_fact_id
         )
-        return None
+        dialog_history = "\n".join(
+            f"[{m.role}] {m.content[:200]}" for m in thread.messages[-6:]
+        )
+        cross_context = self._build_cross_thread_context(run)
+
+        system_prompt = (
+            "Du bist ein Fachexperte für Governance-Klärungsdialoge im FIN-AI Auditor.\n\n"
+            "Deine Aufgabe ist es, aus der Nutzerantwort fachliche Aussagen zu extrahieren, "
+            "die als potenzielle Wahrheiten oder Indizien gespeichert werden könnten.\n\n"
+            "Regeln:\n"
+            "1. Extrahiere nur SUBSTANTIELLE fachliche Aussagen — keine Höflichkeitsfloskeln, "
+            "Fragen oder unklare Äußerungen.\n"
+            "2. Bewerte die Konfidenz: 0.9-1.0 für absolute Aussagen (immer, ausnahmslos, zwingend), "
+            "0.7-0.89 für klare Feststellungen, 0.5-0.69 für Vermutungen/Tendenzen.\n"
+            "3. Schlage einen kanonischen Schlüssel vor (z.B. 'api.status', 'statement.write_path').\n"
+            "4. Markiere ob die Aussage definitiv (is_definite=true) oder eine Negation (is_negation=true) ist.\n"
+            "5. Wenn die Antwort keine extrahierbare Aussage enthält, liefere eine leere Liste "
+            "und generiere stattdessen eine gezielte Rückfrage als follow_up_question.\n"
+            "6. Die Rückfrage soll den Nutzer gezielt zu einer klärenden Aussage führen — "
+            "nicht allgemein, sondern direkt auf den fachlichen Streitpunkt bezogen.\n\n"
+            "Antworte ausschließlich als gültiges JSON passend zum Schema."
+        )
+
+        user_prompt = (
+            f"=== Paket-Kontext ===\n{anchor_context}\n\n"
+            f"=== Bisherige Erkenntnisse ===\n{cross_context}\n\n"
+            f"=== Dialogverlauf ===\n{dialog_history}\n\n"
+            f"=== Aktuelle Nutzerantwort ===\n{content}\n\n"
+            f"Extrahiere fachliche Aussagen und/oder generiere eine gezielte Rückfrage."
+        )
+
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+
+        config = GenerationConfig(
+            slot=slot,
+            max_tokens=800,
+            temperature=0.1,
+            timeout_s=LLM_EXTRACTION_TIMEOUT_S,
+        )
+
+        result: _LLMIndicationResult = await client.structured_output(
+            messages=messages,
+            schema=_LLMIndicationResult,
+            config=config,
+        )
+
+        logger.info(
+            "llm_clarification_extraction",
+            extra={
+                "event_name": "llm_clarification_extraction",
+                "event_payload": {
+                    "indication_count": len(result.indications),
+                    "has_follow_up": bool(result.follow_up_question),
+                    "notes": result.extraction_notes[:100] if result.extraction_notes else "",
+                },
+            },
+        )
+
+        # Convert to dict format compatible with heuristic output
+        indications = []
+        for item in result.indications:
+            confidence_grade = "definite" if item.is_definite else (
+                "negation" if item.is_negation else (
+                    "assertion" if item.confidence >= 0.7 else "general"
+                )
+            )
+            indications.append({
+                "statement": item.statement,
+                "source": "llm_extraction",
+                "confidence_grade": confidence_grade,
+                "confidence": str(item.confidence),
+                "canonical_key_hint": item.canonical_key_hint,
+                "scope_kind": item.scope_kind,
+                "detected_patterns": [
+                    *((["definite_qualifier"] if item.is_definite else [])),
+                    *((["negation"] if item.is_negation else [])),
+                    "llm_extracted",
+                ],
+                "extracted_by": "llm_v1",
+            })
+
+        return {
+            "indications": indications if indications else None,
+            "follow_up_question": result.follow_up_question,
+        }
 
     # ── Truth Conflict Detection ──
 

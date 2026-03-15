@@ -217,7 +217,8 @@ def reset_audit_database(
 # ── Clarification Dialog ──
 
 def _get_clarification_service(service: AuditService = Depends(get_audit_service)) -> ClarificationService:
-    return ClarificationService(audit_service=service)
+    from fin_ai_auditor.config import get_settings
+    return ClarificationService(audit_service=service, settings=get_settings())
 
 
 @router.post("/runs/{run_id}/clarification-threads", response_model=AuditRun)
