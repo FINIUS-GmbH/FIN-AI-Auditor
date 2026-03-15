@@ -290,6 +290,19 @@ class LiteLLMClient(LLMProviderInterface):
         schema: type[BaseModel],
         config: GenerationConfig | None = None,
     ) -> BaseModel:
+        parsed, _response = await self.structured_output_with_usage(
+            messages=messages, schema=schema, config=config,
+        )
+        return parsed
+
+    async def structured_output_with_usage(
+        self,
+        *,
+        messages: list[ChatMessage],
+        schema: type[BaseModel],
+        config: GenerationConfig | None = None,
+    ) -> tuple[BaseModel, "LLMResponse"]:
+        """Like structured_output but also returns the raw LLMResponse for usage tracking."""
         effective_config = (
             config.model_copy(update={"json_mode": True}) if config is not None else GenerationConfig(json_mode=True)
         )
@@ -300,4 +313,4 @@ class LiteLLMClient(LLMProviderInterface):
             parsed = json.loads(json_text)
         except json.JSONDecodeError as exc:
             raise RuntimeError("LLM lieferte kein gueltiges JSON fuer structured_output.") from exc
-        return schema.model_validate(parsed)
+        return schema.model_validate(parsed), response

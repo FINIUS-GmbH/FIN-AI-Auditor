@@ -179,3 +179,12 @@ def execute_confluence_page_writeback(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reset")
+def reset_audit_database(
+    service: AuditService = Depends(get_audit_service),
+) -> dict:
+    """Drop all audit runs, findings, packages, and truths. Keeps OAuth tokens."""
+    service.reset_all_runs()
+    return {"ok": True, "message": "Alle Audit-Runs wurden geloescht."}

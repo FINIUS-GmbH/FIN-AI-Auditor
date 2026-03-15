@@ -346,8 +346,9 @@ ul,ol{list-style:none}
 .ph-step.active::after{background:var(--accent)}
 .ph-label{font-size:var(--fs-2xs);font-weight:600;color:var(--text-muted);white-space:nowrap}
 .ph-step.done .ph-label{color:var(--success)}
-.ph-step.active .ph-label{color:var(--accent)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.ph-step.active .ph-label{color:var(--accent);animation:blink-text 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.15)}}
+@keyframes blink-text{0%,100%{opacity:1}50%{opacity:.4}}
 
 /* Card stack */
 .card-stack{position:relative;min-height:180px;margin-bottom:var(--sp-2xl);padding-bottom:20px}
@@ -416,6 +417,7 @@ ul,ol{list-style:none}
 .metric-body{display:flex;flex-direction:column}
 .metric-label{font-size:var(--fs-xs);color:var(--text-muted);font-weight:500;text-transform:uppercase;letter-spacing:.06em}
 .metric-value{font-size:var(--fs-2xl);font-weight:700;letter-spacing:-0.02em;color:var(--text-primary);line-height:1.1}
+.metric-sub{font-size:var(--fs-xs);color:var(--text-muted);font-weight:400;margin-top:2px}
 
 /* Dashboard two-column grid */
 .dashboard-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:var(--sp-lg);margin-bottom:var(--sp-2xl)}

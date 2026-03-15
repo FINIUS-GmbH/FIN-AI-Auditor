@@ -375,7 +375,7 @@ class SQLiteAuditRepository:
                     position = location.position
                     connection.execute(
                         """
-                        INSERT INTO finding_locations(
+                        INSERT OR REPLACE INTO finding_locations(
                             location_id, finding_id, snapshot_id, source_type, source_id, title, path_hint, url,
                             anchor_kind, anchor_value, section_path, line_start, line_end, char_start, char_end,
                             snippet_hash, content_hash, metadata_json
@@ -432,6 +432,26 @@ class SQLiteAuditRepository:
 
     def list_by_status(self, *, status: str) -> list[AuditRun]:
         return [run for run in self.list_runs() if run.status == status]
+
+    def reset_all_runs(self) -> None:
+        """Delete all audit runs and related data. Keeps OAuth tokens and document cache."""
+        with self._connection() as connection, connection:
+            connection.execute("DELETE FROM decision_problems")
+            connection.execute("DELETE FROM decision_records")
+            connection.execute("DELETE FROM writeback_approval_requests")
+            connection.execute("DELETE FROM decision_packages")
+            connection.execute("DELETE FROM truth_entries")
+            connection.execute("DELETE FROM audit_claims")
+            connection.execute("DELETE FROM semantic_relations")
+            connection.execute("DELETE FROM semantic_entities")
+            connection.execute("DELETE FROM finding_links")
+            connection.execute("DELETE FROM finding_locations")
+            connection.execute("DELETE FROM audit_findings")
+            connection.execute("DELETE FROM source_snapshots")
+            connection.execute("DELETE FROM retrieval_segment_claim_links")
+            connection.execute("DELETE FROM retrieval_segments")
+            connection.execute("DELETE FROM retrieval_segments_fts")
+            connection.execute("DELETE FROM audit_runs")
 
     def claim_next_planned_run(
         self,
@@ -1222,6 +1242,10 @@ class SQLiteAuditRepository:
         if loaded is None:
             raise RuntimeError("Atlassian-Token konnte nach dem Speichern nicht geladen werden.")
         return loaded
+
+    def delete_atlassian_token(self) -> None:
+        with self._connection() as connection, connection:
+            connection.execute("DELETE FROM atlassian_oauth_tokens WHERE provider = 'atlassian'")
 
     def get_atlassian_token(self) -> AtlassianOAuthTokenRecord | None:
         with self._connection() as connection:

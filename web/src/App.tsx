@@ -3,7 +3,7 @@ import {
   createAuditRun, createWritebackApprovalRequest,
   executeConfluencePageWriteback, executeJiraTicketWriteback,
   getAtlassianAuthStatus, getBootstrapData, listAuditRuns,
-  recordConfluencePageUpdate, recordJiraTicketCreated,
+  recordConfluencePageUpdate, recordJiraTicketCreated, resetAuditDatabase,
   resolveWritebackApprovalRequest, startAtlassianAuthorization,
   submitDecisionComment, submitPackageDecision, verifyConfluenceAccess,
 } from "./api";
@@ -21,6 +21,41 @@ import type {
 function ts(v?: string | null): string {
   if (!v) return "–";
   return new Intl.DateTimeFormat("de-DE", { dateStyle: "short", timeStyle: "short" }).format(new Date(v));
+}
+
+const STATUS_DE: Record<string, string> = {
+  planned: "Geplant", running: "Läuft", completed: "Abgeschlossen", failed: "Fehlgeschlagen",
+  open: "Offen", pending: "Ausstehend", approved: "Genehmigt", rejected: "Abgelehnt",
+  applied: "Umgesetzt", accepted: "Akzeptiert", specified: "Präzisiert",
+  superseded: "Ersetzt", dismissed: "Verworfen", executed: "Ausgeführt", cancelled: "Storniert",
+};
+const SEVERITY_DE: Record<string, string> = {
+  critical: "Kritisch", high: "Hoch", medium: "Mittel", low: "Gering",
+};
+const CATEGORY_DE: Record<string, string> = {
+  contradiction: "⚠️ Widerspruch", gap: "💭 Lücke", inconsistency: "🔀 Inkonsistenz",
+  missing_implementation: "❌ Fehlende Umsetzung", missing_documentation: "📝 Fehlende Doku",
+  missing_definition: "❓ Definitionslücke", stale_documentation: "📅 Veraltete Doku",
+  policy_violation: "🛡️ Richtlinienverstoß", policy_conflict: "🛡️ Richtlinienkonflikt",
+  process_gap: "⚙️ Prozesslücke", semantic_drift: "🎯 Semantische Abweichung",
+  implementation_drift: "🔧 Implementierungsabweichung", traceability_gap: "🔗 Nachverfolgbarkeitslücke",
+  clarification_needed: "❓ Klärungsbedarf", stale_source: "📅 Veraltete Quelle",
+  read_write_gap: "↔️ Read/Write-Lücke", ownership_gap: "👥 Ownership-Lücke",
+  terminology_collision: "🧭 Begriffskollision", low_confidence_review: "🔍 Niedrige Sicherheit",
+  obsolete_documentation: "🗃️ Obsolete Doku", open_decision: "🧩 Offene Entscheidung",
+};
+function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? v; }
+
+function clusterScopeKey(item: { kind: "pkg"; pkg: DecisionPackage } | { kind: "finding"; f: AuditRun["findings"][number] }): string {
+  const rawScope = item.kind === "pkg"
+    ? typeof item.pkg.metadata?.cluster_key === "string" && item.pkg.metadata.cluster_key.trim()
+      ? item.pkg.metadata.cluster_key
+      : item.pkg.scope_summary
+    : (item.f.canonical_key ?? item.f.finding_id);
+  if (rawScope.startsWith("embedding_contradiction|")) return rawScope;
+  const pipeBase = rawScope.split("|")[0] ?? rawScope;
+  const dotted = pipeBase.split(".").slice(0, 2).join(".");
+  return dotted || pipeBase || rawScope;
 }
 
 /* SVG icons for source badges */
@@ -61,7 +96,7 @@ function patch(r: WritebackApprovalRequest): ConfluencePatchPreview | null {
 /* Empty defaults used only while bootstrap is loading */
 const EMPTY_SP: SourceProfile = {
   confluence_url: "", jira_url: "",
-  confluence_space_key: "FINAI", jira_project_key: "FINAI",
+  confluence_space_key: "FP", jira_project_key: "FINAI",
   jira_usage: "ticket_creation_only",
   metamodel_dump_path: "", metamodel_policy: "", resource_access_mode: "read_only",
 };
@@ -118,8 +153,19 @@ export default function App(): ReactNode {
   const openCount = openPkgs.length + soloFindings.length;
   const pendCount = pendApps.length;
   const [cardIdx, setCardIdx] = useState(0);
+  const [elapsed, setElapsed] = useState("");
   // Reset card index when run changes
   useEffect(() => { setCardIdx(0); }, [run?.run_id]);
+  // Elapsed timer for running runs
+  useEffect(() => {
+    const startStr = run?.started_at ?? run?.created_at;
+    if (!startStr || (run?.status !== "running" && run?.status !== "planned")) { setElapsed(""); return; }
+    const start = new Date(startStr).getTime();
+    const tick = () => { const s = Math.floor((Date.now() - start) / 1000); setElapsed(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`); };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [run?.run_id, run?.status, run?.started_at, run?.created_at]);
 
   // Effects
   useEffect(() => { void fetchRuns(); void fetchBoot(); }, []);
@@ -223,6 +269,7 @@ export default function App(): ReactNode {
   async function refreshAtl() { try { setAtlAuth(await getAtlassianAuthStatus()); } catch { /* */ } }
   async function startAtl() {
     setAtlBusy(true); setAtlErr("");
+    const hadValidToken = atlAuth?.token_valid ?? false;
     // Open popup IMMEDIATELY in the user-gesture context (before any await)
     // Otherwise browsers block the popup as "not user initiated"
     const popupName = `auditor-atl-auth-${Date.now()}`;
@@ -249,6 +296,7 @@ export default function App(): ReactNode {
       const pollId = window.setInterval(async () => {
         try {
           if (popup && popup.closed) { window.clearInterval(pollId); await refreshAtl(); return; }
+          if (hadValidToken) return;
           const status = await getAtlassianAuthStatus();
           if (status.token_valid) { window.clearInterval(pollId); setAtlAuth(status); try { popup?.close(); } catch { /* */ } }
         } catch { /* ignore */ }
@@ -298,9 +346,6 @@ export default function App(): ReactNode {
           </button>
         </div>
 
-        <div className="sidebar-section">
-          <button className="run-btn" onClick={() => setShowModal(true)}>Neu einlesen</button>
-        </div>
 
         <div className="sidebar-footer">
           <div className="conn"><span className={`conn-dot ${sp.metamodel_dump_path ? "ok" : "off"}`} />Metamodell {sp.metamodel_dump_path ? "✓ lokal" : "✗"}</div>
@@ -332,11 +377,19 @@ export default function App(): ReactNode {
           <div className="header-right">
             {run && (
               <>
-                <span className={`badge badge-${run.status}`}>{run.status}</span>
+                <span className={`badge badge-${run.status}`}>{de(run.status)}{elapsed ? ` ${elapsed}` : ""}</span>
                 <span className="header-ts">{ts(run.updated_at)}</span>
               </>
             )}
-            <button className="btn btn-primary header-run-btn" onClick={() => setShowModal(true)}>New Audit Run</button>
+            <button className="btn btn-primary header-run-btn" onClick={() => setShowModal(true)}>Neu einlesen</button>
+            <button className="btn btn-outline header-run-btn" style={{ fontSize: 12 }} onClick={async () => {
+              if (!window.confirm("Alle Audit-Runs löschen?")) return;
+              try {
+                await resetAuditDatabase();
+                setRuns([]); setSelId(""); setCardIdx(0);
+                await fetchRuns();
+              } catch (e) { console.error("Reset failed", e); }
+            }}>🗑 Reset</button>
           </div>
         </header>
 
@@ -363,31 +416,35 @@ export default function App(): ReactNode {
               {/* ── Dashboard Overview — always visible ── */}
               <div className="metrics-row">
                 <div className="metric-card mc-blue">
-                  <div className="metric-icon">📊</div>
+                  <div className="metric-icon">📄</div>
                   <div className="metric-body">
-                    <span className="metric-label">Active Runs</span>
-                    <span className="metric-value">{runs.filter(r => r.status === "running" || r.status === "planned").length}</span>
+                    <span className="metric-label">Quellen</span>
+                    <span className="metric-value">{run?.source_snapshots.length ?? 0}</span>
+                    <span className="metric-sub">{run ? `${run.claims.length} Claims` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-amber">
                   <div className="metric-icon">🔍</div>
                   <div className="metric-body">
-                    <span className="metric-label">Open Findings</span>
-                    <span className="metric-value">{run?.findings.filter(f => !f.resolution_state || f.resolution_state === "open").length ?? 0}</span>
+                    <span className="metric-label">Findings</span>
+                    <span className="metric-value">{run?.findings.length ?? 0}</span>
+                    <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "–"; })() : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-purple">
                   <div className="metric-icon">📦</div>
                   <div className="metric-body">
-                    <span className="metric-label">Decision Packages</span>
+                    <span className="metric-label">Pakete</span>
                     <span className="metric-value">{run?.decision_packages.length ?? 0}</span>
+                    <span className="metric-sub">{run ? `${run.decision_records.length} Entscheidungen` : "–"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-green">
                   <div className="metric-icon">✅</div>
                   <div className="metric-body">
-                    <span className="metric-label">Pending Approvals</span>
+                    <span className="metric-label">Freigaben</span>
                     <span className="metric-value">{pendApps.length}</span>
+                    <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt` : "–"}</span>
                   </div>
                 </div>
               </div>
@@ -395,29 +452,29 @@ export default function App(): ReactNode {
               {/* Pipeline — horizontal under KPIs */}
               <div className="pipeline-h">
                 {(() => {
-                  const phase = (run?.progress.phase_label ?? "").toLowerCase();
+                  const phaseKey = (run?.progress.phase_key ?? "").toLowerCase();
                   const isRunning = run?.status === "running" || run?.status === "planned";
                   const isDone = run?.status === "completed";
-                  // Map pipeline steps to their phase keywords
+                  // Match backend AUDIT_PIPELINE_STEPS order
                   const steps = [
-                    { label: "Metamodell",    keys: ["metamodel", "meta"],            staticDone: !!sp.metamodel_dump_path },
-                    { label: "Code",          keys: ["collect", "code", "ingestion", "github"], staticDone: false },
-                    { label: "Confluence",    keys: ["confluence", "atlassian"],      staticDone: ea.token_valid && !isRunning },
-                    { label: "Delta",         keys: ["delta", "comparison", "diff"],  staticDone: false },
-                    { label: "Findings",      keys: ["finding", "analysis", "audit", "claim"], staticDone: false },
-                    { label: "Empfehlungen",  keys: ["recommend", "package", "decision"], staticDone: false },
+                    { label: "Metamodell",    keys: ["metamodel_check", "metamodel", "meta"] },
+                    { label: "Code",          keys: ["finai_code_check", "code", "github", "ingestion"] },
+                    { label: "Confluence",    keys: ["confluence_check", "confluence", "atlassian"] },
+                    { label: "Delta",         keys: ["delta_reconciliation", "delta", "retrieval_indexing", "retrieval"] },
+                    { label: "Findings",      keys: ["finding_generation", "finding", "analysis", "claim"] },
+                    { label: "Empfehlungen",  keys: ["llm_recommendations", "recommend", "decision_packages", "package", "decision"] },
                   ];
-                  // Find which step is currently active
+                  // Find which step is currently active by matching phase_key
                   let activeIdx = -1;
                   if (isRunning) {
-                    activeIdx = steps.findIndex(s => s.keys.some(k => phase.includes(k)));
-                    if (activeIdx === -1 && phase) activeIdx = 1; // default to Code if unknown phase
+                    activeIdx = steps.findIndex(s => s.keys.some(k => phaseKey === k || phaseKey.includes(k)));
+                    if (activeIdx === -1 && phaseKey) activeIdx = 0;
                   }
                   return steps.map((step, i) => {
-                    const done = isDone || (activeIdx >= 0 && i < activeIdx) || (!isRunning && step.staticDone);
+                    const done = isDone || (activeIdx >= 0 && i < activeIdx);
                     const active = isRunning && i === activeIdx;
                     return (
-                      <div className={`ph-step ${done ? "done" : active ? "active" : ""}`} key={i}>
+                      <div className={`ph-step ${done ? "done" : active ? "active blink" : ""}`} key={i}>
                         <div className="ph-dot">{done ? "✓" : active ? "◉" : "○"}</div>
                         <span className="ph-label">{step.label}</span>
                       </div>
@@ -463,21 +520,43 @@ export default function App(): ReactNode {
                   ...soloFindings.map(f => ({ kind: "finding" as const, f })),
                 ];
                 if (cards.length === 0) return null;
-                const idx = Math.min(cardIdx, cards.length - 1);
-                const visibleCards = cards.slice(idx, idx + 3);  // show up to 3 for stack effect
+                // Group by scope cluster: show root issue per group, count related
+                const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+                const sorted = [...cards].sort((a, b) => {
+                  const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
+                  const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
+                  return (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                });
+                // Cluster by base scope — first per cluster = root issue
+                const scopeGroups = new Map<string, CardItem[]>();
+                for (const card of sorted) {
+                  const baseScope = clusterScopeKey(card);
+                  if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
+                  scopeGroups.get(baseScope)!.push(card);
+                }
+                // Root issues = first of each group, sorted by severity
+                const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
+                  .sort((a, b) => {
+                    const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
+                    const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
+                    return (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                  });
+                const idx = Math.min(cardIdx, finalCards.length - 1);
+                const visibleCards = finalCards.slice(idx, idx + 3);
                 return (
                   <section>
                     <div className="section-head">
-                      <h2>Issues</h2>
-                      <span className="section-count">{cards.length} offen</span>
+                      <h2>Offene Probleme</h2>
+                      <span className="section-count">{finalCards.length} von {cards.length} angezeigt</span>
                     </div>
                     <div className="card-stack-nav">
                       <button className="btn btn-outline btn-sm" disabled={idx === 0} onClick={() => setCardIdx(Math.max(0, idx - 1))}>← Zurück</button>
-                      <span className="text-sm text-muted">{idx + 1} / {cards.length}</span>
-                      <button className="btn btn-outline btn-sm" disabled={idx >= cards.length - 1} onClick={() => setCardIdx(idx + 1)}>Weiter →</button>
+                      <span className="text-sm text-muted">{idx + 1} / {finalCards.length}</span>
+                      <button className="btn btn-outline btn-sm" disabled={idx >= finalCards.length - 1} onClick={() => setCardIdx(idx + 1)}>Weiter →</button>
                     </div>
                     <div className="card-stack">
-                      {visibleCards.map((item, stackPos) => {
+                      {visibleCards.map((group, stackPos) => {
+                        const item = group.root;
                         const zIndex = 10 - stackPos;
                         const offset = stackPos * 8;
                         const scale = 1 - stackPos * 0.03;
@@ -485,6 +564,7 @@ export default function App(): ReactNode {
                         return (
                           <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id}
                             className="card-stack-item" style={{ zIndex, transform: `translateY(${offset}px) scale(${scale})`, opacity, pointerEvents: stackPos === 0 ? "auto" : "none" }}>
+                            {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
                             {item.kind === "pkg" ? (
                               <WorkCard id={item.pkg.package_id}
                                 severity={item.pkg.severity_summary} category={item.pkg.category}
@@ -615,22 +695,21 @@ function WorkCard(props: {
 }): ReactNode {
   return (
     <article className="wc">
+      {/* 1. Typ-Badge + Schweregrad */}
       <div className="wc-badges">
-        <span className={`badge badge-${props.severity}`}>{props.severity}</span>
-        <span className="badge badge-cat">{props.category}</span>
+        <span className="badge badge-cat">{de(props.category)}</span>
+        <span className={`badge badge-${props.severity}`}>{de(props.severity)}</span>
       </div>
+
+      {/* 2. Kurzbeschreibung: Was ist das Problem? */}
       <h3 className="wc-title">{props.title}</h3>
       <p className="wc-scope">{props.scope}</p>
 
-      {/* Evidence */}
+      {/* 3. Quellen mit Zitaten */}
       <div className="wc-evidence">
-        <div className="wc-label">Evidenz</div>
+        <div className="wc-label">Betroffene Quellen</div>
         {props.elements.map((el, i) => (
           <div className="ev-block" key={i}>
-            <div className="ev-head">
-              <span className={`badge badge-${el.severity}`} style={{ fontSize: 10 }}>{el.severity}</span>
-              <span className="ev-conf">{Math.round(el.confidence * 100)}% Konfidenz</span>
-            </div>
             <p className="ev-explain">{el.explanation}</p>
             <div className="ev-locs">
               {el.locations.map((loc) => (
@@ -644,29 +723,29 @@ function WorkCard(props: {
         ))}
       </div>
 
-      {/* Context */}
-      {props.deltaHints && props.deltaHints.length > 0 && (
-        <div className="wc-context">
-          <div className="wc-label">Kontext</div>
-          <ul>{props.deltaHints.map((h, i) => <li key={i}>{h}</li>)}</ul>
-        </div>
-      )}
-
-      {/* Recommendation */}
+      {/* 4. Empfehlung mit Begründung */}
       {props.recommendation && (
         <div className="wc-rec">
-          <div className="wc-label">Empfehlung</div>
+          <div className="wc-label">Empfohlene Auflösung</div>
           <div className="rec-text">{props.recommendation}</div>
         </div>
       )}
 
-      {/* Actions */}
+      {/* Kontext */}
+      {props.deltaHints && props.deltaHints.length > 0 && (
+        <div className="wc-context">
+          <div className="wc-label">Änderungskontext</div>
+          <ul>{props.deltaHints.map((h, i) => <li key={i}>{h}</li>)}</ul>
+        </div>
+      )}
+
+      {/* Aktionen */}
       <div className="wc-actions">
-        <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Kommentar, Neubewertung oder Begründung…" />
+        <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Begründung oder Anmerkung…" />
         <div className="wc-btns">
           <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ Annehmen</button>
           <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ Ablehnen</button>
-          {props.onSpecify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Spezifizieren</button>}
+          {props.onSpecify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Präzisieren</button>}
         </div>
         {(props.onConfluence || props.onJira) && (
           <div className="wc-writeback">
@@ -703,8 +782,8 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
         <div className="hgrid">
           <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Findings</span></div>
           <div className="hstat"><span className="hstat-val">{run.decision_packages.length}</span><span className="hstat-label">Pakete</span></div>
-          <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Claims</span></div>
-          <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Truths</span></div>
+          <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Behauptungen</span></div>
+          <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Wahrheiten</span></div>
           <div className="hstat"><span className="hstat-val">{changes.length}</span><span className="hstat-label">Umgesetzt</span></div>
         </div>
         {run.summary && <p className="text-secondary">{run.summary}</p>}
@@ -716,9 +795,9 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
           {decided.map((p) => (
             <div className="hitem" key={p.package_id}>
               <div className="hitem-head">
-                <span className={`badge badge-${p.severity_summary}`}>{p.severity_summary}</span>
-                <span className="badge badge-cat">{p.category}</span>
-                <span className={`badge badge-${p.decision_state}`}>{p.decision_state}</span>
+                <span className={`badge badge-${p.severity_summary}`}>{de(p.severity_summary)}</span>
+                <span className="badge badge-cat">{de(p.category)}</span>
+                <span className={`badge badge-${p.decision_state}`}>{de(p.decision_state)}</span>
               </div>
               <strong>{p.title}</strong><p>{p.scope_summary}</p>
             </div>
@@ -732,8 +811,8 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
           {resolved.map((f) => (
             <div className="hitem" key={f.finding_id}>
               <div className="hitem-head">
-                <span className={`badge badge-${f.severity}`}>{f.severity}</span>
-                <span className={`badge badge-${f.resolution_state}`}>{f.resolution_state}</span>
+                <span className={`badge badge-${f.severity}`}>{de(f.severity)}</span>
+                <span className={`badge badge-${f.resolution_state}`}>{de(f.resolution_state ?? "open")}</span>
               </div>
               <strong>{f.title}</strong><p>{f.summary}</p>
             </div>
@@ -748,7 +827,7 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
             <div className="hitem" key={c.change_id}>
               <div className="hitem-head">
                 <span className="badge badge-cat">{c.change_type === "confluence_page_updated" ? "📄" : "🎫"} {c.change_type === "confluence_page_updated" ? "Confluence" : "Jira"}</span>
-                <span className={`badge badge-${c.status === "applied" ? "completed" : "failed"}`}>{c.status}</span>
+                <span className={`badge badge-${c.status === "applied" ? "completed" : "failed"}`}>{de(c.status)}</span>
               </div>
               <strong>{c.title}</strong><p>{c.summary}</p>
             </div>
@@ -758,7 +837,7 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
 
       {truths.length > 0 && (
         <section className="hsection">
-          <h2 className="hsection-title">Truth Ledger <span className="hsection-count">{truths.length}</span></h2>
+          <h2 className="hsection-title">Wahrheitsregister <span className="hsection-count">{truths.length}</span></h2>
           {truths.map((t) => (
             <div className="truth" key={t.truth_id}>
               <strong>{t.canonical_key}</strong>
@@ -770,7 +849,7 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
 
       {claimGroups.length > 0 && (
         <section className="hsection">
-          <h2 className="hsection-title">Claims <span className="hsection-count">{run.claims.length}</span></h2>
+          <h2 className="hsection-title">Behauptungen <span className="hsection-count">{run.claims.length}</span></h2>
           <div className="hgrid">
             {claimGroups.map(([st, n]) => <div className="hstat" key={st}><SrcBadge t={st} /><span className="hstat-val" style={{ marginTop: 4 }}>{n}</span></div>)}
           </div>
@@ -791,7 +870,7 @@ function HistoryView({ run }: { run: AuditRun | null }): ReactNode {
 
       {run.source_snapshots.length > 0 && (
         <section className="hsection">
-          <h2 className="hsection-title">Snapshots <span className="hsection-count">{run.source_snapshots.length}</span></h2>
+          <h2 className="hsection-title">Quelldateien <span className="hsection-count">{run.source_snapshots.length}</span></h2>
           {run.source_snapshots.map((s) => (
             <div className="snapshot" key={s.snapshot_id}><SrcBadge t={s.source_type} /><span className="snapshot-id">{s.source_id}</span><span className="snapshot-rev">{s.revision_id || s.content_hash || "–"}</span></div>
           ))}

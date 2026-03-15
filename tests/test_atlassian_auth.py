@@ -40,6 +40,27 @@ def test_atlassian_auth_start_uses_local_auditor_callback(tmp_path: Path) -> Non
     assert any("separaten OAuth-Flow" in note for note in status.notes)
 
 
+def test_atlassian_auth_start_route_keeps_existing_token(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    service._repository.upsert_atlassian_token(
+        token=AtlassianOAuthTokenRecord(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            scope="read:confluence-content.summary read:confluence-content.all",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+    )
+
+    app = create_app()
+    app.dependency_overrides[get_atlassian_oauth_service] = lambda: service
+    client = TestClient(app)
+
+    response = client.get("/api/ingestion/atlassian/auth/start")
+
+    assert response.status_code == 200
+    assert service.get_auth_status().token_valid is True
+
+
 def test_atlassian_callback_route_stores_local_token(monkeypatch, tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     start = service.build_authorization_start()

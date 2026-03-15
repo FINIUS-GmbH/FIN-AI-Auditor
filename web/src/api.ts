@@ -49,6 +49,11 @@ export async function startAtlassianAuthorization(): Promise<AtlassianAuthorizat
   return parseResponse<AtlassianAuthorizationStart>(response);
 }
 
+export async function resetAuditDatabase(): Promise<{ ok: boolean; message: string }> {
+  const response = await fetch(`${API_BASE}/api/audits/reset`, { method: "POST" });
+  return parseResponse<{ ok: boolean; message: string }>(response);
+}
+
 export async function verifyConfluenceAccess(spaceKey: string): Promise<ConfluenceVerificationResponse> {
   const response = await fetch(
     `${API_BASE}/api/ingestion/atlassian/confluence/verify?space_key=${encodeURIComponent(spaceKey)}`,
@@ -66,11 +71,14 @@ export interface ConfluencePageTree {
   space_key: string;
   space_name: string;
   pages: ConfluencePageNode[];
+  auth_required?: boolean;
+  access_denied?: boolean;
+  error_message?: string | null;
 }
 
 export async function listConfluencePages(spaceKey: string): Promise<ConfluencePageTree> {
   const response = await fetch(
-    `${API_BASE}/api/ingestion/atlassian/confluence/pages?space_key=${encodeURIComponent(spaceKey)}&max_pages=100`,
+    `${API_BASE}/api/ingestion/atlassian/confluence/pages?space_key=${encodeURIComponent(spaceKey)}&max_pages=200`,
   );
   return parseResponse<ConfluencePageTree>(response);
 }

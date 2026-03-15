@@ -77,7 +77,7 @@ Aktueller Stand dieses Scaffolds:
 - Architektur- und Produktdoku fuer die naechsten Ausbauschritte
 - Bootstrap-Defaults fuer den lokalen FIN-AI-Checkout unter `/Users/martinwaelter/GitHub/FIN-AI`
 - fixes Analyse- und Zielprofil:
-  - Confluence: `https://finius.atlassian.net/wiki/home`
+  - Confluence: `https://fin-ai.atlassian.net/wiki/spaces/FP/overview`
   - Jira Board als Ticket-Ziel: `https://finius.atlassian.net/jira/software/projects/FINAI/boards/67`
 - Metamodell wird pro Lauf immer lesend als aktueller lokaler Dump unter `data/metamodel/current_dump.json` behandelt
 - externe Ressourcen bleiben bis zur User-Freigabe read-only; Vorschlaege, Patches und Ticket-Drafts bleiben lokal

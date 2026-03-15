@@ -36,7 +36,7 @@ function formatTs(value?: string | null): string {
 const EMPTY_PROFILE: SourceProfile = {
   confluence_url: "",
   jira_url: "",
-  confluence_space_key: "FINAI",
+  confluence_space_key: "FP",
   jira_project_key: "FINAI",
   jira_usage: "ticket_creation_only",
   metamodel_dump_path: "",
@@ -68,7 +68,8 @@ export function RunsView({
     github_repo_url: defaults?.github_repo_url ?? "",
     local_repo_path: defaults?.local_repo_path ?? "",
     github_ref: defaults?.github_ref ?? "main",
-    confluence_space_keys: defaults?.confluence_space_keys ?? ["FINAI"],
+    confluence_space_keys: defaults?.confluence_space_keys ?? ["FP"],
+    confluence_page_ids: defaults?.confluence_page_ids ?? [],
     jira_project_keys: defaults?.jira_project_keys ?? ["FINAI"],
     include_metamodel: true,
     include_local_docs: defaults?.include_local_docs ?? true,
@@ -85,6 +86,7 @@ export function RunsView({
     await onCreateRun({
       ...form,
       confluence_space_keys: [sourceProfile.confluence_space_key],
+      confluence_page_ids: form.confluence_page_ids,
       jira_project_keys: [sourceProfile.jira_project_key],
       include_metamodel: true,
     });

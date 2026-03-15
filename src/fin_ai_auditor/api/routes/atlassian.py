@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
+
+logger = logging.getLogger(__name__)
 
 from fin_ai_auditor.api.dependencies import get_atlassian_oauth_service
 from fin_ai_auditor.domain.models import (
@@ -68,7 +72,7 @@ def oauth_callback(
 
 @router.get("/confluence/verify", response_model=ConfluenceVerificationResponse)
 def verify_confluence_access(
-    space_key: str = Query(default="FINAI", min_length=1),
+    space_key: str = Query(default="FP", min_length=1),
     max_pages: int = Query(default=3, ge=1, le=10),
     service: AtlassianOAuthService = Depends(get_atlassian_oauth_service),
 ) -> ConfluenceVerificationResponse:
@@ -77,7 +81,7 @@ def verify_confluence_access(
 
 @router.get("/confluence/pages")
 def list_confluence_pages(
-    space_key: str = Query(default="FINAI", min_length=1),
+    space_key: str = Query(default="FP", min_length=1),
     max_pages: int = Query(default=50, ge=1, le=200),
     service: AtlassianOAuthService = Depends(get_atlassian_oauth_service),
 ) -> dict:
@@ -93,26 +97,58 @@ def list_confluence_pages(
     settings = get_settings()
     access_token = service.get_valid_access_token()
     if not access_token:
-        raise HTTPException(status_code=401, detail="Kein Atlassian Access Token vorhanden. Bitte zuerst OAuth-Anmeldung durchfuehren.")
+        return {
+            "space_key": space_key.upper(),
+            "space_name": "",
+            "pages": [],
+            "auth_required": True,
+            "access_denied": False,
+            "error_message": "Kein Atlassian Access Token vorhanden. Bitte zuerst OAuth-Anmeldung durchfuehren.",
+        }
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
     }
-    with httpx.Client(timeout=20.0, headers=headers) as client:
-        access_ctx = _resolve_access_context(client=client, settings=settings, access_token=access_token)
-        space = _fetch_space(client=client, api_base_url=access_ctx.api_base_url, space_key=space_key.upper())
-        if space is None:
-            raise HTTPException(status_code=404, detail=f"Confluence Space '{space_key}' nicht gefunden.")
-        space_id = str(space.get("id") or "")
-        space_name = str(space.get("name") or space_key)
-        pages = _fetch_pages_for_space(client=client, api_base_url=access_ctx.api_base_url, space_id=space_id, limit=max_pages)
+    try:
+        with httpx.Client(timeout=20.0, headers=headers) as client:
+            access_ctx = _resolve_access_context(client=client, settings=settings, access_token=access_token)
+            space = _fetch_space(client=client, api_base_url=access_ctx.api_base_url, space_key=space_key.upper())
+            if space is None:
+                raise HTTPException(status_code=404, detail=f"Confluence Space '{space_key}' nicht gefunden.")
+            space_id = str(space.get("id") or "")
+            space_name = str(space.get("name") or space_key)
+            pages = _fetch_pages_for_space(client=client, api_base_url=access_ctx.api_base_url, space_id=space_id, limit=max_pages)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in {401, 403}:
+            logger.warning("Confluence access denied for site/space: %s", str(exc)[:200])
+            return {
+                "space_key": space_key.upper(),
+                "space_name": "",
+                "pages": [],
+                "auth_required": False,
+                "access_denied": True,
+                "error_message": (
+                    "Der aktuelle Atlassian-Kontext hat keinen Zugriff auf diesen Confluence-Space "
+                    "oder die angebundene Site."
+                ),
+            }
+        raise HTTPException(status_code=502, detail=f"Confluence API Fehler: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Confluence API Fehler: {exc}") from exc
     items = []
     for p in pages:
         page_id = str(p.get("id") or "")
         title = str(p.get("title") or "")
         parent_id = str(p.get("parentId") or "")
         items.append({"id": page_id, "title": title, "parentId": parent_id})
-    return {"space_key": space_key.upper(), "space_name": space_name, "pages": items}
+    return {
+        "space_key": space_key.upper(),
+        "space_name": space_name,
+        "pages": items,
+        "auth_required": False,
+        "access_denied": False,
+        "error_message": None,
+    }
 
 
 def _render_callback_page(

@@ -31,8 +31,10 @@ def test_bootstrap_returns_local_repo_defaults() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["defaults"]["local_repo_path"] == "/Users/martinwaelter/GitHub/FIN-AI"
+    assert body["defaults"]["confluence_space_keys"] == ["FP"]
+    assert body["defaults"]["confluence_page_ids"] == []
     assert body["defaults"]["jira_project_keys"] == ["FINAI"]
-    assert body["source_profile"]["confluence_url"] == "https://finius.atlassian.net/wiki/home"
+    assert body["source_profile"]["confluence_url"] == "https://fin-ai.atlassian.net/wiki/spaces/FP/overview"
     assert (
         body["source_profile"]["jira_url"]
         == "https://finius.atlassian.net/jira/software/projects/FINAI/boards/67"

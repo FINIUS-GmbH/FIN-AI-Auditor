@@ -2,7 +2,15 @@ import json
 from pathlib import Path
 
 from fin_ai_auditor.config import Settings
-from fin_ai_auditor.domain.models import AuditClaimEntry, AuditRun, AuditSourceSnapshot, AuditTarget, CreateAuditRunRequest, TruthLedgerEntry
+from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
+    AuditFinding,
+    AuditRun,
+    AuditSourceSnapshot,
+    AuditTarget,
+    CreateAuditRunRequest,
+    TruthLedgerEntry,
+)
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.connectors.github_connector import GitHubSnapshotConnector, GitHubSnapshotRequest
@@ -10,6 +18,7 @@ from fin_ai_auditor.services.connectors import github_connector
 from fin_ai_auditor.services.connectors import metamodel_connector
 from fin_ai_auditor.services.connectors.metamodel_connector import MetaModelConnector
 from fin_ai_auditor.services import pipeline_service as pipeline_service_module
+from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
 from fin_ai_auditor.services.pipeline_service import (
     AuditPipelineService,
@@ -171,6 +180,22 @@ def test_pipeline_service_executes_with_local_repo_only(monkeypatch, tmp_path: P
     assert len(completed.findings) >= 1
     assert len(completed.decision_packages) >= 1
     assert any("Confluence-Collector wurde uebersprungen" in entry.message for entry in completed.analysis_log)
+
+
+def test_pipeline_cache_build_content_hash_falls_back_to_document_body() -> None:
+    snapshot = AuditSourceSnapshot(source_type="github_file", source_id="src/service.py", content_hash=None)
+    document = CollectedDocument(
+        snapshot=snapshot,
+        source_type="github_file",
+        source_id="src/service.py",
+        title="service.py",
+        body="def load_statement():\n    return True\n",
+    )
+
+    content_hash = PipelineCacheService.build_content_hash([document], "github_file")
+
+    assert isinstance(content_hash, str)
+    assert len(content_hash) == 32
 
 
 def test_pipeline_service_can_inherit_truths_across_runs(monkeypatch, tmp_path: Path) -> None:
@@ -915,3 +940,90 @@ def test_pipeline_service_persists_semantic_graph_and_enriches_packages(monkeypa
     assert completed.decision_packages
     assert any(package.metadata.get("semantic_context") for package in completed.decision_packages)
     assert any("Semantikfokus:" in package.recommendation_summary for package in completed.decision_packages)
+
+
+def test_pipeline_service_rebuilds_finding_links_after_embedding_findings(monkeypatch, tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "src").mkdir()
+    (repo_path / "_docs").mkdir()
+    (repo_path / "src" / "statement_service.py").write_text(
+        "def persist_statement():\n    return save_statement()\n",
+        encoding="utf-8",
+    )
+    (repo_path / "_docs" / "statement.md").write_text(
+        "# Statement\nWrite flow is approval-gated and review-only.\n",
+        encoding="utf-8",
+    )
+    dump_path = tmp_path / "metamodel.json"
+    dump_path.write_text(
+        json.dumps(
+            {
+                "collected_at": "2026-03-14T00:00:00+00:00",
+                "source": "local_dump",
+                "rows": [{"phase_id": "001", "phase_name": "Scoping", "questions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=dump_path,
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    audit_service = AuditService(repository=repository, settings=settings)
+    pipeline = AuditPipelineService(audit_service=audit_service, settings=settings, allow_remote_llm=False)
+
+    first_run = audit_service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(repo_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    audit_service.claim_next_planned_run()
+    first_completed = pipeline.execute_run(run_id=first_run.run_id)
+    assert first_completed.findings
+
+    embedding_finding = AuditFinding(
+        severity="high",
+        category="contradiction",
+        title="Embedding-Widerspruch",
+        summary="Zusätzlicher semantischer Widerspruch fuer denselben Scope.",
+        recommendation="Scope gemeinsam pruefen.",
+        canonical_key=str(first_completed.findings[0].canonical_key),
+    )
+
+    monkeypatch.setattr(
+        "fin_ai_auditor.services.embedding_contradiction_detector.detect_cross_document_contradictions",
+        lambda **kwargs: [embedding_finding],
+    )
+
+    second_run = audit_service.create_run(
+        payload=CreateAuditRunRequest(
+            target=AuditTarget(
+                local_repo_path=str(repo_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    audit_service.claim_next_planned_run()
+    second_completed = pipeline.execute_run(run_id=second_run.run_id)
+
+    assert any(
+        embedding_finding.finding_id in {link.from_finding_id, link.to_finding_id}
+        for link in second_completed.finding_links
+    )

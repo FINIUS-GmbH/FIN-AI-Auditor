@@ -196,6 +196,74 @@ def test_confluence_connector_reuses_cached_pages_when_revision_is_unchanged(mon
     assert any("Confluence inkrementell" in note for note in bundle.analysis_notes)
 
 
+def test_confluence_connector_reads_only_explicitly_selected_page_ids(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        Settings,
+        "_collect_external_env_map",
+        lambda self: {"FINAI_ATLASSIAN_ACCESS_TOKEN": "token-123"},
+    )
+
+    class _SelectedPageClient(_FakeClient):
+        def get(
+            self,
+            url: str,
+            params: dict[str, object] | None = None,
+            headers: dict[str, str] | None = None,
+        ) -> _FakeResponse:
+            if url.endswith("/wiki/api/v2/pages/page-2"):
+                if params and params.get("body-format") == "atlas_doc_format":
+                    return _FakeResponse(
+                        {
+                            "id": "page-2",
+                            "title": "Selected Contract",
+                            "spaceId": "space-1",
+                            "version": {"number": 3},
+                            "body": {
+                                "atlas_doc_format": {
+                                    "value": {
+                                        "type": "doc",
+                                        "content": [
+                                            {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Selected"}]},
+                                            {"type": "paragraph", "content": [{"type": "text", "text": "Only this page should be read."}]},
+                                        ],
+                                    }
+                                }
+                            },
+                        }
+                    )
+                return _FakeResponse(
+                    {
+                        "id": "page-2",
+                        "title": "Selected Contract",
+                        "spaceId": "space-1",
+                        "version": {"number": 3},
+                        "body": {
+                            "storage": {
+                                "value": "<h1>Selected</h1><p>Only this page should be read.</p>"
+                            }
+                        },
+                    }
+                )
+            return super().get(url, params=params, headers=headers)
+
+    monkeypatch.setattr("fin_ai_auditor.services.connectors.confluence_connector.httpx.Client", _SelectedPageClient)
+    settings = Settings(database_path=tmp_path / "auditor.db", metamodel_dump_path=tmp_path / "metamodel.json")
+
+    connector = ConfluenceKnowledgeBaseConnector(settings=settings)
+    bundle = connector.collect_pages(
+        request=ConfluenceCollectionRequest(
+            space_keys=["FINAI"],
+            page_ids=["page-2"],
+            max_pages_per_space=5,
+        )
+    )
+
+    assert len(bundle.documents) == 1
+    assert bundle.documents[0].source_id == "page-2"
+    assert bundle.documents[0].title == "Selected Contract"
+    assert any("explizit ausgewaehlte Seiten" in note for note in bundle.analysis_notes)
+
+
 def test_confluence_connector_extracts_tables_macros_and_attachments(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         Settings,

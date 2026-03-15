@@ -118,6 +118,11 @@ def extract_claim_records(*, documents: list[CollectedDocument]) -> list[Extract
             continue
         if document.source_type in {"confluence_page", "local_doc"}:
             records.extend(_extract_document_claims(document=document))
+
+    # BSM domain-specific claims (cross-cutting, all source types)
+    from fin_ai_auditor.services.bsm_domain_claim_extractor import extract_bsm_domain_claims
+    records.extend(extract_bsm_domain_claims(documents=documents))
+
     return _deduplicate_claim_records(records=records)
 
 

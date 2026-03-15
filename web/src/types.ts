@@ -3,6 +3,7 @@ export type AuditTarget = {
   local_repo_path?: string | null;
   github_ref: string;
   confluence_space_keys: string[];
+  confluence_page_ids: string[];
   jira_project_keys: string[];
   include_metamodel: boolean;
   include_local_docs: boolean;
@@ -25,6 +26,7 @@ export type BootstrapDefaults = {
   local_repo_path: string;
   github_ref: string;
   confluence_space_keys: string[];
+  confluence_page_ids: string[];
   jira_project_keys: string[];
   include_metamodel: boolean;
   include_local_docs: boolean;

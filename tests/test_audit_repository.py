@@ -139,6 +139,7 @@ def test_service_enforces_fixed_sources_and_metamodel_policy(tmp_path: Path) -> 
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
                 confluence_space_keys=["OTHER"],
+                confluence_page_ids=["page-2", "page-2", " page-3 "],
                 jira_project_keys=["OTHER"],
                 include_metamodel=False,
                 include_local_docs=True,
@@ -147,6 +148,7 @@ def test_service_enforces_fixed_sources_and_metamodel_policy(tmp_path: Path) -> 
     )
 
     assert run.target.confluence_space_keys == ["FINAI"]
+    assert run.target.confluence_page_ids == ["page-2", "page-3"]
     assert run.target.jira_project_keys == ["FINAI"]
     assert run.target.include_metamodel is True
     assert run.progress.progress_pct == 0

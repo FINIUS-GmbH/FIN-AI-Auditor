@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import AuditFinding, RetrievalSegment, RetrievalSegmentClaimLink
-from fin_ai_auditor.llm import get_embeddings_from_llm_slot
+from fin_ai_auditor.llm import get_embeddings_from_llm_slot, select_embedding_slot
 from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimRecord
 
 
@@ -539,14 +539,7 @@ def _embed_in_batches(*, embedder: object, texts: list[str], batch_size: int) ->
 
 
 def _select_embedding_slot(*, settings: Settings) -> int | None:
-    configured = settings.get_configured_llm_slots()
-    if not configured:
-        return None
-    for slot in configured:
-        model_hint = f"{slot.model} {slot.deployment or ''}".casefold()
-        if "embedding" in model_hint:
-            return int(slot.slot)
-    return int(configured[0].slot)
+    return select_embedding_slot(settings=settings)
 
 
 def _link_claims_to_segments(

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   getAtlassianAuthStatus,
   listConfluencePages,
@@ -96,7 +96,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
   const [treeErr, setTreeErr] = useState("");
   const [selectedPages, setSelectedPages] = useState<Set<string>>(new Set());
   const [selectAll, setSelectAll] = useState(true);
-  const [spaceKey, setSpaceKey] = useState(sp.confluence_space_key || "FINAI");
+  const [spaceKey, setSpaceKey] = useState(sp.confluence_space_key || "FP");
   const [spaceName, setSpaceName] = useState("");
 
   const loadTree = useCallback(async (key: string) => {
@@ -104,6 +104,24 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
     setTreeErr("");
     try {
       const data = await listConfluencePages(key);
+      if (data.auth_required) {
+        setTreeData([]);
+        setSelectedPages(new Set());
+        setSelectAll(false);
+        setAuthErr(data.error_message ?? "Bitte zuerst Atlassian verbinden.");
+        setAuthStatus((current) => ({ ...current, token_valid: false, token_present: false }));
+        setStep("auth");
+        treeLoadedRef.current = false;
+        return;
+      }
+      if (data.access_denied) {
+        setTreeData([]);
+        setSelectedPages(new Set());
+        setSelectAll(false);
+        setSpaceName(data.space_name);
+        setTreeErr(data.error_message ?? "Der aktuelle Atlassian-Kontext hat keinen Zugriff auf diesen Space.");
+        return;
+      }
       const tree = buildTree(data.pages);
       setTreeData(tree);
       setSpaceName(data.space_name);
@@ -117,16 +135,21 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
     }
   }, []);
 
+  const treeLoadedRef = useRef(false);
   useEffect(() => {
-    if (step === "scope" && treeData.length === 0 && !treeBusy) {
+    if (step === "scope" && treeData.length === 0 && !treeBusy && !treeLoadedRef.current) {
+      treeLoadedRef.current = true;
       void loadTree(spaceKey);
     }
+    // Reset when going back to auth step
+    if (step === "auth") treeLoadedRef.current = false;
   }, [step, treeData.length, treeBusy, loadTree, spaceKey]);
 
   // Auth handlers
   async function doConnect() {
     setAuthBusy(true);
     setAuthErr("");
+    const hadValidToken = authStatus.token_valid;
     // Open popup BEFORE async call to avoid popup blocker
     const popupName = `auditor-atl-auth-modal-${Date.now()}`;
     let popup: Window | null = null;
@@ -150,6 +173,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
       const pollId = window.setInterval(async () => {
         try {
           if (popup && popup.closed) { window.clearInterval(pollId); void checkAuth(); return; }
+          if (hadValidToken) return;
           const status = await getAtlassianAuthStatus();
           if (status.token_valid) { window.clearInterval(pollId); setAuthStatus(status); setStep("scope"); try { popup?.close(); } catch { /* */ } }
         } catch { /* ignore */ }
@@ -199,6 +223,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
       local_repo_path: LOCAL_PATH,
       github_ref: GIT_REF,
       confluence_space_keys: [spaceKey],
+      confluence_page_ids: [...selectedPages].sort(),
       jira_project_keys: [sp.jira_project_key],
       include_metamodel: true,
       include_local_docs: true,
@@ -228,7 +253,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
               <div className="conn"><span className={`conn-dot ${authStatus.token_valid ? "ok" : "off"}`} />
                 {authStatus.token_valid ? "✓ Verbunden" : "✗ Nicht verbunden"}
               </div>
-              {authStatus.scope && <p className="text-xs text-muted" style={{ marginTop: 8 }}>Scopes: {authStatus.scope}</p>}
+              {authStatus.token_valid && authStatus.scope && <p className="text-xs text-muted" style={{ marginTop: 8 }}>Scopes: {authStatus.scope}</p>}
             </div>
             <div className="form-actions">
               <button type="button" className="btn btn-primary" onClick={() => void doConnect()} disabled={authBusy}>
@@ -248,15 +273,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
         {step === "scope" && (
           <div className="modal-body">
             <h2>Prüfbereich auswählen</h2>
-            <p>Wähle die Confluence-Seiten aus, die du prüfen möchtest.</p>
-            <div className="form-field" style={{ marginBottom: 12 }}>
-              <label>Space Key</label>
-              <div className="flex-row gap-sm">
-                <input value={spaceKey} onChange={e => setSpaceKey(e.target.value.toUpperCase())} style={{ width: 120 }} />
-                <button type="button" className="btn btn-outline btn-sm" onClick={() => { setTreeData([]); void loadTree(spaceKey); }} disabled={treeBusy}>Laden</button>
-                {spaceName && <span className="text-sm text-muted">{spaceName}</span>}
-              </div>
-            </div>
+            <p>Wähle die Confluence-Seiten aus Space <strong>{spaceKey}</strong> aus, die du prüfen möchtest.{spaceName && <> — <em>{spaceName}</em></>}</p>
 
             {treeErr && <div className="error-box">{treeErr}</div>}
 

@@ -170,6 +170,10 @@ class AtlassianOAuthService:
                 return value
         return None
 
+    def invalidate_token(self) -> None:
+        """Delete the stored OAuth token explicitly."""
+        self._repository.delete_atlassian_token()
+
     def get_valid_access_token_or_raise(self, *, required_scopes: set[str] | None = None) -> str:
         access_token = self.get_valid_access_token()
         if access_token is None:

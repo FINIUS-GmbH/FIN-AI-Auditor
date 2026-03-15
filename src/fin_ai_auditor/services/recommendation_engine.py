@@ -1,10 +1,29 @@
+"""LLM-powered recommendation engine with chunked processing and full context.
+
+Architecture:
+ - Context Enrichment: Full repo, metamodel, and confluence context in every call
+ - Chunked Processing: Findings split into chunks of 4 for reliable processing
+ - Progress Callbacks: Each chunk reports progress back to the pipeline
+ - Timeout Protection: 90s per chunk to prevent hanging
+ - Quality First: Every finding gets full context for max detection quality
+"""
 from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import AuditFinding, TruthLedgerEntry
 from fin_ai_auditor.llm import ChatMessage, GenerationConfig, LiteLLMClient
+
+logger = logging.getLogger(__name__)
+
+CHUNK_SIZE = 4  # Findings pro LLM-Call — klein genug fuer zuverlaessige Antworten
+LLM_CACHE_SCHEMA_VERSION = 2
 
 
 class _RecommendedFindingItem(BaseModel):
@@ -19,9 +38,10 @@ class _RecommendationBatch(BaseModel):
 
 
 class RecommendationEngine:
-    def __init__(self, *, settings: Settings, allow_remote_calls: bool) -> None:
+    def __init__(self, *, settings: Settings, allow_remote_calls: bool, db_path: str | None = None) -> None:
         self._settings = settings
         self._allow_remote_calls = allow_remote_calls
+        self._db_path = db_path
 
     @property
     def allow_remote_calls(self) -> bool:
@@ -33,29 +53,149 @@ class RecommendationEngine:
         findings: list[AuditFinding],
         truths: list[TruthLedgerEntry],
         retrieved_contexts: dict[str, list[str]] | None = None,
-    ) -> tuple[list[AuditFinding], list[str]]:
+        repo_context: str = "",
+        metamodel_context: str = "",
+        confluence_context: str = "",
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[AuditFinding], list[str], dict]:
+        """Returns (enriched_findings, notes, usage_report).
+
+        usage_report has shape:
+        {
+            "by_model": {"<model>": {"calls": int, "prompt_tokens": int, "completion_tokens": int, "total_cost_eur": float}},
+            "total_prompt_tokens": int, "total_completion_tokens": int,
+            "total_cost_usd": float, "total_cost_eur": float,
+        }
+        """
+        usage: dict = {"by_model": {}, "total_prompt_tokens": 0, "total_completion_tokens": 0,
+                       "total_cost_usd": 0.0, "total_cost_eur": 0.0}
         if not findings:
-            return findings, ["Keine Findings fuer die LLM-Empfehlung vorhanden."]
+            return findings, ["Keine Findings fuer die LLM-Empfehlung vorhanden."], usage
         if not self._allow_remote_calls:
-            return findings, ["LLM-Empfehlungen wurden im aktuellen Modus bewusst nicht remote ausgefuehrt."]
+            return findings, ["LLM-Empfehlungen wurden im aktuellen Modus bewusst nicht remote ausgefuehrt."], usage
 
         slot = _select_recommendation_slot(settings=self._settings)
         if slot is None:
-            return findings, ["Kein geeigneter LLM-Slot fuer Empfehlungsgenerierung konfiguriert."]
+            return findings, ["Kein geeigneter LLM-Slot fuer Empfehlungsgenerierung konfiguriert."], usage
 
         client = LiteLLMClient(settings=self._settings, default_slot=slot)
-        try:
-            batch = await client.structured_output(
-                messages=_build_recommendation_messages(
-                    findings=findings,
+
+        # Split into chunks for reliable processing
+        chunks = [findings[i:i + CHUNK_SIZE] for i in range(0, len(findings), CHUNK_SIZE)]
+        total_chunks = len(chunks)
+        all_enriched: list[AuditFinding] = []
+        all_notes: list[str] = []
+
+        logger.info(
+            "llm_enrichment_started",
+            extra={
+                "event_name": "llm_enrichment_started",
+                "event_payload": {"total_findings": len(findings), "total_chunks": total_chunks, "chunk_size": CHUNK_SIZE},
+            },
+        )
+
+        for chunk_idx, chunk in enumerate(chunks):
+            try:
+                enriched_chunk, chunk_notes, chunk_usage = await self._enrich_chunk(
+                    client=client,
+                    slot=slot,
+                    findings=chunk,
                     truths=truths,
                     retrieved_contexts=retrieved_contexts or {},
+                    repo_context=repo_context,
+                    metamodel_context=metamodel_context,
+                    confluence_context=confluence_context,
+                )
+                all_enriched.extend(enriched_chunk)
+                all_notes.extend(chunk_notes)
+                _merge_usage(usage, chunk_usage)
+            except Exception as exc:
+                logger.warning(
+                    "llm_chunk_failed",
+                    extra={"event_name": "llm_chunk_failed", "event_payload": {"chunk": chunk_idx + 1, "error": str(exc)}},
+                )
+                # Keep deterministic findings on failure
+                all_enriched.extend(chunk)
+                all_notes.append(
+                    f"LLM-Chunk {chunk_idx + 1}/{total_chunks} fehlgeschlagen: {exc}. "
+                    f"Deterministische Empfehlungen wurden beibehalten."
+                )
+
+            if progress_callback:
+                progress_callback(chunk_idx + 1, total_chunks)
+
+        if not all_notes:
+            all_notes = [
+                f"LLM-Empfehlungen wurden erfolgreich in {total_chunks} Chunks "
+                f"fuer {len(findings)} Findings generiert."
+            ]
+
+        return all_enriched, all_notes, usage
+
+    async def _enrich_chunk(
+        self,
+        *,
+        client: LiteLLMClient,
+        slot: int,
+        findings: list[AuditFinding],
+        truths: list[TruthLedgerEntry],
+        retrieved_contexts: dict[str, list[str]],
+        repo_context: str,
+        metamodel_context: str,
+        confluence_context: str,
+    ) -> tuple[list[AuditFinding], list[str], dict]:
+        """Enriches a single chunk of findings via LLM, with response caching.
+
+        Returns (enriched_findings, notes, usage_dict).
+        """
+        from pathlib import Path
+
+        chunk_usage: dict = {}
+
+        # Check LLM response cache
+        cache_key = _build_chunk_cache_key(
+            slot=slot,
+            findings=findings,
+            truths=truths,
+            retrieved_contexts=retrieved_contexts,
+            repo_context=repo_context,
+            metamodel_context=metamodel_context,
+            confluence_context=confluence_context,
+        )
+
+        batch: _RecommendationBatch | None = None
+
+        if self._db_path:
+            from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
+            cache_svc = PipelineCacheService(db_path=Path(self._db_path))
+            cached = cache_svc.get_llm_response(cache_key=cache_key)
+            if cached:
+                try:
+                    batch = _RecommendationBatch.model_validate_json(cached)
+                except Exception:
+                    batch = None
+
+        if batch is None:
+            batch, response = await client.structured_output_with_usage(
+                messages=_build_enriched_messages(
+                    findings=findings,
+                    truths=truths,
+                    retrieved_contexts=retrieved_contexts,
+                    repo_context=repo_context,
+                    metamodel_context=metamodel_context,
+                    confluence_context=confluence_context,
                 ),
                 schema=_RecommendationBatch,
-                config=GenerationConfig(slot=slot, max_tokens=2400, temperature=0.1),
+                config=GenerationConfig(slot=slot, max_tokens=2400, temperature=0.1, timeout_s=90.0),
             )
-        except Exception as exc:
-            return findings, [f"LLM-Empfehlungen sind fehlgeschlagen; es bleibt bei den deterministischen Empfehlungen. Grund: {exc}"]
+            # Track usage from this call
+            chunk_usage = _extract_usage_from_response(response)
+
+            # Cache the response
+            if self._db_path:
+                from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
+                cache_svc = PipelineCacheService(db_path=Path(self._db_path))
+                cache_svc.set_llm_response(cache_key=cache_key, response_json=batch.model_dump_json())
 
         recommendations = {item.finding_key: item for item in batch.items}
         enriched: list[AuditFinding] = []
@@ -77,10 +217,7 @@ class RecommendationEngine:
                     }
                 )
             )
-        notes = [*batch.global_delta_notes]
-        if not notes:
-            notes = ["LLM-Empfehlungen wurden erfolgreich aus den aktuellen Findings und Wahrheiten abgeleitet."]
-        return enriched, notes
+        return enriched, list(batch.global_delta_notes), chunk_usage
 
 
 def _select_recommendation_slot(*, settings: Settings) -> int | None:
@@ -92,16 +229,87 @@ def _select_recommendation_slot(*, settings: Settings) -> int | None:
     return None
 
 
-def _build_recommendation_messages(
+USD_TO_EUR = 0.92  # Approximate conversion rate
+
+
+def _extract_usage_from_response(response: object) -> dict:
+    """Extract token usage and costs from an LLM response."""
+    usage = getattr(response, "usage", {}) or {}
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    elif not isinstance(usage, dict):
+        usage = {}
+    model = getattr(response, "model", "unknown") or "unknown"
+    pt = int(usage.get("prompt_tokens") or 0)
+    ct = int(usage.get("completion_tokens") or 0)
+
+    # Try litellm cost calculation
+    cost_usd = 0.0
+    try:
+        from litellm import cost_per_token
+        input_cpt, output_cpt = cost_per_token(model=model, prompt_tokens=1, completion_tokens=1)
+        cost_usd = float(input_cpt) * pt + float(output_cpt) * ct
+    except Exception:
+        try:
+            bare = model.split("/", 1)[-1] if "/" in model else model
+            from litellm import cost_per_token
+            input_cpt, output_cpt = cost_per_token(model=bare, prompt_tokens=1, completion_tokens=1)
+            cost_usd = float(input_cpt) * pt + float(output_cpt) * ct
+        except Exception:
+            pass
+
+    return {
+        "model": model,
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "cost_usd": cost_usd,
+        "cost_eur": cost_usd * USD_TO_EUR,
+    }
+
+
+def _merge_usage(total: dict, chunk: dict) -> None:
+    """Merge chunk usage into the total usage report."""
+    if not chunk:
+        return
+    model = chunk.get("model", "unknown")
+    pt = chunk.get("prompt_tokens", 0)
+    ct = chunk.get("completion_tokens", 0)
+    cost_usd = chunk.get("cost_usd", 0.0)
+    cost_eur = chunk.get("cost_eur", 0.0)
+
+    total["total_prompt_tokens"] += pt
+    total["total_completion_tokens"] += ct
+    total["total_cost_usd"] += cost_usd
+    total["total_cost_eur"] += cost_eur
+
+    by_model = total.setdefault("by_model", {})
+    prev = by_model.get(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                 "cost_usd": 0.0, "cost_eur": 0.0})
+    by_model[model] = {
+        "calls": prev["calls"] + 1,
+        "prompt_tokens": prev["prompt_tokens"] + pt,
+        "completion_tokens": prev["completion_tokens"] + ct,
+        "cost_usd": prev["cost_usd"] + cost_usd,
+        "cost_eur": prev["cost_eur"] + cost_eur,
+    }
+
+
+def _build_enriched_messages(
     *,
     findings: list[AuditFinding],
     truths: list[TruthLedgerEntry],
     retrieved_contexts: dict[str, list[str]],
+    repo_context: str,
+    metamodel_context: str,
+    confluence_context: str,
 ) -> list[ChatMessage]:
     active_truths = [truth for truth in truths if truth.truth_status == "active"][:8]
     finding_lines = []
-    for finding in findings[:8]:
-        evidence = "; ".join(location.position.anchor_value if location.position else location.title for location in finding.locations[:2])
+    for finding in findings:
+        evidence = "; ".join(
+            location.position.anchor_value if location.position else location.title
+            for location in finding.locations[:3]
+        )
         retrieval_context = " || ".join(retrieved_contexts.get(_finding_key(finding), [])[:2])
         semantic_context = " || ".join(_string_list(finding.metadata.get("semantic_context"))[:4])
         semantic_relations = " || ".join(_string_list(finding.metadata.get("semantic_relation_summaries"))[:4])
@@ -119,10 +327,27 @@ def _build_recommendation_messages(
         f"- key={truth.canonical_key} | subject={truth.subject_key} | value={truth.normalized_value}"
         for truth in active_truths
     ]
+
+    # Build context sections — only include non-empty
+    context_sections: list[str] = []
+    if repo_context and repo_context != "Keine Code-Quellen verfuegbar.":
+        context_sections.append(f"KONTEXT — FIN-AI Repository:\n{repo_context}")
+    if metamodel_context and metamodel_context != "Kein Metamodell verfuegbar.":
+        context_sections.append(f"KONTEXT — BSM Metamodell:\n{metamodel_context}")
+    if confluence_context and confluence_context != "Keine Confluence-Seiten verfuegbar.":
+        context_sections.append(f"KONTEXT — Confluence-Dokumentation:\n{confluence_context}")
+
+    context_block = "\n\n---\n\n".join(context_sections) + "\n\n---\n\n" if context_sections else ""
+
     user_prompt = (
+        f"{context_block}"
         "Leite fuer jedes Finding eine knappe, pruefbare Empfehlung und eine semantische Delta-Notiz ab. "
         "Die Delta-Notiz soll sagen, welche zuvor gespeicherten Wahrheiten, Dokumente oder Code-Cluster bei einer "
         "Neugenerierung besonders erneut bewertet werden muessen.\n\n"
+        "Nutze den Kontext ueber die Repository-Struktur, das Metamodell und die Confluence-Seiten, "
+        "um die Findings in ihrem fachlichen Zusammenhang zu bewerten. "
+        "Identifiziere insbesondere Widersprueche zwischen Doku und Code, fehlende Definitionen, "
+        "und Abweichungen vom Metamodell.\n\n"
         "Findings:\n"
         f"{chr(10).join(finding_lines)}\n\n"
         "Aktive Wahrheiten:\n"
@@ -132,7 +357,59 @@ def _build_recommendation_messages(
         ChatMessage(
             role="system",
             content=(
-                "Du erzeugst fuer einen Governance-Auditor nur konkrete, pruefbare Handlungsempfehlungen. "
+                "Du bist ein Governance-Auditor fuer das FIN-AI Softwaresystem.\n\n"
+                "=== Was ist FIN-AI? ===\n"
+                "FIN-AI ist eine Enterprise-Plattform fuer KI-gestuetzte Geschaeftsanalyse im regulierten "
+                "Finanzumfeld. Der Kern ist das BSM-Cockpit (Business Service Management), das fachliche "
+                "Fragestellungen (bsmQuestion) strukturiert bearbeitet und in pruefbare Evidenzartefakte "
+                "(Statement, BSM_Element) ueberfuehrt.\n\n"
+                "Zentrale Domaenenkonzepte:\n"
+                "- Evidenzkette: bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element\n"
+                "- Metamodell: Phasen, Fragen, Metaclasses, Relationen — definiert die fachliche Struktur\n"
+                "- Graph-Datenbank: Labels, Properties, Kanten und Knoten in der Metamodell- und Kunden-DB "
+                "sind die primaeren Quellen fuer Widersprueche, fehlende Elemente und Inkonsistenzen\n"
+                "- HITL (Human-in-the-Loop): Review/Accept/Reject-Zyklen fuer Statements und BSM_Elements\n"
+                "- Run-Modell: FINAI_AnalysisRun -> FINAI_PhaseRun -> FINAI_ChunkPhaseRun mit IN_RUN-Traceability\n"
+                "- Status-Lifecycle: STAGED/PROPOSED -> VALIDATED/ACTIVE -> REJECTED/HISTORIC\n"
+                "- Scope-Steuerung: project_id + phase_id + run_id als Artefaktkontext\n"
+                "- Pipeline: PlantUML-definierte Verarbeitungsketten (AS-IS vs. v2 Zielbild)\n"
+                "- Code = Dokument: Python- und TypeScript-Implementierungen sind GLEICHWERTIGE Quellen "
+                "wie Dokumentation — fehlende, falsche oder widerspruechliche Elemente im Code "
+                "sind genauso relevant wie in der Doku.\n\n"
+                "=== Deine Aufgabe ===\n"
+                "Analysiere Widersprueche, Luecken und Abweichungen zwischen:\n"
+                "1. Confluence-Dokumentation (Zielbilder, Scope-Matrizen, Run-SSOT-Dokumente)\n"
+                "2. Code-Implementierung (Python, TypeScript, PlantUML-Pipelines)\n"
+                "3. BSM-Metamodell (Neo4j, metamodel_export.json)\n\n"
+                "Achte besonders auf:\n"
+                "- Status-Kanon-Widersprueche (verschiedene Dokumente definieren verschiedene erlaubte Status-Werte)\n"
+                "- Entity-Rollen-Konflikte (z.B. summarisedAnswer: eigenstaendig vs. entfaellt)\n"
+                "- HITL-Widersprueche (Statement-Review: zentral vs. ausgeschlossen im MVP)\n"
+                "- Run-Modell-Inkonsistenzen (hierarchisch 3-stufig vs. run_id-zentriert)\n"
+                "- Evidenzketten-Abweichungen (unit-zentriert vs. summary-zentriert)\n"
+                "- Implementierungsdrift zwischen AS-IS Pipeline und v2 Zielbild\n"
+                "- Fehlende Definitionen im Metamodell die in der Doku referenziert werden\n"
+                "- Phasen/Scope-Vermischung (UI-Phasen vs. fachliche Phasen)\n\n"
+                "=== Keine Quelle ist Wahrheit ===\n"
+                "WICHTIG: Kein Dokument, kein Code und kein Metamodell darf als Ground Truth behandelt werden. "
+                "Jede Quelle — Confluence, PlantUML-Pipeline, Architektur-Docs, Code, metamodel_export.json — "
+                "kann selbst fehlerhaft, veraltet oder intern widerspruechlich sein. "
+                "Deine Aufgabe ist es, ALLE Quellen gleichberechtigt gegeneinander zu pruefen. "
+                "Wenn zwei Quellen sich widersprechen, benenne beide Seiten neutral und empfehle eine Klaerung, "
+                "ohne eine Seite als 'richtig' vorauszusetzen. "
+                "Auch innerhalb eines einzelnen Dokuments koennen Widersprueche existieren.\n\n"
+                "=== Haeufigkeit = Konfidenz ===\n"
+                "Eine Aussage wird wahrscheinlicher, je haeufiger sie in verschiedenen Quellen erwaehnt "
+                "oder im Code tatsaechlich umgesetzt wurde. "
+                "Wenn 5 Quellen sagen 'Status startet als PROPOSED' und 1 Quelle sagt 'STAGED', "
+                "dann ist PROPOSED die wahrscheinlichere Wahrheit und STAGED die vermutlich veraltete Angabe. "
+                "Benenne in der Empfehlung die Mehrheitsposition und markiere die Minderheitsposition "
+                "als wahrscheinlich klaerungsbeduerftigen Ausreisser. "
+                "Code-Implementierung zaehlt dabei doppelt — was tatsaechlich gebaut wurde, "
+                "hat mehr Gewicht als was nur dokumentiert ist.\n\n"
+                "Qualitaet geht vor Geschwindigkeit — jeder Fehler, jede Luecke und jeder Widerspruch "
+                "muss gefunden werden. "
+                "Erzeuge nur konkrete, pruefbare Handlungsempfehlungen. "
                 "Kein Marketing, keine Allgemeinplaetze, keine unpruefbaren Aussagen. "
                 "Bevorzuge Aussagen ueber Dokumentaenderungen, Codeanpassungen, Delta-Neubewertung, Traceability "
                 "und explizite Objekt-/Prozessbeziehungen. Nutze Heading-Hierarchien und semantische Relationen "
@@ -148,6 +425,72 @@ def _build_recommendation_messages(
 
 def _finding_key(finding: AuditFinding) -> str:
     return str(finding.canonical_key or finding.finding_id)
+
+
+def _build_chunk_cache_key(
+    *,
+    slot: int,
+    findings: list[AuditFinding],
+    truths: list[TruthLedgerEntry],
+    retrieved_contexts: dict[str, list[str]],
+    repo_context: str,
+    metamodel_context: str,
+    confluence_context: str,
+) -> str:
+    active_truths = [
+        {
+            "canonical_key": truth.canonical_key,
+            "subject_key": truth.subject_key,
+            "normalized_value": truth.normalized_value,
+        }
+        for truth in truths
+        if truth.truth_status == "active"
+    ][:8]
+    payload = {
+        "schema_version": LLM_CACHE_SCHEMA_VERSION,
+        "slot": slot,
+        "findings": [
+            _finding_cache_payload(
+                finding=finding,
+                retrieval_contexts=retrieved_contexts.get(_finding_key(finding), []),
+            )
+            for finding in findings
+        ],
+        "truths": active_truths,
+        "repo_context": repo_context,
+        "metamodel_context": metamodel_context,
+        "confluence_context": confluence_context,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:32]
+
+
+def _finding_cache_payload(*, finding: AuditFinding, retrieval_contexts: list[str]) -> dict[str, object]:
+    return {
+        "key": _finding_key(finding),
+        "title": finding.title,
+        "category": finding.category,
+        "severity": finding.severity,
+        "summary": finding.summary,
+        "recommendation": finding.recommendation,
+        "locations": [
+            {
+                "source_type": location.source_type,
+                "source_id": location.source_id,
+                "title": location.title,
+                "path_hint": location.path_hint,
+                "url": location.url,
+                "anchor_kind": location.position.anchor_kind if location.position else None,
+                "anchor_value": location.position.anchor_value if location.position else None,
+            }
+            for location in finding.locations[:3]
+        ],
+        "retrieval_contexts": [str(item).strip() for item in retrieval_contexts[:2] if str(item).strip()],
+        "semantic_context": _string_list(finding.metadata.get("semantic_context"))[:4],
+        "semantic_relations": _string_list(finding.metadata.get("semantic_relation_summaries"))[:4],
+        "semantic_contract_paths": _string_list(finding.metadata.get("semantic_contract_paths"))[:3],
+        "section_paths": _string_list(finding.metadata.get("semantic_section_paths"))[:3],
+    }
 
 
 def _string_list(value: object) -> list[str]:

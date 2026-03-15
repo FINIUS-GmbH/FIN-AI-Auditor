@@ -205,6 +205,10 @@ class AuditService:
     def get_run(self, *, run_id: str) -> AuditRun | None:
         return self._repository.get_run(run_id=run_id)
 
+    def reset_all_runs(self) -> None:
+        """Delete all audit runs from the database. Keeps OAuth tokens."""
+        self._repository.reset_all_runs()
+
     def get_latest_completed_run(self, *, exclude_run_id: str | None = None) -> AuditRun | None:
         completed_runs = [
             run

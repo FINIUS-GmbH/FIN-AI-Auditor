@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def connect_database(*, db_path: Path) -> sqlite3.Connection:
@@ -405,6 +405,8 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             _ensure_runtime_observability_tables(connection=connection)
         if current < 12:
             _ensure_confluence_analysis_cache_tables(connection=connection)
+        if current < 13:
+            _ensure_pipeline_cache_table(connection=connection)
         connection.execute(
             """
             INSERT INTO schema_meta(key, value)
@@ -543,6 +545,23 @@ def _ensure_confluence_analysis_cache_tables(*, connection: sqlite3.Connection) 
         );
         CREATE INDEX IF NOT EXISTS idx_confluence_page_registry_space
             ON confluence_page_registry(space_key, latest_cached_at DESC);
+        """
+    )
+
+
+def _ensure_pipeline_cache_table(*, connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pipeline_cache (
+            cache_key TEXT PRIMARY KEY,
+            cache_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            content_hash TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pipeline_cache_type
+            ON pipeline_cache(cache_type, created_at DESC);
         """
     )
 

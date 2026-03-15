@@ -103,9 +103,9 @@ class Settings(BaseSettings):
     default_finai_local_repo_path: Path = Field(default=Path("/Users/martinwaelter/GitHub/FIN-AI"))
     default_finai_github_repo_url: str = "https://github.com/FINIUS-GmbH/FIN-AI.git"
     default_finai_github_ref: str = "main"
-    fixed_confluence_space_key: str = "FINAI"
+    fixed_confluence_space_key: str = "FP"
     fixed_jira_project_key: str = "FINAI"
-    confluence_home_url: str = "https://finius.atlassian.net/wiki/home"
+    confluence_home_url: str = "https://fin-ai.atlassian.net/wiki/spaces/FP/overview"
     jira_board_url: str = "https://finius.atlassian.net/jira/software/projects/FINAI/boards/67"
     external_resource_access_mode: str = "read_only"
     external_write_requires_user_decision: bool = True

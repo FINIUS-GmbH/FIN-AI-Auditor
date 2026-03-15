@@ -453,11 +453,14 @@ def _build_finding(
             )
         }
     )
+    # Build concrete evidence quotes grouped by source type
+    evidence_quotes = _build_evidence_quotes(records)
+    enriched_summary = f"{summary}\n\n{evidence_quotes}" if evidence_quotes else summary
     return AuditFinding(
         severity=severity,
         category=category,
         title=title,
-        summary=summary,
+        summary=enriched_summary,
         recommendation=recommendation,
         canonical_key=subject_key,
         locations=[record.evidence.location for record in records if record.evidence.location is not None],
@@ -469,6 +472,33 @@ def _build_finding(
             "semantic_signatures": semantic_signatures,
         },
     )
+
+
+_SOURCE_LABEL: dict[str, str] = {
+    "github_file": "Code",
+    "confluence_page": "Confluence",
+    "local_doc": "Lokales Dokument",
+    "metamodel": "Metamodell",
+}
+
+
+def _build_evidence_quotes(records: list[ExtractedClaimRecord]) -> str:
+    """Build a concise evidence summary quoting what each source actually says."""
+    lines: list[str] = []
+    for record in records[:4]:
+        src_label = _SOURCE_LABEL.get(record.claim.source_type, record.claim.source_type)
+        matched = str(record.evidence.matched_text or "").strip()
+        title = record.evidence.location.title if record.evidence.location else ""
+        path = record.evidence.location.path_hint or "" if record.evidence.location else ""
+        loc_hint = path or title
+        # Truncate long quotes
+        if len(matched) > 120:
+            matched = matched[:117] + "..."
+        if matched and loc_hint:
+            lines.append(f"{src_label} ({loc_hint}): \u00ab{matched}\u00bb")
+        elif matched:
+            lines.append(f"{src_label}: \u00ab{matched}\u00bb")
+    return "\n".join(lines)
 
 
 def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:

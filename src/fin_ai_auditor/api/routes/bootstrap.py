@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from fin_ai_auditor.api.dependencies import get_atlassian_oauth_service, get_repository
 from fin_ai_auditor.config import get_settings
 from fin_ai_auditor.domain.models import utc_now_iso
+from fin_ai_auditor.llm import is_embedding_slot_configured
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 
@@ -47,6 +48,7 @@ def bootstrap(
             "local_repo_path": str(settings.default_finai_local_repo_path),
             "github_ref": settings.default_finai_github_ref,
             "confluence_space_keys": [settings.fixed_confluence_space_key],
+            "confluence_page_ids": [],
             "jira_project_keys": [settings.fixed_jira_project_key],
             "include_metamodel": True,
             "include_local_docs": True,
@@ -96,7 +98,7 @@ def bootstrap(
                     "model": str(sc.model or ""),
                     "deployment": str(sc.deployment or ""),
                     "provider": str(sc.provider or ""),
-                    "purpose": "embedding" if "embedding" in f"{sc.model} {sc.deployment}".lower() else "chat",
+                    "purpose": "embedding" if is_embedding_slot_configured(settings=settings, llm_slot=int(sc.slot)) else "chat",
                 }
                 for sc in configured_llm_slots
             ],

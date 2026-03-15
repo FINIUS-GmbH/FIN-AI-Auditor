@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ConfluenceCollectionRequest:
     space_keys: list[str]
+    page_ids: list[str] = field(default_factory=list)
     max_pages_per_space: int = 25
 
 
@@ -150,26 +151,42 @@ class ConfluenceKnowledgeBaseConnector:
                 if space is None:
                     notes.append(f"Confluence Space {normalized_space_key} konnte nicht gelesen werden.")
                     continue
-                try:
-                    page_rows = _fetch_pages_for_space(
+                selected_page_ids = _normalized_page_ids(request.page_ids)
+                if selected_page_ids:
+                    page_rows = _collect_selected_page_rows(
                         client=client,
                         api_base_url=access_context.api_base_url,
-                        space_id=str(space.get("id") or ""),
-                        limit=int(request.max_pages_per_space),
+                        selected_page_ids=selected_page_ids,
+                        space_key=normalized_space_key,
+                        notes=notes,
                     )
-                except httpx.HTTPError as exc:
                     notes.append(
-                        _describe_http_or_value_error(
-                            prefix=f"Confluence Seitenliste fuer Space {normalized_space_key}",
-                            exc=exc,
-                        )
+                        f"Confluence Space {normalized_space_key}: {len(page_rows)} explizit ausgewaehlte Seiten wurden read-only geladen."
                     )
-                    continue
-                notes.append(f"Confluence Space {normalized_space_key}: {len(page_rows)} Seiten wurden read-only geladen.")
+                else:
+                    try:
+                        page_rows = _fetch_pages_for_space(
+                            client=client,
+                            api_base_url=access_context.api_base_url,
+                            space_id=str(space.get("id") or ""),
+                            limit=int(request.max_pages_per_space),
+                        )
+                    except httpx.HTTPError as exc:
+                        notes.append(
+                            _describe_http_or_value_error(
+                                prefix=f"Confluence Seitenliste fuer Space {normalized_space_key}",
+                                exc=exc,
+                            )
+                        )
+                        continue
+                    notes.append(
+                        f"Confluence Space {normalized_space_key}: {len(page_rows)} Seiten wurden read-only geladen."
+                    )
                 for page in page_rows:
                     page_id = str(page.get("id") or "").strip()
                     if not page_id:
                         continue
+                    prefetched_detail = page if isinstance(page.get("body"), dict) else None
                     listed_revision = str((page.get("version") or {}).get("number") or "").strip()
                     previous_snapshot = previous_snapshot_map.get(page_id)
                     if (
@@ -228,20 +245,22 @@ class ConfluenceKnowledgeBaseConnector:
                             )
                             reused_documents += 1
                             continue
-                    try:
-                        detail = _fetch_page_detail(
-                            client=client,
-                            api_base_url=access_context.api_base_url,
-                            page_id=page_id,
-                        )
-                    except httpx.HTTPError as exc:
-                        notes.append(
-                            _describe_http_or_value_error(
-                                prefix=f"Confluence Seite {page_id}",
-                                exc=exc,
+                    detail = dict(prefetched_detail) if prefetched_detail is not None else None
+                    if detail is None:
+                        try:
+                            detail = _fetch_page_detail(
+                                client=client,
+                                api_base_url=access_context.api_base_url,
+                                page_id=page_id,
                             )
-                        )
-                        continue
+                        except httpx.HTTPError as exc:
+                            notes.append(
+                                _describe_http_or_value_error(
+                                    prefix=f"Confluence Seite {page_id}",
+                                    exc=exc,
+                                )
+                            )
+                            continue
                     adf_detail: dict[str, Any] | None = None
                     try:
                         adf_detail = _fetch_page_detail(
@@ -491,7 +510,10 @@ def _discover_confluence_resource(
             continue
         scopes = [str(scope or "").strip().casefold() for scope in item.get("scopes") or [] if str(scope or "").strip()]
         has_confluence_scope = any(
-            scope in {"read:page:confluence", "read:content-details:confluence", "read:confluence-content.all"}
+            scope in {
+                "read:page:confluence", "read:space:confluence",
+                "read:content-details:confluence", "read:confluence-content.all",
+            }
             for scope in scopes
         )
         if not has_confluence_scope:
@@ -514,16 +536,98 @@ def _fetch_space(*, client: httpx.Client, api_base_url: str, space_key: str) -> 
 
 
 def _fetch_pages_for_space(*, client: httpx.Client, api_base_url: str, space_id: str, limit: int) -> list[dict[str, Any]]:
-    response = _request_with_retry(
-        client=client,
-        method="GET",
-        url=f"{api_base_url}/wiki/api/v2/spaces/{space_id}/pages",
-        params={"space-id": space_id, "status": "current", "limit": max(1, limit)},
-    )
-    response.raise_for_status()
-    payload = response.json()
-    results = payload.get("results") if isinstance(payload, dict) else []
-    return [dict(row) for row in results if isinstance(row, dict)]
+    max_items = max(1, int(limit))
+    request_limit = min(max_items, 100)
+    next_url = f"{api_base_url}/wiki/api/v2/spaces/{space_id}/pages"
+    next_params: dict[str, object] | None = {"space-id": space_id, "status": "current", "limit": request_limit}
+    rows: list[dict[str, Any]] = []
+    while next_url and len(rows) < max_items:
+        response = _request_with_retry(
+            client=client,
+            method="GET",
+            url=next_url,
+            params=next_params,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results") if isinstance(payload, dict) else []
+        rows.extend(dict(row) for row in results if isinstance(row, dict))
+        next_url = _next_page_link(payload=payload, api_base_url=api_base_url)
+        next_params = None
+        if not results:
+            break
+    return rows[:max_items]
+
+
+def _collect_selected_page_rows(
+    *,
+    client: httpx.Client,
+    api_base_url: str,
+    selected_page_ids: list[str],
+    space_key: str,
+    notes: list[str],
+) -> list[dict[str, Any]]:
+    page_rows: list[dict[str, Any]] = []
+    for page_id in selected_page_ids:
+        try:
+            detail = _fetch_page_detail(
+                client=client,
+                api_base_url=api_base_url,
+                page_id=page_id,
+            )
+        except httpx.HTTPError as exc:
+            notes.append(
+                _describe_http_or_value_error(
+                    prefix=f"Confluence Seite {page_id}",
+                    exc=exc,
+                )
+            )
+            continue
+        if detail is None:
+            notes.append(f"Confluence Seite {page_id} konnte nicht gelesen werden.")
+            continue
+        detail_space_key = str(((detail.get("space") or {}) if isinstance(detail.get("space"), dict) else {}).get("key") or "").strip()
+        if detail_space_key and detail_space_key != space_key:
+            notes.append(
+                f"Confluence Seite {page_id} wurde ignoriert, weil sie nicht zum erwarteten Space {space_key} gehoert."
+            )
+            continue
+        page_rows.append(detail)
+    return page_rows
+
+
+def _normalized_page_ids(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        page_id = str(raw_value or "").strip()
+        if not page_id or page_id in seen:
+            continue
+        normalized.append(page_id)
+        seen.add(page_id)
+    return normalized
+
+
+def _next_page_link(*, payload: object, api_base_url: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    links = payload.get("_links")
+    if isinstance(links, dict):
+        next_candidate = str(links.get("next") or "").strip()
+        if next_candidate:
+            if next_candidate.startswith("http://") or next_candidate.startswith("https://"):
+                return next_candidate
+            if next_candidate.startswith("/"):
+                return f"{api_base_url.rstrip('/')}{next_candidate}"
+            return f"{api_base_url.rstrip('/')}/{next_candidate.lstrip('/')}"
+    next_candidate = str(payload.get("next") or "").strip()
+    if not next_candidate:
+        return None
+    if next_candidate.startswith("http://") or next_candidate.startswith("https://"):
+        return next_candidate
+    if next_candidate.startswith("/"):
+        return f"{api_base_url.rstrip('/')}{next_candidate}"
+    return f"{api_base_url.rstrip('/')}/{next_candidate.lstrip('/')}"
 
 
 def _fetch_page_detail(

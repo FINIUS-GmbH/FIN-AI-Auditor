@@ -78,6 +78,7 @@ class AuditPipelineService:
         self._recommendation_engine = RecommendationEngine(
             settings=settings,
             allow_remote_calls=allow_remote_llm,
+            db_path=str(audit_service.repository._db_path),
         )
         self._observability = RuntimeObservabilityService(repository=audit_service.repository)
 
@@ -160,13 +161,24 @@ class AuditPipelineService:
     def _run_pipeline(self, *, run: AuditRun, previous_run: AuditRun | None, worker_id: str | None) -> PipelineAnalysisResult:
         notes: list[str] = []
 
-        metamodel_bundle = self._collect_metamodel(run=run, notes=notes, worker_id=worker_id) if run.target.include_metamodel else CollectionBundle([], [])
-        repo_bundle = self._collect_repo(run=run, previous_run=previous_run, notes=notes, worker_id=worker_id)
+        # Collect all sources in parallel — they are independent I/O-bound operations
+        from concurrent.futures import ThreadPoolExecutor, Future
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="collect") as pool:
+            metamodel_future: Future[CollectionBundle] | None = None
+            if run.target.include_metamodel:
+                metamodel_future = pool.submit(self._collect_metamodel, run=run, notes=[], worker_id=worker_id)
+            repo_future = pool.submit(self._collect_repo, run=run, previous_run=previous_run, notes=[], worker_id=worker_id)
+            confluence_future = pool.submit(self._collect_confluence, run=run, previous_run=previous_run, notes=[], worker_id=worker_id)
+
+        metamodel_bundle = metamodel_future.result() if metamodel_future is not None else CollectionBundle([], [])
+        repo_bundle = repo_future.result()
+        confluence_bundle = confluence_future.result()
         code_bundle = _select_bundle_documents(bundle=repo_bundle, source_types={"github_file"})
         local_docs_bundle = _select_bundle_documents(bundle=repo_bundle, source_types={"local_doc"})
-        confluence_bundle = self._collect_confluence(run=run, previous_run=previous_run, notes=notes, worker_id=worker_id)
 
         all_bundles = [metamodel_bundle, code_bundle, local_docs_bundle, confluence_bundle]
+        notes.extend(n for bundle in all_bundles for n in bundle.analysis_notes)
         source_snapshots = [snapshot for bundle in all_bundles for snapshot in bundle.snapshots]
         documents = [document for bundle in all_bundles for document in bundle.documents]
         self._audit_service.cache_documents(documents=documents)
@@ -262,6 +274,25 @@ class AuditPipelineService:
             truths=truths,
             impacted_scope_keys=impacted_scope_keys,
         )
+
+        # Embedding-based cross-document contradiction detection
+        from fin_ai_auditor.services.embedding_contradiction_detector import detect_cross_document_contradictions
+        embedding_findings = detect_cross_document_contradictions(
+            settings=self._settings,
+            claim_records=claim_records,
+            allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
+        )
+        if embedding_findings:
+            findings.extend(embedding_findings)
+            notes.append(f"Embedding-Widerspruchserkennung: {len(embedding_findings)} semantische Widersprueche gefunden.")
+
+        # Deterministic BSM domain contradiction detection
+        from fin_ai_auditor.services.bsm_domain_contradiction_detector import detect_bsm_domain_contradictions
+        bsm_findings = detect_bsm_domain_contradictions(claim_records=claim_records)
+        if bsm_findings:
+            findings.extend(bsm_findings)
+            notes.append(f"BSM-Domain-Widerspruchserkennung: {len(bsm_findings)} strukturelle Widersprueche gefunden.")
+
         findings = attach_semantic_context_to_findings(
             findings=findings,
             claims=claims,
@@ -282,16 +313,70 @@ class AuditPipelineService:
             progress_pct=89,
             current_activity="LLM-Empfehlungen verdichten die Evidenz in kurze, pruefbare Handlungsoptionen.",
             step_status="running",
-            detail="Deterministische Findings werden optional mit der portierten LiteLLM-Schicht nachgeschaerft.",
+            detail="Chunked LLM-Anreicherung mit vollem Repo-, Metamodell- und Confluence-Kontext.",
             worker_id=worker_id,
         )
-        findings, llm_notes = asyncio.run(
+
+        # Build context layers for the LLM — with caching
+        from fin_ai_auditor.services.context_builder import AuditContextBuilder
+        from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
+
+        ctx_builder = AuditContextBuilder()
+        cache = PipelineCacheService(db_path=self._audit_service.repository._db_path)
+
+        # Repo summary — cached per content hash (immutable)
+        repo_hash = PipelineCacheService.build_content_hash(documents, "github_file")
+        repo_context = cache.get_repo_summary(content_hash=repo_hash)
+        if repo_context is None:
+            repo_context = ctx_builder.build_repo_summary(documents)
+            cache.set_repo_summary(content_hash=repo_hash, summary=repo_context)
+
+        # Metamodel summary — cached per content hash
+        meta_hash = PipelineCacheService.build_content_hash(documents, "metamodel")
+        metamodel_context = cache.get_context_summary(cache_type="metamodel_summary", content_hash=meta_hash)
+        if metamodel_context is None:
+            metamodel_context = ctx_builder.build_metamodel_summary(documents)
+            cache.set_context_summary(cache_type="metamodel_summary", content_hash=meta_hash, summary=metamodel_context)
+
+        # Confluence map — cached per content hash
+        conf_hash = PipelineCacheService.build_content_hash(documents, "confluence_page")
+        confluence_context = cache.get_context_summary(cache_type="confluence_map", content_hash=conf_hash)
+        if confluence_context is None:
+            confluence_context = ctx_builder.build_confluence_map(documents)
+            cache.set_context_summary(cache_type="confluence_map", content_hash=conf_hash, summary=confluence_context)
+
+        # FIN-AI architecture docs context — cached per repo hash
+        arch_context = cache.get_context_summary(cache_type="arch_docs", content_hash=repo_hash)
+        if arch_context is None:
+            arch_context = ctx_builder.build_finai_architecture_context(documents) or ""
+            cache.set_context_summary(cache_type="arch_docs", content_hash=repo_hash, summary=arch_context)
+        if arch_context:
+            confluence_context = confluence_context + "\n\n---\n\n" + arch_context
+
+        def _on_llm_chunk(chunk_done: int, chunk_total: int) -> None:
+            pct = 89 + int((chunk_done / max(chunk_total, 1)) * 7)  # 89% → 96%
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="llm_recommendations",
+                progress_pct=min(pct, 96),
+                current_activity=f"LLM-Empfehlung: Chunk {chunk_done}/{chunk_total} verarbeitet.",
+                step_status="running",
+                detail=f"Chunk {chunk_done} von {chunk_total} abgeschlossen.",
+                worker_id=worker_id,
+            )
+
+        findings, llm_notes, llm_usage = asyncio.run(
             self._recommendation_engine.enrich_findings(
                 findings=findings,
                 truths=truths,
                 retrieved_contexts=recommendation_contexts,
+                repo_context=repo_context,
+                metamodel_context=metamodel_context,
+                confluence_context=confluence_context,
+                progress_callback=_on_llm_chunk,
             )
         )
+        finding_links = build_finding_links(findings=findings)
         notes.extend(llm_notes)
         notes.extend(semantic_graph.notes)
         notes.extend(retrieval_index.notes)
@@ -310,6 +395,21 @@ class AuditPipelineService:
             detail=f"{len(findings)} Findings werden jetzt fuer die UI in atomare Pakete gruppiert.",
             worker_id=worker_id,
         )
+
+        # Build cost note
+        if llm_usage.get("total_prompt_tokens", 0) > 0:
+            total_tokens = llm_usage["total_prompt_tokens"] + llm_usage.get("total_completion_tokens", 0)
+            cost_eur = llm_usage.get("total_cost_eur", 0.0)
+            model_details = []
+            for model, data in llm_usage.get("by_model", {}).items():
+                short_model = model.split("/")[-1] if "/" in model else model
+                model_details.append(
+                    f"{short_model}: {data['calls']}x, {data['prompt_tokens']+data['completion_tokens']} Tokens, {data['cost_eur']:.4f}€"
+                )
+            notes.append(
+                f"LLM-Kosten: {total_tokens:,} Tokens gesamt, {cost_eur:.4f}€ geschaetzt. "
+                + "; ".join(model_details)
+            )
 
         summary = (
             f"Produktive Read-only-Analyse abgeschlossen: {len(claims)} Claims, "
@@ -436,7 +536,10 @@ class AuditPipelineService:
             span_name="pipeline.collect_confluence",
         ):
             bundle = self._confluence_connector.collect_pages(
-                request=ConfluenceCollectionRequest(space_keys=list(run.target.confluence_space_keys)),
+                request=ConfluenceCollectionRequest(
+                    space_keys=list(run.target.confluence_space_keys),
+                    page_ids=list(run.target.confluence_page_ids),
+                ),
                 previous_snapshots=previous_run.source_snapshots if previous_run is not None else [],
                 document_cache_lookup=lambda source_type, source_id, content_hash: self._audit_service.get_cached_document(
                     source_type=source_type,

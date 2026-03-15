@@ -75,6 +75,18 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _normalized_string_list(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
 def new_run_id() -> str:
     return f"audit_{uuid4().hex}"
 
@@ -148,6 +160,7 @@ class AuditTarget(BaseModel):
     local_repo_path: str | None = None
     github_ref: str = Field(default="main", min_length=1)
     confluence_space_keys: list[str] = Field(default_factory=list)
+    confluence_page_ids: list[str] = Field(default_factory=list)
     jira_project_keys: list[str] = Field(default_factory=list)
     include_metamodel: bool = True
     include_local_docs: bool = True
@@ -160,6 +173,9 @@ class AuditTarget(BaseModel):
             raise ValueError("Mindestens github_repo_url oder local_repo_path muss gesetzt sein.")
         self.github_repo_url = github_repo_url or None
         self.local_repo_path = local_repo_path or None
+        self.confluence_space_keys = _normalized_string_list(self.confluence_space_keys)
+        self.confluence_page_ids = _normalized_string_list(self.confluence_page_ids)
+        self.jira_project_keys = _normalized_string_list(self.jira_project_keys)
         return self
 
 
