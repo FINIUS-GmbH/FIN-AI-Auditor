@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import json
 import math
@@ -58,6 +59,17 @@ class RetrievalIndexBuildResult:
     notes: list[str]
 
 
+RetrievalIndexProgressCallback = Callable[[str, int, int, str], None]
+
+
+@dataclass(frozen=True)
+class _SourceSegmentIndex:
+    segments: list[RetrievalSegment]
+    by_anchor: dict[str, list[RetrievalSegment]]
+    by_section: dict[str, list[RetrievalSegment]]
+    by_line: dict[int, list[RetrievalSegment]]
+
+
 def build_retrieval_index(
     *,
     settings: Settings,
@@ -66,19 +78,43 @@ def build_retrieval_index(
     claim_records: list[ExtractedClaimRecord],
     previous_segments: list[RetrievalSegment],
     allow_remote_embeddings: bool,
+    progress_callback: RetrievalIndexProgressCallback | None = None,
 ) -> RetrievalIndexBuildResult:
     raw_segments: list[RetrievalSegment] = []
-    for document in documents:
+    total_documents = len(documents)
+    for index, document in enumerate(documents, start=1):
         raw_segments.extend(_segment_document(run_id=run_id, document=document))
+        if progress_callback is not None and (index % 25 == 0 or index == total_documents):
+            progress_callback(
+                "segment_documents",
+                index,
+                total_documents,
+                f"{index}/{total_documents} Quellen fuer den Retrieval-Index segmentiert.",
+            )
 
     segments = _annotate_segment_deltas(segments=raw_segments, previous_segments=previous_segments)
+    if progress_callback is not None and segments:
+        progress_callback(
+            "annotate_deltas",
+            len(segments),
+            len(segments),
+            f"{len(segments)} Retrieval-Segmente mit Delta-Status annotiert.",
+        )
     embedding_notes: list[str] = []
     if allow_remote_embeddings and segments:
-        segments, embedding_notes = _attach_embeddings(settings=settings, segments=segments)
+        segments, embedding_notes = _attach_embeddings(
+            settings=settings,
+            segments=segments,
+            progress_callback=progress_callback,
+        )
     else:
         embedding_notes.append("Retrieval-Embeddings wurden fuer diesen Lauf nicht remote berechnet.")
 
-    claim_links = _link_claims_to_segments(segments=segments, claim_records=claim_records)
+    claim_links = _link_claims_to_segments(
+        segments=segments,
+        claim_records=claim_records,
+        progress_callback=progress_callback,
+    )
     notes = [
         f"Retrieval-Index aufgebaut: {len(segments)} Segmente, {len(claim_links)} Claim-Verknuepfungen.",
         *_build_delta_notes(segments=segments),
@@ -528,6 +564,7 @@ def _attach_embeddings(
     *,
     settings: Settings,
     segments: list[RetrievalSegment],
+    progress_callback: RetrievalIndexProgressCallback | None = None,
 ) -> tuple[list[RetrievalSegment], list[str]]:
     slot = _select_embedding_slot(settings=settings)
     if slot is None:
@@ -535,7 +572,12 @@ def _attach_embeddings(
     try:
         embedder = get_embeddings_from_llm_slot(settings=settings, llm_slot=int(slot))
         texts = [segment.content for segment in segments]
-        embeddings = _embed_in_batches(embedder=embedder, texts=texts, batch_size=24)
+        embeddings = _embed_in_batches(
+            embedder=embedder,
+            texts=texts,
+            batch_size=24,
+            progress_callback=progress_callback,
+        )
     except Exception as exc:
         return segments, [f"Retrieval-Embeddings konnten nicht berechnet werden: {type(exc).__name__}: {exc}"]
 
@@ -549,12 +591,27 @@ def _attach_embeddings(
     return enriched, [f"Retrieval-Embeddings wurden fuer {embedded_count} Segmente berechnet (Slot {slot})."]
 
 
-def _embed_in_batches(*, embedder: object, texts: list[str], batch_size: int) -> list[list[float]]:
+def _embed_in_batches(
+    *,
+    embedder: object,
+    texts: list[str],
+    batch_size: int,
+    progress_callback: RetrievalIndexProgressCallback | None = None,
+) -> list[list[float]]:
     vectors: list[list[float]] = []
-    for start in range(0, len(texts), max(1, batch_size)):
-        batch = texts[start : start + max(1, batch_size)]
+    safe_batch_size = max(1, batch_size)
+    total_texts = len(texts)
+    for start in range(0, total_texts, safe_batch_size):
+        batch = texts[start : start + safe_batch_size]
         batch_vectors = embedder.embed_documents(batch)
         vectors.extend(batch_vectors)
+        if progress_callback is not None:
+            progress_callback(
+                "embed_segments",
+                min(total_texts, start + len(batch)),
+                total_texts,
+                f"{min(total_texts, start + len(batch))}/{total_texts} Retrieval-Segmente mit Embeddings angereichert.",
+            )
     return vectors
 
 
@@ -566,17 +623,40 @@ def _link_claims_to_segments(
     *,
     segments: list[RetrievalSegment],
     claim_records: list[ExtractedClaimRecord],
+    progress_callback: RetrievalIndexProgressCallback | None = None,
 ) -> list[RetrievalSegmentClaimLink]:
-    by_source: dict[tuple[str, str], list[RetrievalSegment]] = {}
-    for segment in segments:
-        by_source.setdefault((segment.source_type, segment.source_id), []).append(segment)
+    by_source = _build_source_segment_indexes(segments=segments)
+    keyword_candidate_cache: dict[tuple[str, str, str], list[tuple[RetrievalSegment, float]]] = {}
 
     links: dict[tuple[str, str, str], RetrievalSegmentClaimLink] = {}
-    for record in claim_records:
+    total_records = len(claim_records)
+    for index, record in enumerate(claim_records, start=1):
         location = record.evidence.location
-        candidates = by_source.get((location.source_type, location.source_id), [])
-        for segment in candidates:
-            score = _claim_segment_score(segment=segment, record=record)
+        source_key = (location.source_type, location.source_id)
+        source_index = by_source.get(source_key)
+        if source_index is None:
+            continue
+        direct_candidates = _direct_candidate_segments(source_index=source_index, record=record)
+        if direct_candidates:
+            scored_candidates = [
+                (segment, _claim_segment_score(segment=segment, record=record))
+                for segment in direct_candidates
+            ]
+        else:
+            cache_key = (
+                str(location.source_type),
+                str(location.source_id),
+                str(record.claim.subject_key).strip().casefold(),
+            )
+            scored_candidates = keyword_candidate_cache.get(cache_key)
+            if scored_candidates is None:
+                scored_candidates = _top_keyword_candidates(
+                    segments=source_index.segments,
+                    record=record,
+                    limit=4,
+                )
+                keyword_candidate_cache[cache_key] = scored_candidates
+        for segment, score in scored_candidates:
             if score <= 0.0:
                 continue
             relation_type = "evidence" if score >= 0.95 else "scope_match"
@@ -590,7 +670,86 @@ def _link_claims_to_segments(
                     score=score,
                     metadata={"subject_key": record.claim.subject_key, "predicate": record.claim.predicate},
                 )
+        if progress_callback is not None and (index % 5000 == 0 or index == total_records):
+            progress_callback(
+                "link_claims",
+                index,
+                total_records,
+                f"{index}/{total_records} Claims mit Retrieval-Segmenten verknuepft.",
+            )
     return list(links.values())
+
+
+def _build_source_segment_indexes(
+    *,
+    segments: list[RetrievalSegment],
+) -> dict[tuple[str, str], _SourceSegmentIndex]:
+    grouped: dict[tuple[str, str], list[RetrievalSegment]] = defaultdict(list)
+    for segment in segments:
+        grouped[(segment.source_type, segment.source_id)].append(segment)
+
+    indexes: dict[tuple[str, str], _SourceSegmentIndex] = {}
+    for source_key, source_segments in grouped.items():
+        by_anchor: dict[str, list[RetrievalSegment]] = defaultdict(list)
+        by_section: dict[str, list[RetrievalSegment]] = defaultdict(list)
+        by_line: dict[int, list[RetrievalSegment]] = defaultdict(list)
+        for segment in source_segments:
+            by_anchor[segment.anchor_value].append(segment)
+            normalized_section = _normalize_section_path(segment.section_path)
+            if normalized_section:
+                by_section[normalized_section].append(segment)
+            line_start = int(segment.metadata.get("line_start", -1) or -1)
+            line_end = int(segment.metadata.get("line_end", -1) or -1)
+            if segment.source_type == "github_file" and line_start > 0 and line_end >= line_start:
+                for line_no in range(line_start, line_end + 1):
+                    by_line[line_no].append(segment)
+        indexes[source_key] = _SourceSegmentIndex(
+            segments=source_segments,
+            by_anchor=dict(by_anchor),
+            by_section=dict(by_section),
+            by_line=dict(by_line),
+        )
+    return indexes
+
+
+def _direct_candidate_segments(
+    *,
+    source_index: _SourceSegmentIndex,
+    record: ExtractedClaimRecord,
+) -> list[RetrievalSegment]:
+    position = record.evidence.location.position
+    if position is None:
+        return []
+    candidates: list[RetrievalSegment] = []
+    candidates.extend(source_index.by_anchor.get(position.anchor_value, []))
+    if position.line_start is not None:
+        candidates.extend(source_index.by_line.get(int(position.line_start), []))
+    normalized_section = _normalize_section_path(position.section_path)
+    if normalized_section:
+        candidates.extend(source_index.by_section.get(normalized_section, []))
+    return _dedupe_segments(candidates)
+
+
+def _top_keyword_candidates(
+    *,
+    segments: list[RetrievalSegment],
+    record: ExtractedClaimRecord,
+    limit: int,
+) -> list[tuple[RetrievalSegment, float]]:
+    ranked: list[tuple[RetrievalSegment, float]] = []
+    left_keywords = _keywords(record.claim.subject_key, limit=8)
+    for segment in segments:
+        overlap = _keyword_overlap(left=left_keywords, right=segment.keywords)
+        if overlap <= 0.0:
+            continue
+        score = min(0.9, 0.45 + overlap)
+        ranked.append((segment, score))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked[: max(1, limit)]
+
+
+def _normalize_section_path(value: str | None) -> str:
+    return str(value or "").strip().casefold()
 
 
 def _claim_segment_score(*, segment: RetrievalSegment, record: ExtractedClaimRecord) -> float:

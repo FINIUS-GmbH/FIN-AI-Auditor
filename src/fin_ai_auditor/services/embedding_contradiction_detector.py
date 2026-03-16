@@ -8,6 +8,7 @@ as they will be reviewed by the auditor.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import math
 from typing import Callable, Sequence
@@ -29,6 +30,7 @@ SIMILARITY_HIGH = 0.85     # Very similar claims — likely about the same thing
 SIMILARITY_MEDIUM = 0.70   # Moderately similar — worth checking
 BATCH_SIZE = 200           # Embeddings per API call
 EMBED_PARALLELISM = 3      # Concurrent embedding API calls (reduced to avoid rate limits)
+SIMILARITY_CHUNK_ROWS = 100
 
 
 def detect_cross_document_contradictions(
@@ -192,10 +194,16 @@ def detect_cross_document_contradictions(
     source_type_arr = np.array(source_types)
     n = len(valid_indices)
 
+    # Large Python lists are no longer needed once the dense matrix exists.
+    del all_embeddings
+    del vectors
+    del cached_embeddings
+    gc.collect()
+
     # Compute similarities in chunks to control memory (chunk rows, full columns)
     findings: list[AuditFinding] = []
     seen_pairs: set[frozenset[str]] = set()
-    chunk_rows = 500  # process 500 rows at a time
+    chunk_rows = max(25, min(SIMILARITY_CHUNK_ROWS, n))
     total_chunks = math.ceil(n / chunk_rows)
 
     for chunk_idx, row_start in enumerate(range(0, n, chunk_rows)):
@@ -212,6 +220,13 @@ def detect_cross_document_contradictions(
         # Find ALL above-threshold pairs in this chunk at once (vectorized)
         pairs = np.argwhere(sim_block >= SIMILARITY_MEDIUM)
         if len(pairs) == 0:
+            if progress_callback:
+                progress_callback(
+                    f"Similarity-Vergleich: Chunk {chunk_idx + 1}/{total_chunks} abgeschlossen "
+                    f"({row_end}/{n} Vektoren, {len(findings)} Findings)"
+                )
+            del sim_block
+            gc.collect()
             continue
 
         # Vectorized cross-source filter
@@ -277,6 +292,18 @@ def detect_cross_document_contradictions(
             )
             findings.append(finding)
 
+        if progress_callback:
+            progress_callback(
+                f"Similarity-Vergleich: Chunk {chunk_idx + 1}/{total_chunks} abgeschlossen "
+                f"({row_end}/{n} Vektoren, {len(findings)} Findings)"
+            )
+        del pairs
+        del cross_pairs
+        del cross_global_is
+        del cross_global_js
+        del sim_block
+        gc.collect()
+
     logger.info(
         "embedding_contradictions_found",
         extra={
@@ -298,4 +325,3 @@ _SOURCE_LABELS: dict[str, str] = {
 def _find_embedding_slot(*, settings: Settings) -> int | None:
     """Find the slot used consistently for embedding-backed analysis."""
     return select_embedding_slot(settings=settings)
-

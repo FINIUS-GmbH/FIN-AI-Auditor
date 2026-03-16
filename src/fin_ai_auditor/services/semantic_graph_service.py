@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import re
+from typing import Callable, Sequence
 
 from fin_ai_auditor.domain.models import (
     AuditClaimEntry,
@@ -29,19 +31,23 @@ def build_semantic_graph(
     run_id: str,
     claim_records: list[ExtractedClaimRecord],
     truths: list[TruthLedgerEntry],
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> SemanticGraphBuildResult:
     logger.info("semantic_graph_build_start", extra={"event_name": "semantic_graph_build_start", "event_payload": {"claims": len(claim_records), "truths": len(truths)}})
     entity_map: dict[str, SemanticEntity] = {}
+    owner_entity_index: dict[tuple[str, str], set[str]] = defaultdict(set)
     relation_map: dict[tuple[str, str, str], SemanticRelation] = {}
     claim_context_by_id: dict[str, dict[str, object]] = {}
+    total_claims = len(claim_records)
 
-    for record in claim_records:
+    for index, record in enumerate(claim_records, start=1):
         claim = record.claim
         semantic_entity_ids: list[str] = []
         semantic_cluster_keys: list[str] = [package_scope_key(claim.subject_key)]
 
         subject_entity = _ensure_subject_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             claim=claim,
         )
@@ -50,6 +56,7 @@ def build_semantic_graph(
 
         for related_entity in _ensure_parent_entities(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             relation_map=relation_map,
             run_id=run_id,
             subject_entity=subject_entity,
@@ -60,6 +67,7 @@ def build_semantic_graph(
 
         evidence_entity = _ensure_evidence_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             relation_map=relation_map,
             run_id=run_id,
             record=record,
@@ -71,6 +79,7 @@ def build_semantic_graph(
         semantic_entity_ids.extend(
             _ensure_contract_context_relations(
                 entity_map=entity_map,
+                owner_entity_index=owner_entity_index,
                 relation_map=relation_map,
                 run_id=run_id,
                 claim=claim,
@@ -81,6 +90,7 @@ def build_semantic_graph(
         semantic_entity_ids.extend(
             _ensure_evidence_chain_step_relations(
                 entity_map=entity_map,
+                owner_entity_index=owner_entity_index,
                 relation_map=relation_map,
                 run_id=run_id,
                 claim=claim,
@@ -101,12 +111,15 @@ def build_semantic_graph(
                 ]
             ),
         }
+        if progress_callback is not None and (index % 5000 == 0 or index == total_claims):
+            progress_callback(index, total_claims, "Semantik-Graph verdichtet Claim-Kontexte und Relationen.")
 
     for truth in truths:
         if truth.truth_status != "active":
             continue
         truth_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="truth",
             canonical_key=f"truth:{truth.canonical_key}",
@@ -117,6 +130,7 @@ def build_semantic_graph(
         )
         subject_entity = _ensure_subject_entity_for_truth(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             truth=truth,
         )
@@ -131,62 +145,63 @@ def build_semantic_graph(
         )
 
     entities_by_id = {entity.entity_id: entity for entity in entity_map.values()}
-    enriched_claims = [
-        record.claim.model_copy(
-            update={
-                "metadata": {
-                    **record.claim.metadata,
-                    **claim_context_by_id.get(record.claim.claim_id, {}),
-                    "semantic_relation_types": _claim_relation_types(
-                        relation_map=relation_map,
-                        entity_ids=set(
-                            _string_list(
-                                claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
-                            )
+    cluster_claims: dict[str, list[AuditClaimEntry]] = defaultdict(list)
+    for record in claim_records:
+        cluster_keys = _string_list(
+            claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_cluster_keys")
+        ) or [package_scope_key(record.claim.subject_key)]
+        for cluster_key in cluster_keys:
+            cluster_claims[cluster_key].append(record.claim)
+
+    cluster_full_path_summaries = {
+        cluster_key: _evidence_chain_full_path_summaries(claims=cluster_claims_for_key)
+        for cluster_key, cluster_claims_for_key in cluster_claims.items()
+    }
+    relation_types_cache: dict[tuple[str, ...], list[str]] = {}
+    process_context_cache: dict[tuple[str, ...], list[str]] = {}
+    contract_paths_cache: dict[tuple[str, ...], list[str]] = {}
+    evidence_chain_paths_cache: dict[tuple[str, ...], list[str]] = {}
+    enriched_claims: list[AuditClaimEntry] = []
+    for index, record in enumerate(claim_records, start=1):
+        claim_context = claim_context_by_id.get(record.claim.claim_id, {})
+        enriched_claims.append(
+            record.claim.model_copy(
+                update={
+                    "metadata": {
+                        **record.claim.metadata,
+                        **claim_context,
+                        "semantic_relation_types": _cached_claim_relation_types(
+                            relation_map=relation_map,
+                            claim_context=claim_context,
+                            cache=relation_types_cache,
                         ),
-                    ),
-                    "semantic_process_context": _process_context_summaries(
-                        relation_map=relation_map,
-                        entities_by_id=entities_by_id,
-                        entity_ids=set(
-                            _string_list(
-                                claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
-                            )
+                        "semantic_process_context": _cached_process_context_summaries(
+                            relation_map=relation_map,
+                            entities_by_id=entities_by_id,
+                            claim_context=claim_context,
+                            cache=process_context_cache,
                         ),
-                    ),
-                "semantic_contract_paths": _contract_path_summaries(
-                    relation_map=relation_map,
-                    entities_by_id=entities_by_id,
-                    entity_ids=set(
-                        _string_list(
-                            claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
-                        )
-                    ),
-                ),
-                "semantic_evidence_chain_paths": _evidence_chain_path_summaries(
-                    relation_map=relation_map,
-                    entities_by_id=entities_by_id,
-                    entity_ids=set(
-                        _string_list(
-                            claim_context_by_id.get(record.claim.claim_id, {}).get("semantic_entity_ids")
-                        )
-                    ),
-                ),
-                "semantic_evidence_chain_full_paths": _evidence_chain_full_path_summaries(
-                    claims=[
-                        item.claim
-                        for item in claim_records
-                        if _claim_matches_cluster(
-                            claim=item.claim,
-                            cluster_key=package_scope_key(record.claim.subject_key),
-                        )
-                    ],
-                ),
+                        "semantic_contract_paths": _cached_contract_path_summaries(
+                            relation_map=relation_map,
+                            entities_by_id=entities_by_id,
+                            claim_context=claim_context,
+                            cache=contract_paths_cache,
+                        ),
+                        "semantic_evidence_chain_paths": _cached_evidence_chain_path_summaries(
+                            relation_map=relation_map,
+                            entities_by_id=entities_by_id,
+                            claim_context=claim_context,
+                            cache=evidence_chain_paths_cache,
+                        ),
+                        "semantic_evidence_chain_full_paths": list(
+                            cluster_full_path_summaries.get(package_scope_key(record.claim.subject_key), [])
+                        ),
+                    }
                 }
-            }
+            )
         )
-        for record in claim_records
-    ]
+        if progress_callback is not None and (index % 5000 == 0 or index == total_claims):
+            progress_callback(index, total_claims, "Semantik-Graph schreibt angereicherte Claim-Metadaten zurueck.")
 
     notes = [
         f"Semantik-Graph aufgebaut: {len(entity_map)} Knoten, {len(relation_map)} Relationen.",
@@ -310,12 +325,14 @@ def attach_semantic_context_to_findings(
 def _ensure_subject_entity(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     run_id: str,
     claim: AuditClaimEntry,
 ) -> SemanticEntity:
     entity_type, label = _entity_type_and_label_for_subject(subject_key=claim.subject_key, predicate=claim.predicate)
     return _ensure_entity(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         run_id=run_id,
         entity_type=entity_type,
         canonical_key=claim.subject_key,
@@ -329,12 +346,14 @@ def _ensure_subject_entity(
 def _ensure_subject_entity_for_truth(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     run_id: str,
     truth: TruthLedgerEntry,
 ) -> SemanticEntity:
     entity_type, label = _entity_type_and_label_for_subject(subject_key=truth.subject_key, predicate=truth.predicate)
     return _ensure_entity(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         run_id=run_id,
         entity_type=entity_type,
         canonical_key=truth.subject_key,
@@ -348,6 +367,7 @@ def _ensure_subject_entity_for_truth(
 def _ensure_parent_entities(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     relation_map: dict[tuple[str, str, str], SemanticRelation],
     run_id: str,
     subject_entity: SemanticEntity,
@@ -360,6 +380,7 @@ def _ensure_parent_entities(
         phase_key = ".".join(subject_key.split(".")[:3])
         phase_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="phase",
             canonical_key=phase_key,
@@ -370,6 +391,7 @@ def _ensure_parent_entities(
         )
         process_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="process",
             canonical_key="BSM.process",
@@ -418,6 +440,7 @@ def _ensure_parent_entities(
     elif subject_key.startswith("BSM.phase."):
         process_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="process",
             canonical_key="BSM.process",
@@ -449,6 +472,7 @@ def _ensure_parent_entities(
         owner_key = subject_key.split(".", 1)[0]
         owner_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="object",
             canonical_key=owner_key,
@@ -474,6 +498,7 @@ def _ensure_parent_entities(
 def _ensure_evidence_entity(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     relation_map: dict[tuple[str, str, str], SemanticRelation],
     run_id: str,
     record: ExtractedClaimRecord,
@@ -485,6 +510,7 @@ def _ensure_evidence_entity(
         label = section_path or location.title
         entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="documentation_section",
             canonical_key=f"doc:{location.source_type}:{location.source_id}:{label}",
@@ -511,6 +537,7 @@ def _ensure_evidence_entity(
         label = section_path or str(location.path_hint or location.title)
         entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="code_component",
             canonical_key=f"code:{location.source_id}:{label}",
@@ -538,6 +565,7 @@ def _ensure_evidence_entity(
 def _ensure_entity(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     run_id: str,
     entity_type: str,
     canonical_key: str,
@@ -563,6 +591,9 @@ def _ensure_entity(
         metadata=dict(metadata),
     )
     entity_map[canonical_key] = entity
+    owner_key = _owner_key_for_canonical_key(canonical_key)
+    if owner_key is not None:
+        owner_entity_index[(owner_key, entity_type)].add(canonical_key)
     return entity
 
 
@@ -654,6 +685,88 @@ def _claim_relation_types(
     return _dedupe_preserve_order(relation_types)
 
 
+def _claim_context_entity_ids_key(claim_context: dict[str, object]) -> tuple[str, ...]:
+    return tuple(_string_list(claim_context.get("semantic_entity_ids")))
+
+
+def _cached_claim_relation_types(
+    *,
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    claim_context: dict[str, object],
+    cache: dict[tuple[str, ...], list[str]],
+) -> list[str]:
+    entity_ids_key = _claim_context_entity_ids_key(claim_context)
+    cached = cache.get(entity_ids_key)
+    if cached is not None:
+        return cached
+    computed = _claim_relation_types(
+        relation_map=relation_map,
+        entity_ids=set(entity_ids_key),
+    )
+    cache[entity_ids_key] = computed
+    return computed
+
+
+def _cached_process_context_summaries(
+    *,
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    entities_by_id: dict[str, SemanticEntity],
+    claim_context: dict[str, object],
+    cache: dict[tuple[str, ...], list[str]],
+) -> list[str]:
+    entity_ids_key = _claim_context_entity_ids_key(claim_context)
+    cached = cache.get(entity_ids_key)
+    if cached is not None:
+        return cached
+    computed = _process_context_summaries(
+        relation_map=relation_map,
+        entities_by_id=entities_by_id,
+        entity_ids=set(entity_ids_key),
+    )
+    cache[entity_ids_key] = computed
+    return computed
+
+
+def _cached_contract_path_summaries(
+    *,
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    entities_by_id: dict[str, SemanticEntity],
+    claim_context: dict[str, object],
+    cache: dict[tuple[str, ...], list[str]],
+) -> list[str]:
+    entity_ids_key = _claim_context_entity_ids_key(claim_context)
+    cached = cache.get(entity_ids_key)
+    if cached is not None:
+        return cached
+    computed = _contract_path_summaries(
+        relation_map=relation_map,
+        entities_by_id=entities_by_id,
+        entity_ids=set(entity_ids_key),
+    )
+    cache[entity_ids_key] = computed
+    return computed
+
+
+def _cached_evidence_chain_path_summaries(
+    *,
+    relation_map: dict[tuple[str, str, str], SemanticRelation],
+    entities_by_id: dict[str, SemanticEntity],
+    claim_context: dict[str, object],
+    cache: dict[tuple[str, ...], list[str]],
+) -> list[str]:
+    entity_ids_key = _claim_context_entity_ids_key(claim_context)
+    cached = cache.get(entity_ids_key)
+    if cached is not None:
+        return cached
+    computed = _evidence_chain_path_summaries(
+        relation_map=relation_map,
+        entities_by_id=entities_by_id,
+        entity_ids=set(entity_ids_key),
+    )
+    cache[entity_ids_key] = computed
+    return computed
+
+
 def _claim_matches_cluster(*, claim: AuditClaimEntry, cluster_key: str) -> bool:
     semantic_cluster_keys = _string_list(claim.metadata.get("semantic_cluster_keys"))
     if cluster_key in semantic_cluster_keys:
@@ -700,6 +813,7 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
 def _ensure_contract_context_relations(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     relation_map: dict[tuple[str, str, str], SemanticRelation],
     run_id: str,
     claim: AuditClaimEntry,
@@ -713,6 +827,7 @@ def _ensure_contract_context_relations(
     owner_key = claim.subject_key.split(".", 1)[0]
     question_entity, phase_entity, process_entity = _ensure_context_entities_from_section_path(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         relation_map=relation_map,
         run_id=run_id,
         record=record,
@@ -723,15 +838,18 @@ def _ensure_contract_context_relations(
 
     policy_entities = _owner_semantic_entities(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         owner_key=owner_key,
         entity_type="policy",
     )
     contract_entities = _owner_semantic_entities(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         owner_key=owner_key,
         entity_type="write_contract",
     ) + _owner_semantic_entities(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         owner_key=owner_key,
         entity_type="read_contract",
     )
@@ -807,6 +925,7 @@ def _ensure_contract_context_relations(
 def _ensure_evidence_chain_step_relations(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     relation_map: dict[tuple[str, str, str], SemanticRelation],
     run_id: str,
     claim: AuditClaimEntry,
@@ -823,6 +942,7 @@ def _ensure_evidence_chain_step_relations(
 
     start_entity = _ensure_entity(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         run_id=run_id,
         entity_type="object",
         canonical_key=start_label,
@@ -833,6 +953,7 @@ def _ensure_evidence_chain_step_relations(
     )
     end_entity = _ensure_entity(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         run_id=run_id,
         entity_type="object",
         canonical_key=end_label,
@@ -887,6 +1008,7 @@ def _ensure_evidence_chain_step_relations(
 def _ensure_context_entities_from_section_path(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     relation_map: dict[tuple[str, str, str], SemanticRelation],
     run_id: str,
     record: ExtractedClaimRecord,
@@ -903,6 +1025,7 @@ def _ensure_context_entities_from_section_path(
 
     process_entity = _ensure_entity(
         entity_map=entity_map,
+        owner_entity_index=owner_entity_index,
         run_id=run_id,
         entity_type="process",
         canonical_key="BSM.process",
@@ -916,6 +1039,7 @@ def _ensure_context_entities_from_section_path(
     if phase_key:
         phase_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="phase",
             canonical_key=f"BSM.phase.{phase_key}",
@@ -947,6 +1071,7 @@ def _ensure_context_entities_from_section_path(
         question_scope = f"BSM.phase.{phase_key}" if phase_key else "BSM.process"
         question_entity = _ensure_entity(
             entity_map=entity_map,
+            owner_entity_index=owner_entity_index,
             run_id=run_id,
             entity_type="question",
             canonical_key=canonical_key,
@@ -999,15 +1124,23 @@ def _ensure_context_entities_from_section_path(
 def _owner_semantic_entities(
     *,
     entity_map: dict[str, SemanticEntity],
+    owner_entity_index: dict[tuple[str, str], set[str]],
     owner_key: str,
     entity_type: str,
 ) -> list[SemanticEntity]:
-    prefix = f"{owner_key}."
     return [
-        entity
-        for key, entity in entity_map.items()
-        if key.startswith(prefix) and entity.entity_type == entity_type
+        entity_map[canonical_key]
+        for canonical_key in sorted(owner_entity_index.get((owner_key, entity_type), set()))
+        if canonical_key in entity_map
     ]
+
+
+def _owner_key_for_canonical_key(canonical_key: str) -> str | None:
+    normalized = str(canonical_key or "").strip()
+    if "." not in normalized or normalized.startswith("BSM.process") or normalized.startswith("truth:"):
+        return None
+    owner_key = normalized.split(".", 1)[0]
+    return owner_key or None
 
 
 def _extract_phase_key_from_section_path(section_path: str) -> str | None:

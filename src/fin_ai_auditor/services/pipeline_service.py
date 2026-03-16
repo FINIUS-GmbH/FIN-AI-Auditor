@@ -5,7 +5,7 @@ from collections import defaultdict
 import hashlib
 import logging
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 from uuid import uuid4
 
 from fin_ai_auditor.config import Settings
@@ -232,10 +232,25 @@ class AuditPipelineService:
             )
         )
         inherited_truths = _inherit_truths(previous_run=previous_run)
+
+        def _on_semantic_graph_progress(done: int, total: int, message: str) -> None:
+            fraction = done / max(total, 1)
+            progress_pct = 60 + int(fraction * 9)  # 60% -> 69%
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="delta_reconciliation",
+                progress_pct=min(progress_pct, 69),
+                current_activity=message,
+                step_status="running",
+                detail=f"{done}/{total} Claims im Semantik-Graph verarbeitet.",
+                worker_id=worker_id,
+            )
+
         semantic_graph = build_semantic_graph(
             run_id=run.run_id,
             claim_records=claim_records,
             truths=inherited_truths,
+            progress_callback=_on_semantic_graph_progress,
         )
         logger.info("pipeline_semantic_graph_built", extra={"event_name": "pipeline_semantic_graph_built", "event_payload": {"entities": len(semantic_graph.semantic_entities), "relations": len(semantic_graph.semantic_relations)}})
         inherited_causal_graph = build_causal_graph(
@@ -267,6 +282,30 @@ class AuditPipelineService:
             detail="Geaenderte Code-, Doku- und Metamodellsegmente werden fuer spaetere Delta-Neubewertung vorbereitet.",
             worker_id=worker_id,
         )
+
+        def _on_retrieval_index_progress(stage: str, current: int, total: int, message: str) -> None:
+            safe_total = max(1, int(total))
+            ratio = min(1.0, max(0.0, float(current) / float(safe_total)))
+            stage_key = str(stage).strip()
+            progress_pct = 70
+            if stage_key == "segment_documents":
+                progress_pct = 70 + int(round(ratio * 2))
+            elif stage_key == "annotate_deltas":
+                progress_pct = 73
+            elif stage_key == "embed_segments":
+                progress_pct = 74 + int(round(ratio))
+            elif stage_key == "link_claims":
+                progress_pct = 75 + int(round(ratio * 2))
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="retrieval_indexing",
+                progress_pct=min(progress_pct, 77),
+                current_activity=message,
+                step_status="running",
+                detail=message,
+                worker_id=worker_id,
+            )
+
         retrieval_index = build_retrieval_index(
             settings=self._settings,
             run_id=run.run_id,
@@ -274,6 +313,7 @@ class AuditPipelineService:
             claim_records=claim_records,
             previous_segments=previous_segments,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
+            progress_callback=_on_retrieval_index_progress,
         )
         truths = derive_truths(inherited_truths=inherited_truths, claim_records=claim_records)
         schema_truths = build_schema_truth_registry(claims=claims, truths=truths)
@@ -293,11 +333,34 @@ class AuditPipelineService:
             detail=f"{len(claims)} Claims werden jetzt in Findings und Beziehungen ueberfuehrt.",
             worker_id=worker_id,
         )
+
+        def _on_finding_generation_progress(stage: str, current: int, total: int, message: str) -> None:
+            safe_total = max(1, int(total))
+            ratio = min(1.0, max(0.0, float(current) / float(safe_total)))
+            stage_key = str(stage).strip()
+            progress_pct = 78
+            if stage_key == "scan_subject_groups":
+                progress_pct = 78 + int(round(ratio))
+            elif stage_key in {"truth_conflicts", "merge_findings"}:
+                progress_pct = 79
+            elif stage_key == "link_findings":
+                progress_pct = 79 + int(round(ratio))
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="finding_generation",
+                progress_pct=min(progress_pct, 80),
+                current_activity=message,
+                step_status="running",
+                detail=message,
+                worker_id=worker_id,
+            )
+
         findings, finding_links = _generate_incremental_findings(
             claim_records=claim_records,
             previous_run=previous_run,
             truths=truths,
             impacted_scope_keys=impacted_scope_keys,
+            progress_callback=_on_finding_generation_progress,
         )
         logger.info("pipeline_findings_generated", extra={"event_name": "pipeline_findings_generated", "event_payload": {"findings": len(findings), "links": len(finding_links)}})
         self._audit_service.update_run_progress(
@@ -1040,16 +1103,25 @@ def _generate_incremental_findings(
     previous_run: AuditRun | None,
     truths: list[TruthLedgerEntry],
     impacted_scope_keys: set[str],
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> tuple[list[AuditFinding], list[AuditFindingLink]]:
     if previous_run is None:
         return generate_findings(
             claim_records=claim_records,
             inherited_truths=truths,
             impacted_scope_keys=impacted_scope_keys,
+            progress_callback=progress_callback,
         )
     if not impacted_scope_keys:
         reused = [_clone_reused_finding(finding=finding) for finding in previous_run.findings]
-        return reused, build_finding_links(findings=reused)
+        if progress_callback is not None:
+            progress_callback(
+                "merge_findings",
+                len(reused),
+                max(1, len(reused)),
+                f"{len(reused)} bestehende Findings aus dem letzten Lauf wiederverwendet.",
+            )
+        return reused, build_finding_links(findings=reused, progress_callback=progress_callback)
 
     impacted_claim_records = _filter_claim_records_for_impacted_scopes(
         claim_records=claim_records,
@@ -1059,6 +1131,7 @@ def _generate_incremental_findings(
         claim_records=impacted_claim_records,
         inherited_truths=truths,
         impacted_scope_keys=impacted_scope_keys,
+        progress_callback=progress_callback,
     )
     reused_findings = [
         _clone_reused_finding(finding=finding)
@@ -1066,7 +1139,14 @@ def _generate_incremental_findings(
         if _finding_scope_key(finding=finding) not in impacted_scope_keys
     ]
     merged_findings = [*reused_findings, *regenerated_findings]
-    return merged_findings, build_finding_links(findings=merged_findings)
+    if progress_callback is not None:
+        progress_callback(
+            "merge_findings",
+            len(merged_findings),
+            max(1, len(merged_findings)),
+            f"{len(merged_findings)} deterministische Findings fuer den inkrementellen Lauf zusammengefuehrt.",
+        )
+    return merged_findings, build_finding_links(findings=merged_findings, progress_callback=progress_callback)
 
 
 def _clone_reused_finding(*, finding: AuditFinding) -> AuditFinding:

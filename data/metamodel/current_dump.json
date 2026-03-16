@@ -1,5 +1,5 @@
 {
-  "collected_at": "2026-03-15T02:36:27.164803+00:00",
+  "collected_at": "2026-03-16T00:18:55.983968+00:00",
   "source": "direct_neo4j",
   "rows": [
     {
@@ -21559,6 +21559,606 @@
       "entity_kind": "label_summary",
       "label": "bsmStatementExtractorFunction",
       "node_count": 2
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CONTAINS",
+      "relation_count": 543
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BSMPHASE_ASKS_BSMQUESTION",
+      "relation_count": 393
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BSM_PHASE_BSMPHASE_ASKS_BSMQUESTION_BSM_QUESTION",
+      "relation_count": 371
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_LENS",
+      "relation_count": 53
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ASKS_QUESTION",
+      "relation_count": 34
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_RUNNER",
+      "relation_count": 28
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_ATTR_ENRICHER_FN",
+      "relation_count": 26
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_BUILDER_FN",
+      "relation_count": 26
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_EXTRACTOR_FN",
+      "relation_count": 26
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_REL_BUILDER_FN",
+      "relation_count": 26
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_RUNNER_FN",
+      "relation_count": 26
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_ATTRIBUTE_ENRICHER",
+      "relation_count": 3
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_BUILDER",
+      "relation_count": 2
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_EXTRACTOR",
+      "relation_count": 2
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "USES_RELATION_BUILDER",
+      "relation_count": 2
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ADDRESSES",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ANTICIPATED_REALISATION_BY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "APPLICATIONCOMPONENT_CALLS_EXTERNALSYSTEM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "APPLICATIONCOMPONENT_PART_OF_BUSINESSAPPLICATION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "APPLICATIONSERVICE_PROVIDED_BY_APPLICATIONCOMPONENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "APPLICATIONSERVICE_USES_DATASTORE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ASSESSMENT_USES_CRITERION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ATTRIBUTE_DETAILED_BY_BUSINESS_OBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BSBEHAVIOUR_OF_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BSM_METAELEMENT__BSM_QUESTION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BSM_QUESTION_BSM_QUESTION_BSM_ELEMENT_FUNCTION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSAPPLICATION_GENERAL_FORM_OF_GUI",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSCAPABILITY_ORIGINATED_FROM_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSCAPABILITY_SPECIALIZED_FORM_OF_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSECOSYSTEM_AGGREGATES_EXTERNALPARTY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSECOSYSTEM_FULFILLS_CUSTOMERSCENARIO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSINTERFACE_ACCESSED_VIA_CHANNEL",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSINTERFACE_CONVEYS_MESSAGE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSINTERFACE_GENERAL_FORM_OF_GUI",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSMODULE_CONTAINS_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSMODULE_HAS_SERVICE_OWNER_BUSINESSROLE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSOBJECT_ABSTRACTS_INFORMATION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSOBJECT_GENERAL_FORM_OF_MODULEBO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSOBJECT_SPECIALIZED_FORM_OF_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_AGGREGATES_BUSINESSROLE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_GENERAL_FORM_OF_BUSINESSAPPLICATION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_GENERAL_FORM_OF_CUSTOMER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_GENERAL_FORM_OF_EXTERNALPARTY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_POST_FILLED_BY_PERSON",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSROLE_RESPONSIBLE_FOR_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSRULE_SPECIALIZED_FORM_OF_ASSESSMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_ACTION_SPECIFIED_BY_ACTIONTERM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_BUNDLES_IMPLICITLY_CAPABILITYINSTANCE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_DELIVERS_OUTCOME",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_DETAILS_LOGIC_FOR_ABSTRACTTESTCASE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_IMPLEMENTED_BY_APPLICATIONSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_MODIFIES_BUSINESSOBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_OUTPUT_MESSAGE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_PROVIDES_UICOMPONENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_REALISES_BUSINESSCAPABILITY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_SHORTCUT_GUI",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_SPECIALIZED_FORM_OF_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESSSERVICE_USES_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_CAPABILITY_BASIS_FOR_BUSINESS_OBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_CAPABILITY_DECOMPOSES_INTO_BUSINESS_CAPABILITY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_MODULE_DECOMPOSES_INTO_BUSINESS_MODULE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_OBJECT_ASSOCIATED_WITH_BUSINESS_OBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_OBJECT_GENERAL_FORM_OF_BUSINESS_OBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_OBJECT_IMPACTS_BUSINESS_RULE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_OBJECT_OWNS_BUSINESS_MODULE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_SERVICE_CALLS_VALUE_STREAM_STAGE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_SERVICE_PROVIDES_BUSINESS_ROLE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "BUSINESS_SERVICE_REQUESTS_BUSINESS_ROLE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CAPABILITYBEHAVIOUR_DEFINES_CAPABILITYINSTANCE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CAPABILITYBEHAVIOUR_INFLUENCES_BSB",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CAPABILITYINSTANCE_REQUIRES_INFORMATION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CAPABILITYREALISATIONRELATION_SPECIALIZED_FORM_OF_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CAPINSTANCE_BEHAVIOUR_INFLUENCED_BY_RESOURCE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CHANNEL_TOUCHPOINT_FOR_CUSTOMER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CHUNK_CHUNK_BSM_QUESTION",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CHUNK__DOCUMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CODEARTIFACT_REALISES_APPLICATIONSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CODEARTIFACT_TOUCHES_DATASTORE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CRR_HAS_SOURCE_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CRR_HAS_TARGET_BUSINESSCAPABILITY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSCENARIO_EXPRESSES_NEEDS_OF_CUSTOMER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSCENARIO_EXTENDS_CUSTOMERSCENARIO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSCENARIO_INCLUDES_CUSTOMERSCENARIO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSCENARIO_MAKES_SCOPE_EXPLICIT_OF_PROJECTGOAL",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSCENARIO_REFINES_REQUIREMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMERSEGMENT_AGGREGATES_CUSTOMER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMER_CONSUMES_PRODUCT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "CUSTOMER_TRIGGERS_VALUESTREAM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "DATASTORE_STORES_BUSINESSOBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "DATATYPE_TYPEFOR_ATTRIBUTE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "DETAILEDTESTCASE_QUALIFIES_PRODUCTPORTFOLIO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ENUMERATION_PROVIDES_ARGUMENTS_FOR_TYPENODE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "EPIC_DETAILED_BY_USERSTORY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "EPIC_IMPLEMENTS_CUSTOMERSCENARIO",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "EXTERNALPARTY_AGGREGATED_IN_ECOSYSTEM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "EXTERNALPARTY_GENERAL_FORM_OF_PARTNER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "EXTERNALPARTY_GENERAL_FORM_OF_SUPPLIER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "FUNCTIONALPATTERN_AGGREGATES_ACTIONTERM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "FUNCTIONALREQUIREMENT_SPECIALIZED_FORM_OF_REQUIREMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "GUI_CONTAINS_UIPLACEHOLDER",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "GUI_SPECIALISATION_REL",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "IMPLEMENTS_BUSINESS_SERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "KPI_SPECIALIZED_FORM_OF_ASSESSMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "MESSAGE_CONVEYS_BUSINESSOBJECT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "MESSAGE_INPUT_FOR_BUSINESSSERVICE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "METRIC_ASSESSES_ASSESSABLEELEMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "METRIC_SPECIALIZED_FORM_OF_ASSESSMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "NFR_GENERAL_FORM_OF_CONSTRAINT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "NFR_GENERAL_FORM_OF_QUALITYREQUIREMENT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "OFFERS_FUNCTIONALITY_VIA",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ORGUNIT_CONTAINS_BUSINESSROLE",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ORGUNIT_FORMS_BUSINESSECOSYSTEM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ORGUNIT_HAS_BUSINESSAREA",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "ORGUNIT_OFFERS_PRODUCT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "POLICYEXTERNAL_SPECIALIZED_FORM_OF_POLICY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "POLICYINTERNAL_SPECIALIZED_FORM_OF_POLICY",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "POLICY_DEFINES_CONSTRAINT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "PRODUCTFEATURE_OFFERS_VALUE_THROUGH_VALUESTREAM",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "PRODUCTPORTFOLIO_CONTAINS_PRODUCT",
+      "relation_count": 1
+    },
+    {
+      "entity_kind": "relationship_summary",
+      "relation_type": "PRODUCTPORTFOLIO_ENCLOSES_PRODUCTPORTFOLIO",
+      "relation_count": 1
     },
     {
       "entity_kind": "metaclass",

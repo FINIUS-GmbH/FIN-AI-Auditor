@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from itertools import combinations
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from fin_ai_auditor.domain.models import AuditFinding, AuditFindingLink, TruthLedgerEntry
 from fin_ai_auditor.services.claim_semantics import (
@@ -21,6 +21,9 @@ from fin_ai_auditor.services.finding_prioritization import (
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
 
 logger = logging.getLogger(__name__)
+
+
+FindingGenerationProgressCallback = Callable[[str, int, int, str], None]
 
 
 def derive_truths(
@@ -59,6 +62,7 @@ def generate_findings(
     claim_records: list[ExtractedClaimRecord],
     inherited_truths: list[TruthLedgerEntry],
     impacted_scope_keys: set[str] | None = None,
+    progress_callback: FindingGenerationProgressCallback | None = None,
 ) -> tuple[list[AuditFinding], list[AuditFindingLink]]:
     """Spec-driven finding generation.
 
@@ -77,7 +81,8 @@ def generate_findings(
     effective_impacted_scope_keys = set(impacted_scope_keys or set())
     logger.info("finding_generation_start", extra={"event_name": "finding_generation_start", "event_payload": {"claim_groups": len(groups), "total_claims": len(claim_records), "impacted_scopes": len(effective_impacted_scope_keys)}})
 
-    for subject_key, records in groups.items():
+    total_groups = len(groups)
+    for index, (subject_key, records) in enumerate(groups.items(), start=1):
         code_records = [record for record in records if record.claim.source_type == "github_file"]
         doc_records = [
             record for record in records if record.claim.source_type in {"confluence_page", "local_doc"}
@@ -345,6 +350,13 @@ def generate_findings(
                         delta_scope_affected=delta_scope_affected,
                     )
                 )
+        if progress_callback is not None and (index % 250 == 0 or index == total_groups):
+            progress_callback(
+                "scan_subject_groups",
+                index,
+                total_groups,
+                f"{index}/{total_groups} Claim-Gruppen fuer deterministische Findings geprueft.",
+            )
 
     # ── Truth ledger conflicts ────────────────────────────────────────────
     truth_findings = _find_truth_conflicts(
@@ -353,16 +365,27 @@ def generate_findings(
         impacted_scope_keys=effective_impacted_scope_keys,
     )
     findings.extend(truth_findings)
+    if progress_callback is not None:
+        progress_callback(
+            "truth_conflicts",
+            len(truth_findings),
+            max(1, len(truth_findings)),
+            f"{len(truth_findings)} Truth-Konflikt-Findings abgeleitet.",
+        )
 
-    links = _build_links(findings=findings)
+    links = _build_links(findings=findings, progress_callback=progress_callback)
     from collections import Counter
     cat_counts = dict(Counter(f.category for f in findings))
     logger.info("finding_generation_done", extra={"event_name": "finding_generation_done", "event_payload": {"total_findings": len(findings), "links": len(links), "by_category": cat_counts}})
     return findings, links
 
 
-def build_finding_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
-    return _build_links(findings=findings)
+def build_finding_links(
+    *,
+    findings: list[AuditFinding],
+    progress_callback: FindingGenerationProgressCallback | None = None,
+) -> list[AuditFindingLink]:
+    return _build_links(findings=findings, progress_callback=progress_callback)
 
 
 def _group_claims(*, claim_records: list[ExtractedClaimRecord]) -> dict[str, list[ExtractedClaimRecord]]:
@@ -1843,8 +1866,13 @@ def _build_evidence_quotes(records: list[ExtractedClaimRecord]) -> str:
     return "\n".join(lines)
 
 
-def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
+def _build_links(
+    *,
+    findings: list[AuditFinding],
+    progress_callback: FindingGenerationProgressCallback | None = None,
+) -> list[AuditFindingLink]:
     links: list[AuditFindingLink] = []
+    total_findings = len(findings)
     for index, left in enumerate(findings):
         for right in findings[index + 1 :]:
             classified = _classify_finding_link(left=left, right=right)
@@ -1863,6 +1891,14 @@ def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
                         "group_key": str(source.metadata.get("causal_group_key") or target.metadata.get("causal_group_key") or ""),
                     },
                 )
+            )
+        processed = index + 1
+        if progress_callback is not None and (processed % 100 == 0 or processed == total_findings):
+            progress_callback(
+                "link_findings",
+                processed,
+                total_findings,
+                f"{processed}/{total_findings} Findings auf Beziehungen geprueft.",
             )
     return links
 

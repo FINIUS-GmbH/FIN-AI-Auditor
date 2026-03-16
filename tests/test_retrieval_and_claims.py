@@ -2991,6 +2991,40 @@ def test_semantic_graph_attaches_evidence_chain_full_paths_to_claims() -> None:
     )
 
 
+def test_semantic_graph_does_not_attach_unrelated_full_paths_across_clusters() -> None:
+    evidence_chain_record = _claim_record(
+        source_type="local_doc",
+        source_id="_docs/bsm/target.md",
+        title="Target Architecture",
+        subject_key="EvidenceChain.full_path",
+        predicate="documented_evidence_chain_full_path",
+        normalized_value="bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element",
+        line_start=2,
+        metadata={"chain_path": "bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element"},
+    )
+    statement_record = _claim_record(
+        source_type="github_file",
+        source_id="src/statement_service.py",
+        title="statement_service.py",
+        subject_key="Statement.write_path",
+        predicate="implemented_write_path",
+        normalized_value="writes Statement",
+        line_start=18,
+    )
+
+    graph = build_semantic_graph(
+        run_id="audit_test",
+        claim_records=[evidence_chain_record, statement_record],
+        truths=[],
+    )
+
+    claim_by_subject = {claim.subject_key: claim for claim in graph.claims}
+    assert claim_by_subject["EvidenceChain.full_path"].metadata.get("semantic_evidence_chain_full_paths") == [
+        "bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element"
+    ]
+    assert claim_by_subject["Statement.write_path"].metadata.get("semantic_evidence_chain_full_paths") == []
+
+
 def test_semantic_context_attaches_evidence_chain_full_paths_to_f08_findings() -> None:
     doc_record = _claim_record(
         source_type="local_doc",
@@ -4926,6 +4960,46 @@ def test_retrieval_index_builds_segments_and_claim_links(tmp_path) -> None:
     assert any(segment.delta_status == "added" for segment in result.segments)
 
 
+def test_retrieval_index_reports_progress_for_segmentation_and_linking(tmp_path) -> None:
+    settings = Settings(database_path=tmp_path / "auditor.db", metamodel_dump_path=tmp_path / "metamodel.json")
+    snapshot = AuditSourceSnapshot(source_type="local_doc", source_id="statement.md", content_hash="sha256:test")
+    document = CollectedDocument(
+        snapshot=snapshot,
+        source_type="local_doc",
+        source_id="statement.md",
+        title="Statement Contract",
+        body="\n".join(
+            [
+                "# Statement",
+                "Write path is approval-gated and review-only.",
+                "",
+                "## Lifecycle",
+                "Review status controls persistence.",
+            ]
+        ),
+        path_hint="_docs/statement.md",
+    )
+    claim_records = extract_claim_records(documents=[document])
+    progress_events: list[tuple[str, int, int, str]] = []
+
+    build_retrieval_index(
+        settings=settings,
+        run_id="audit_test",
+        documents=[document],
+        claim_records=claim_records,
+        previous_segments=[],
+        allow_remote_embeddings=False,
+        progress_callback=lambda stage, current, total, message: progress_events.append((stage, current, total, message)),
+    )
+
+    assert any(stage == "segment_documents" for stage, _, _, _ in progress_events)
+    assert any(stage == "annotate_deltas" for stage, _, _, _ in progress_events)
+    assert any(stage == "link_claims" for stage, _, _, _ in progress_events)
+    assert all(current >= 1 for _, current, _, _ in progress_events)
+    assert all(total >= current for _, current, total, _ in progress_events)
+    assert all(message for _, _, _, message in progress_events)
+
+
 def test_consensus_detector_weights_ssot_and_code_above_historical_doc() -> None:
     claim_records = [
         _record_for_consensus(
@@ -5035,6 +5109,94 @@ def test_build_finding_links_uses_causal_group_dependencies() -> None:
     assert len(links) == 1
     assert links[0].relation_type == "depends_on"
     assert links[0].from_finding_id == detail.finding_id
+
+
+def test_generate_findings_reports_progress_for_scan_and_linking() -> None:
+    records = [
+        _claim_record(
+            source_type="confluence_page",
+            source_id="123",
+            title="Confluence Statement",
+            subject_key="Statement.policy",
+            predicate="policy_state",
+            normalized_value="approval-gated",
+            line_start=10,
+        ),
+        _claim_record(
+            source_type="local_doc",
+            source_id="_docs/statement.md",
+            title="Local Statement",
+            subject_key="Statement.policy",
+            predicate="policy_state",
+            normalized_value="direct-write",
+            line_start=14,
+            path_hint="_docs/statement.md",
+        ),
+    ]
+    progress_events: list[tuple[str, int, int, str]] = []
+
+    findings, links = generate_findings(
+        claim_records=records,
+        inherited_truths=[],
+        progress_callback=lambda stage, current, total, message: progress_events.append((stage, current, total, message)),
+    )
+
+    assert findings
+    assert any(stage == "scan_subject_groups" for stage, _, _, _ in progress_events)
+    assert any(stage == "truth_conflicts" for stage, _, _, _ in progress_events)
+    assert any(stage == "link_findings" for stage, _, _, _ in progress_events)
+    assert links
+    assert all(current >= 0 for _, current, _, _ in progress_events)
+    assert all(total >= 1 for _, _, total, _ in progress_events)
+    assert all(message for _, _, _, message in progress_events)
+
+
+def test_embedding_contradiction_detector_reports_similarity_chunk_completion(monkeypatch, tmp_path) -> None:
+    from fin_ai_auditor.config import Settings
+    from fin_ai_auditor.services import embedding_contradiction_detector as detector
+
+    class FakeEmbedder:
+        def embed_documents(self, batch):
+            return [[1.0, 0.0] for _ in batch]
+
+    records = [
+        _claim_record(
+            source_type="confluence_page",
+            source_id="123",
+            title="Confluence Statement",
+            subject_key="Statement.policy",
+            predicate="policy_state",
+            normalized_value="approval-gated persistent policy",
+            line_start=10,
+        ),
+        _claim_record(
+            source_type="local_doc",
+            source_id="_docs/statement.md",
+            title="Local Statement",
+            subject_key="Statement.policy",
+            predicate="policy_state",
+            normalized_value="direct-write persistent policy",
+            line_start=14,
+            path_hint="_docs/statement.md",
+        ),
+    ]
+    progress_events: list[str] = []
+    settings = Settings(database_path=tmp_path / "auditor.db", metamodel_dump_path=tmp_path / "metamodel.json")
+
+    monkeypatch.setattr(detector, "_find_embedding_slot", lambda settings: 1)
+    monkeypatch.setattr(detector, "get_embeddings_from_llm_slot", lambda settings, llm_slot: FakeEmbedder())
+
+    findings = detector.detect_cross_document_contradictions(
+        settings=settings,
+        claim_records=records,
+        allow_remote_embeddings=True,
+        progress_callback=progress_events.append,
+    )
+
+    assert findings
+    assert any("Embedding-Cache:" in message for message in progress_events)
+    assert any("Similarity-Vergleich: Chunk 1/1 (0/2 Vektoren)" in message for message in progress_events)
+    assert any("Similarity-Vergleich: Chunk 1/1 abgeschlossen (2/2 Vektoren" in message for message in progress_events)
 
 
 def test_jira_issue_payload_contains_structured_ai_coding_sections() -> None:

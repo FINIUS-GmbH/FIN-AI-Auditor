@@ -163,6 +163,14 @@ npm run dev
 
 Das Frontend erwartet die API standardmaessig unter `http://127.0.0.1:8088`.
 
+### 5. Alle Dev-Komponenten zusammen starten
+
+```bash
+./dev.sh
+```
+
+`./dev.sh` startet Backend, Worker und Frontend gemeinsam. Ohne laufenden Worker bleiben neue Audit-Runs im Status `planned`.
+
 Der Auditor ist so vorbereitet, dass FIN-AI primaer ueber den lokalen Repo-Pfad im GitHub-Verzeichnis adressiert wird.
 Confluence wird als feste Analysequelle behandelt, Jira nur als festes Ticket-Ziel fuer spaetere Codeaenderungs-Tickets, und das Metamodell ist im Laufprofil immer aktiv.
 Bis zu einer User-Entscheidung sind alle externen Zugriffe lesend. Schreibend genutzt wird nur `data/fin_ai_auditor.db`.
