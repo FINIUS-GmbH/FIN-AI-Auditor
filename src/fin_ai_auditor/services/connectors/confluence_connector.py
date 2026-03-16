@@ -156,6 +156,7 @@ class ConfluenceKnowledgeBaseConnector:
                     notes.append(f"Confluence Space {normalized_space_key} konnte nicht gelesen werden.")
                     continue
                 selected_page_ids = _normalized_page_ids(request.page_ids)
+                explicitly_selected = bool(selected_page_ids)
                 if selected_page_ids:
                     page_rows = _collect_selected_page_rows(
                         client=client,
@@ -244,6 +245,7 @@ class ConfluenceKnowledgeBaseConnector:
                                         "ancestor_titles": ancestor_titles,
                                         "space_name": space_name,
                                         "incremental_reused": True,
+                                        "explicitly_selected": explicitly_selected,
                                     },
                                 )
                             )
@@ -343,6 +345,7 @@ class ConfluenceKnowledgeBaseConnector:
                                     block_kind="attachment",
                                 ),
                                 "incremental_reused": False,
+                                "explicitly_selected": explicitly_selected,
                             },
                         )
                     )

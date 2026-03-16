@@ -85,7 +85,8 @@ class SQLiteAuditRepository:
             rows = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       analysis_mode, progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                       analysis_log_json, implemented_changes_json, clarification_threads_json,
                        llm_usage_json, summary, error
                 FROM audit_runs
                 ORDER BY created_at DESC
@@ -98,7 +99,8 @@ class SQLiteAuditRepository:
             row = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       analysis_mode, progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                       analysis_log_json, implemented_changes_json, clarification_threads_json,
                        llm_usage_json, summary, error
                 FROM audit_runs
                 WHERE run_id = ?
@@ -114,19 +116,24 @@ class SQLiteAuditRepository:
             connection.execute(
                 """
                 INSERT INTO audit_runs(
-                    run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                    progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                    run_id, status, analysis_mode, target_json, created_at, updated_at, started_at, finished_at,
+                    progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                    analysis_log_json, implemented_changes_json, clarification_threads_json,
                     llm_usage_json, summary, error
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status = excluded.status,
+                    analysis_mode = excluded.analysis_mode,
                     target_json = excluded.target_json,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at,
                     progress_json = excluded.progress_json,
+                    review_cards_json = excluded.review_cards_json,
+                    coverage_summary_json = excluded.coverage_summary_json,
+                    budget_limited = excluded.budget_limited,
                     analysis_log_json = excluded.analysis_log_json,
                     implemented_changes_json = excluded.implemented_changes_json,
                     clarification_threads_json = excluded.clarification_threads_json,
@@ -137,12 +144,16 @@ class SQLiteAuditRepository:
                 (
                     run.run_id,
                     run.status,
+                    run.analysis_mode,
                     run.target.model_dump_json(),
                     run.created_at,
                     run.updated_at,
                     run.started_at,
                     run.finished_at,
                     run.progress.model_dump_json(),
+                    _dump_json_list(run.review_cards),
+                    _dump_json(run.coverage_summary.model_dump(mode="json") if run.coverage_summary is not None else {}),
+                    1 if run.budget_limited else 0,
                     _dump_json_list(run.analysis_log),
                     _dump_json_list(run.implemented_changes),
                     _dump_json_list(run.clarification_threads),
@@ -1502,12 +1513,20 @@ class SQLiteAuditRepository:
             {
                 "run_id": run_id,
                 "status": row["status"],
+                "analysis_mode": row["analysis_mode"] if "analysis_mode" in row.keys() else "fast",
                 "target": json.loads(row["target_json"]),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "started_at": row["started_at"],
                 "finished_at": row["finished_at"],
                 "progress": json.loads(row["progress_json"] or "{}"),
+                "review_cards": json.loads(row["review_cards_json"] or "[]") if "review_cards_json" in row.keys() else [],
+                "coverage_summary": (
+                    json.loads(row["coverage_summary_json"] or "{}")
+                    if "coverage_summary_json" in row.keys() and str(row["coverage_summary_json"] or "").strip() not in {"", "{}"}
+                    else None
+                ),
+                "budget_limited": bool(row["budget_limited"]) if "budget_limited" in row.keys() else False,
                 "analysis_log": json.loads(row["analysis_log_json"] or "[]"),
                 "implemented_changes": json.loads(row["implemented_changes_json"] or "[]"),
                 "clarification_threads": json.loads(

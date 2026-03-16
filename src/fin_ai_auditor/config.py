@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     external_resource_access_mode: str = "read_only"
     external_write_requires_user_decision: bool = True
     local_database_is_only_writable_store: bool = True
+    enable_deep_audit_api_runs: bool = False
     writeback_target_mode: str = "allowlist_only"
     allowed_writeback_confluence_space_keys: list[str] = Field(default_factory=list)
     allowed_writeback_jira_project_keys: list[str] = Field(default_factory=list)

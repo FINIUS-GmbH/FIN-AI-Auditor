@@ -9,6 +9,8 @@ export type AuditTarget = {
   include_local_docs: boolean;
 };
 
+export type AnalysisMode = "fast" | "deep";
+
 export type SourceProfile = {
   confluence_url: string;
   jira_url: string;
@@ -270,6 +272,44 @@ export type AuditRunProgress = {
   steps: AuditProgressStep[];
 };
 
+export type ReviewCardCoverageSummary = {
+  total_documents: number;
+  total_sections: number;
+  prioritized_sections: number;
+  compared_pairs: number;
+  skipped_sections_due_to_prioritization: number;
+  skipped_pairs_due_to_budget: number;
+  source_type_counts: Record<string, number>;
+  prioritized_scope_labels: string[];
+  compared_scope_labels: string[];
+  deferred_scope_labels: string[];
+  notes: string[];
+};
+
+export type ReviewCard = {
+  card_id: string;
+  title: string;
+  deviation_type: "error" | "gap" | "misunderstanding" | "obsolete" | "unclear";
+  summary: string;
+  source_a: string;
+  source_b: string;
+  source_a_evidence: string[];
+  source_b_evidence: string[];
+  source_a_locations: AuditLocation[];
+  source_b_locations: AuditLocation[];
+  why_it_matters: string;
+  recommended_decision: string;
+  confidence: number;
+  needs_human_decision: boolean;
+  priority: "high" | "medium" | "low";
+  follow_up_capabilities: string[];
+  related_finding_ids: string[];
+  decision_state: "open" | "accepted" | "rejected" | "clarification_needed";
+  decided_at?: string | null;
+  decision_comment?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
 export type AuditAnalysisLogEntry = {
   log_id: string;
   created_at: string;
@@ -492,6 +532,7 @@ export type WritebackApprovalRequest = {
   title: string;
   summary: string;
   target_url?: string | null;
+  related_review_card_ids?: string[];
   related_package_ids: string[];
   related_finding_ids: string[];
   payload_preview: string[];
@@ -606,6 +647,7 @@ export type ClarificationThread = {
 export type AuditRun = {
   run_id: string;
   status: "planned" | "running" | "completed" | "failed";
+  analysis_mode: AnalysisMode;
   target: AuditTarget;
   created_at: string;
   updated_at: string;
@@ -623,6 +665,9 @@ export type AuditRun = {
   approval_requests: WritebackApprovalRequest[];
   implemented_changes: AuditImplementedChange[];
   source_snapshots: AuditSourceSnapshot[];
+  review_cards: ReviewCard[];
+  budget_limited?: boolean;
+  coverage_summary?: ReviewCardCoverageSummary | null;
   findings: AuditFinding[];
   finding_links: AuditFindingLink[];
   clarification_threads: ClarificationThread[];

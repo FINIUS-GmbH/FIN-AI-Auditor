@@ -58,18 +58,37 @@ def process_once() -> bool:
         ):
             completed = pipeline.execute_run(run_id=run.run_id, worker_id=worker_id)
     except Exception as exc:
-        observability.increment_counter(
-            metric_key="worker_run_failures_total",
-            run_id=run.run_id,
-            worker_id=worker_id,
-            labels={"error_type": type(exc).__name__},
-        )
-        audit_service.fail_run(run_id=run.run_id, error=f"{type(exc).__name__}: {exc}", worker_id=worker_id)
+        error_msg = f"{type(exc).__name__}: {exc}"
+        try:
+            observability.increment_counter(
+                metric_key="worker_run_failures_total",
+                run_id=run.run_id,
+                worker_id=worker_id,
+                labels={"error_type": type(exc).__name__},
+            )
+        except Exception:
+            logger.warning("worker_observability_failed", exc_info=True)
+        try:
+            audit_service.fail_run(run_id=run.run_id, error=error_msg, worker_id=worker_id)
+        except Exception as fail_exc:
+            logger.error(
+                "worker_fail_run_failed",
+                extra={
+                    "event_name": "worker_fail_run_failed",
+                    "event_payload": {
+                        "run_id": run.run_id,
+                        "worker_id": worker_id,
+                        "original_error": error_msg,
+                        "fail_error": f"{type(fail_exc).__name__}: {fail_exc}",
+                    },
+                },
+                exc_info=True,
+            )
         logger.error(
             "worker_run_failed",
             extra={
                 "event_name": "worker_run_failed",
-                "event_payload": {"run_id": run.run_id, "worker_id": worker_id, "error": f"{type(exc).__name__}: {exc}"},
+                "event_payload": {"run_id": run.run_id, "worker_id": worker_id, "error": error_msg},
             },
             exc_info=True,
         )

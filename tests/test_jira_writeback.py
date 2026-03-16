@@ -188,6 +188,7 @@ def test_audit_service_executes_approved_jira_writeback(tmp_path: Path) -> None:
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -251,6 +252,7 @@ def test_audit_service_reuses_existing_jira_writeback_idempotently(tmp_path: Pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -326,6 +328,7 @@ def test_jira_writeback_failure_persists_scope_mismatch_metadata(tmp_path: Path)
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -374,6 +377,7 @@ def test_build_jira_ticket_brief_includes_write_sink_context(tmp_path: Path) -> 
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -448,6 +452,7 @@ def test_writeback_approval_preview_includes_atomic_facts_and_action_lane(tmp_pa
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -516,6 +521,7 @@ def test_jira_writeback_approval_request_blocks_disallowed_project(tmp_path: Pat
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -552,6 +558,7 @@ def test_jira_writeback_execution_rechecks_target_policy(tmp_path: Path) -> None
     service = AuditService(repository=repository, settings=allowed_settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",

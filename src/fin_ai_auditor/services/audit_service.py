@@ -13,6 +13,7 @@ import httpx
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
+    AnalysisMode,
     AtomicFactEntry,
     AuditAnalysisLogEntry,
     AuditClaimEntry,
@@ -33,6 +34,8 @@ from fin_ai_auditor.domain.models import (
     DecisionPackage,
     DecisionProblemElement,
     DecisionRecord,
+    ReviewCard,
+    ReviewCardCoverageSummary,
     RetrievalSegment,
     RetrievalSegmentClaimLink,
     SchemaTruthEntry,
@@ -81,6 +84,14 @@ AUDIT_PIPELINE_STEPS: Final[tuple[tuple[str, str], ...]] = (
     ("finding_generation", "Finding-Generierung"),
     ("llm_recommendations", "LLM-Empfehlungen"),
     ("decision_packages", "Entscheidungspakete"),
+)
+
+FAST_AUDIT_PIPELINE_STEPS: Final[tuple[tuple[str, str], ...]] = (
+    ("source_collection", "Quellen laden"),
+    ("section_profiling", "Sektionen profilieren"),
+    ("candidate_comparison", "Kandidaten vergleichen"),
+    ("review_cards", "Review-Karten bereitstellen"),
+    ("follow_up_preparation", "Folgeaktionen vorbereiten"),
 )
 
 STEP_LOG_BLUEPRINTS: Final[dict[str, dict[str, list[str] | str]]] = {
@@ -166,6 +177,51 @@ STEP_LOG_BLUEPRINTS: Final[dict[str, dict[str, list[str] | str]]] = {
             "Der User muss nicht ueber rohe Findings entscheiden, sondern ueber fachlich zusammenhaengende Pakete.",
         ],
     },
+    "source_collection": {
+        "title": "Analysequellen werden gesammelt",
+        "derived_changes": [
+            "Read-only-Quellen werden in einen gemeinsamen Fast-Audit-Arbeitsstand uebernommen.",
+        ],
+        "impact_summary": [
+            "Nur priorisierte Inhalte gehen anschliessend in den schnellen Vergleichspfad.",
+        ],
+    },
+    "section_profiling": {
+        "title": "Sektionen werden profiliert",
+        "derived_changes": [
+            "Dokumente werden in vergleichbare, entscheidungsrelevante Abschnitte zerlegt.",
+        ],
+        "impact_summary": [
+            "Der spaetere KI-Vergleich arbeitet nur auf priorisierten Abschnittskandidaten.",
+        ],
+    },
+    "candidate_comparison": {
+        "title": "Priorisierte Kandidaten werden verglichen",
+        "derived_changes": [
+            "Passende Abschnitte aus Doku, Code und Metamodell werden direkt gegeneinander gespiegelt.",
+        ],
+        "impact_summary": [
+            "Der schnelle Vergleich ersetzt teure Vollgraph- und Retrieval-Pfade.",
+        ],
+    },
+    "review_cards": {
+        "title": "Review-Karten werden vorbereitet",
+        "derived_changes": [
+            "Abweichungen werden als wenige, entscheidbare Review-Karten bereitgestellt.",
+        ],
+        "impact_summary": [
+            "Der User arbeitet direkt auf Review-Karten statt auf tiefen Forensik-Artefakten.",
+        ],
+    },
+    "follow_up_preparation": {
+        "title": "Folgeaktionen werden vorbereitet",
+        "derived_changes": [
+            "Akzeptierbare Folgeaktionen werden pro Review-Karte vorbereitet, aber noch nicht ausgefuehrt.",
+        ],
+        "impact_summary": [
+            "Jira- und Confluence-Folgepfade koennen nach einer User-Entscheidung direkt anschliessen.",
+        ],
+    },
 }
 
 DECISION_SCOPE_HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
@@ -204,20 +260,44 @@ class AuditService:
 
     def create_run(self, *, payload: CreateAuditRunRequest) -> AuditRun:
         normalized_target = self._normalize_target(target=payload.target)
+        analysis_mode: AnalysisMode = payload.analysis_mode
         run = AuditRun(
+            analysis_mode=analysis_mode,
             target=normalized_target,
-            progress=self._build_initial_progress(target=normalized_target),
+            progress=self._build_initial_progress(target=normalized_target, analysis_mode=analysis_mode),
             analysis_log=[
                 AuditAnalysisLogEntry(
                     source_type="system",
                     title="Run angelegt",
-                    message="Audit-Run wurde angelegt. Externe Systeme bleiben read-only; Ergebnisse werden lokal gesammelt.",
-                    derived_changes=["Lokale Auditor-DB wurde als einzige schreibende SSOT fuer diesen Lauf vorbereitet."],
+                    message=(
+                        "Audit-Run wurde angelegt. Externe Systeme bleiben read-only; Ergebnisse werden lokal gesammelt. "
+                        + (
+                            "Fast Audit ist als schneller Vergleichspfad aktiv."
+                            if analysis_mode == "fast"
+                            else "Deep Audit ist als forensischer Analysepfad aktiv."
+                        )
+                    ),
+                    derived_changes=[
+                        "Lokale Auditor-DB wurde als einzige schreibende SSOT fuer diesen Lauf vorbereitet.",
+                        (
+                            "Der schnelle Review-Karten-Pfad wurde fuer diesen Lauf aktiviert."
+                            if analysis_mode == "fast"
+                            else "Der tiefe Claim-/Graph-/Retrieval-Pfad wurde fuer diesen Lauf aktiviert."
+                        ),
+                    ],
                     impact_summary=["Der Worker kann den Lauf nun schrittweise analysieren und protokollieren."],
                 )
             ],
         )
         return self._repository.upsert_run(run=run)
+
+    def create_user_run(self, *, payload: CreateAuditRunRequest) -> AuditRun:
+        if payload.analysis_mode == "deep" and not self._settings.enable_deep_audit_api_runs:
+            raise ValueError(
+                "Deep Audit ist serverseitig nicht fuer den normalen UI/API-Pfad freigeschaltet. "
+                "Der produktive Standardpfad ist Fast Audit."
+            )
+        return self.create_run(payload=payload)
 
     def list_runs(self) -> list[AuditRun]:
         return self._repository.list_runs()
@@ -355,6 +435,7 @@ class AuditService:
                 "progress": self._progress_for_step(
                     progress=run.progress,
                     target=run.target,
+                    analysis_mode=run.analysis_mode,
                     step_key=step_key,
                     progress_pct=progress_pct,
                     current_activity=current_activity,
@@ -438,6 +519,7 @@ class AuditService:
         source_snapshots: list[AuditSourceSnapshot],
         findings: list[AuditFinding],
         finding_links: list[AuditFindingLink],
+        review_cards: list[ReviewCard] | None = None,
         claims: list[AuditClaimEntry],
         truths: list[TruthLedgerEntry],
         schema_truths: list[SchemaTruthEntry],
@@ -445,24 +527,32 @@ class AuditService:
         semantic_relations: list[SemanticRelation],
         summary: str,
         analysis_notes: list[str],
+        budget_limited: bool = False,
+        coverage_summary: ReviewCardCoverageSummary | None = None,
         llm_usage: dict | None = None,
         worker_id: str | None = None,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
         now_iso = utc_now_iso()
-        packages = self._build_decision_packages(
-            findings=findings,
-            claims=claims,
-            truths=truths,
-            semantic_entities=semantic_entities,
-            semantic_relations=semantic_relations,
-        )
-        atomic_facts = self._build_atomic_facts(packages=packages)
-        atomic_facts, packages, atomic_fact_notes = self._apply_atomic_fact_history(
-            run=run,
-            atomic_facts=atomic_facts,
-            packages=packages,
-        )
+        review_cards = list(review_cards or [])
+        if run.analysis_mode == "fast":
+            packages = []
+            atomic_facts = []
+            atomic_fact_notes = []
+        else:
+            packages = self._build_decision_packages(
+                findings=findings,
+                claims=claims,
+                truths=truths,
+                semantic_entities=semantic_entities,
+                semantic_relations=semantic_relations,
+            )
+            atomic_facts = self._build_atomic_facts(packages=packages)
+            atomic_facts, packages, atomic_fact_notes = self._apply_atomic_fact_history(
+                run=run,
+                atomic_facts=atomic_facts,
+                packages=packages,
+            )
         completed = run.model_copy(
             update={
                 "status": "completed",
@@ -472,7 +562,9 @@ class AuditService:
                 "progress": self._build_completed_progress(progress=run.progress),
                 "analysis_log": self._append_pipeline_completion_notes(
                     analysis_log=run.analysis_log,
+                    analysis_mode=run.analysis_mode,
                     findings=findings,
+                    review_cards=review_cards,
                     claims=claims,
                     packages=packages,
                     notes=[*analysis_notes, *atomic_fact_notes],
@@ -480,6 +572,9 @@ class AuditService:
                 "source_snapshots": source_snapshots,
                 "semantic_entities": semantic_entities,
                 "semantic_relations": semantic_relations,
+                "review_cards": review_cards,
+                "budget_limited": budget_limited,
+                "coverage_summary": coverage_summary,
                 "findings": findings,
                 "finding_links": finding_links,
                 "claims": claims,
@@ -659,6 +754,79 @@ class AuditService:
                 "analysis_log": next_log,
                 "decision_packages": updated_packages,
                 "decision_records": [*run.decision_records, decision_record],
+            }
+        )
+        return self._repository.upsert_run(run=updated)
+
+    def apply_review_card_decision(
+        self,
+        *,
+        run_id: str,
+        card_id: str,
+        action: str,
+        comment_text: str | None,
+    ) -> AuditRun:
+        run = self._require_run(run_id=run_id)
+        if run.analysis_mode != "fast":
+            raise ValueError("Review-Karten-Entscheidungen sind nur fuer Fast-Audit-Laeufe verfuegbar.")
+        next_state = {
+            "accept": "accepted",
+            "reject": "rejected",
+            "clarify": "clarification_needed",
+        }.get(str(action or "").strip())
+        if next_state is None:
+            raise ValueError(f"Unbekannte Review-Karten-Aktion: {action}")
+
+        target_card: ReviewCard | None = None
+        updated_cards: list[ReviewCard] = []
+        related_finding_ids: list[str] = []
+        for card in run.review_cards:
+            if card.card_id != card_id:
+                updated_cards.append(card)
+                continue
+            target_card = card.model_copy(
+                update={
+                    "decision_state": next_state,
+                    "decided_at": utc_now_iso(),
+                    "decision_comment": str(comment_text or "").strip() or None,
+                }
+            )
+            related_finding_ids = list(target_card.related_finding_ids)
+            updated_cards.append(target_card)
+        if target_card is None:
+            raise ValueError(f"Review-Karte nicht gefunden: {card_id}")
+
+        finding_state = {
+            "accepted": "accepted",
+            "rejected": "dismissed",
+            "clarification_needed": "open",
+        }[next_state]
+        related_finding_ids_set = set(related_finding_ids)
+        updated_findings = [
+            finding.model_copy(update={"resolution_state": finding_state})
+            if finding.finding_id in related_finding_ids_set
+            else finding
+            for finding in run.findings
+        ]
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "review_cards": updated_cards,
+                "findings": updated_findings,
+                "analysis_log": self._append_log(
+                    analysis_log=run.analysis_log,
+                    entry=AuditAnalysisLogEntry(
+                        source_type="impact_analysis",
+                        title=f"Review-Karte {target_card.title} bewertet",
+                        message=f"Review-Karte wurde mit Aktion '{action}' bewertet.",
+                        related_finding_ids=related_finding_ids,
+                        derived_changes=[f"Review-Karten-Status wurde auf {next_state} gesetzt."],
+                        impact_summary=[
+                            "Akzeptierte Review-Karten koennen jetzt fuer Folgeaktionen Richtung Jira oder Confluence verwendet werden."
+                        ],
+                        metadata={"review_card_id": target_card.card_id, "action": action, "comment_text": comment_text},
+                    ),
+                ),
             }
         )
         return self._repository.upsert_run(run=updated)
@@ -925,13 +1093,19 @@ class AuditService:
         title: str,
         summary: str,
         target_url: str | None,
-        related_package_ids: list[str],
-        related_finding_ids: list[str],
-        payload_preview: list[str],
+        related_review_card_ids: list[str] | None = None,
+        related_package_ids: list[str] | None = None,
+        related_finding_ids: list[str] | None = None,
+        payload_preview: list[str] | None = None,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
+        related_review_card_ids = list(related_review_card_ids or [])
+        related_package_ids = list(related_package_ids or [])
+        related_finding_ids = list(related_finding_ids or [])
+        payload_preview = list(payload_preview or [])
         related_findings = self._select_related_findings_for_approval(
             run=run,
+            related_review_card_ids=related_review_card_ids,
             related_finding_ids=related_finding_ids,
             related_package_ids=related_package_ids,
         )
@@ -1029,10 +1203,10 @@ class AuditService:
             title=title,
             summary=summary,
             target_url=effective_target_url,
-            related_package_ids=list(related_package_ids),
+            related_package_ids=related_package_ids,
             related_finding_ids=[finding.finding_id for finding in related_findings],
             payload_preview=effective_payload_preview,
-            metadata=approval_metadata,
+            metadata={**approval_metadata, "related_review_card_ids": related_review_card_ids},
         )
         updated = run.model_copy(
             update={
@@ -1044,7 +1218,7 @@ class AuditService:
                         source_type="impact_analysis",
                         title="Writeback-Freigabe angefordert",
                         message=summary,
-                        related_finding_ids=list(related_finding_ids),
+                        related_finding_ids=[finding.finding_id for finding in related_findings],
                         derived_changes=[
                             f"Lokale Freigabeanfrage fuer {target_type} wurde angelegt.",
                         ],
@@ -3060,7 +3234,9 @@ class AuditService:
         self,
         *,
         analysis_log: list[AuditAnalysisLogEntry],
+        analysis_mode: AnalysisMode,
         findings: list[AuditFinding],
+        review_cards: list[ReviewCard],
         claims: list[AuditClaimEntry],
         packages: list[DecisionPackage],
         notes: list[str],
@@ -3070,15 +3246,35 @@ class AuditService:
             entry=AuditAnalysisLogEntry(
                 source_type="impact_analysis",
                 title="Analyse abgeschlossen",
-                message="Die produktive Read-only-Pipeline hat Claims, Findings und Entscheidungspakete erzeugt.",
+                message=(
+                    "Der Fast-Audit-Pfad hat Review-Karten und Folgeaktionshinweise erzeugt."
+                    if analysis_mode == "fast"
+                    else "Die produktive Read-only-Pipeline hat Claims, Findings und Entscheidungspakete erzeugt."
+                ),
                 related_finding_ids=[finding.finding_id for finding in findings],
                 derived_changes=[
-                    f"{len(claims)} Claims wurden aus den gelesenen Quellen extrahiert.",
-                    f"{len(findings)} Findings wurden aus den Claims abgeleitet.",
-                    f"{len(packages)} Entscheidungspakete wurden neu aufgebaut.",
+                    (
+                        f"{len(review_cards)} Review-Karten wurden aus priorisierten Vergleichskandidaten abgeleitet."
+                        if analysis_mode == "fast"
+                        else f"{len(claims)} Claims wurden aus den gelesenen Quellen extrahiert."
+                    ),
+                    (
+                        f"{len(findings)} kompatible Findings wurden fuer Folgeaktionen vorbereitet."
+                        if analysis_mode == "fast"
+                        else f"{len(findings)} Findings wurden aus den Claims abgeleitet."
+                    ),
+                    (
+                        "Entscheidungspakete bleiben im Fast-Audit-Modus bewusst leer."
+                        if analysis_mode == "fast"
+                        else f"{len(packages)} Entscheidungspakete wurden neu aufgebaut."
+                    ),
                 ],
                 impact_summary=[
-                    "Nachfolgende User-Entscheidungen arbeiten gegen echte Collector-Evidenz statt gegen Demo-Daten."
+                    (
+                        "Nachfolgende User-Entscheidungen arbeiten direkt auf Review-Karten mit Collector-Evidenz."
+                        if analysis_mode == "fast"
+                        else "Nachfolgende User-Entscheidungen arbeiten gegen echte Collector-Evidenz statt gegen Demo-Daten."
+                    )
                 ],
                 metadata={"phase": "pipeline_complete"},
             ),
@@ -3354,9 +3550,28 @@ class AuditService:
         self,
         *,
         run: AuditRun,
+        related_review_card_ids: list[str],
         related_finding_ids: list[str],
         related_package_ids: list[str],
     ) -> list[AuditFinding]:
+        if related_review_card_ids:
+            selected_review_cards = [
+                card for card in run.review_cards if card.card_id in set(related_review_card_ids)
+            ]
+            if not selected_review_cards:
+                raise ValueError("Keine der angeforderten Review-Karten wurde gefunden.")
+            non_accepted = [card.title for card in selected_review_cards if card.decision_state != "accepted"]
+            if non_accepted:
+                raise ValueError(
+                    "Folgeaktionen sind nur fuer akzeptierte Review-Karten erlaubt: " + ", ".join(non_accepted[:3])
+                )
+            selected_ids = {
+                finding_id
+                for card in selected_review_cards
+                for finding_id in card.related_finding_ids
+            }
+            if selected_ids:
+                return self._select_related_findings(run=run, related_finding_ids=list(selected_ids))
         if related_finding_ids:
             selected = self._select_related_findings(run=run, related_finding_ids=related_finding_ids)
             if selected:
@@ -3451,9 +3666,10 @@ class AuditService:
         )
 
     @staticmethod
-    def _build_steps(*, include_local_docs: bool) -> list[AuditProgressStep]:
+    def _build_steps(*, include_local_docs: bool, analysis_mode: AnalysisMode) -> list[AuditProgressStep]:
         steps: list[AuditProgressStep] = []
-        for step_key, label in AUDIT_PIPELINE_STEPS:
+        step_blueprint = FAST_AUDIT_PIPELINE_STEPS if analysis_mode == "fast" else AUDIT_PIPELINE_STEPS
+        for step_key, label in step_blueprint:
             if step_key == "local_docs_check" and not include_local_docs:
                 steps.append(
                     AuditProgressStep(
@@ -3467,13 +3683,17 @@ class AuditService:
             steps.append(AuditProgressStep(step_key=step_key, label=label))
         return steps
 
-    def _build_initial_progress(self, *, target: AuditTarget) -> AuditRunProgress:
+    def _build_initial_progress(self, *, target: AuditTarget, analysis_mode: AnalysisMode) -> AuditRunProgress:
         return AuditRunProgress(
             progress_pct=0,
             phase_key="queued",
             phase_label="Wartet auf Worker",
-            current_activity="Run wurde angelegt und wartet auf die Analyse-Pipeline.",
-            steps=self._build_steps(include_local_docs=bool(target.include_local_docs)),
+            current_activity=(
+                "Run wurde angelegt und wartet auf den schnellen Vergleichspfad."
+                if analysis_mode == "fast"
+                else "Run wurde angelegt und wartet auf die Analyse-Pipeline."
+            ),
+            steps=self._build_steps(include_local_docs=bool(target.include_local_docs), analysis_mode=analysis_mode),
         )
 
     @staticmethod
@@ -3493,6 +3713,7 @@ class AuditService:
         *,
         progress: AuditRunProgress,
         target: AuditTarget,
+        analysis_mode: AnalysisMode,
         step_key: str,
         progress_pct: int,
         current_activity: str,
@@ -3500,7 +3721,10 @@ class AuditService:
         detail: str | None,
     ) -> AuditRunProgress:
         now = utc_now_iso()
-        effective_steps = progress.steps or self._build_steps(include_local_docs=bool(target.include_local_docs))
+        effective_steps = progress.steps or self._build_steps(
+            include_local_docs=bool(target.include_local_docs),
+            analysis_mode=analysis_mode,
+        )
         current_index = next(
             (index for index, step in enumerate(effective_steps) if step.step_key == step_key),
             None,

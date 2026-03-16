@@ -5,7 +5,7 @@ import {
   getAtlassianAuthStatus, getBootstrapData, listAuditRuns,
   recordConfluencePageUpdate, recordJiraTicketCreated, resetAuditDatabase,
   resolveWritebackApprovalRequest, startAtlassianAuthorization,
-  submitDecisionComment, submitPackageDecision, updateAtomicFactStatus,
+  submitDecisionComment, submitPackageDecision, submitReviewCardDecision, updateAtomicFactStatus,
   verifyConfluenceAccess,
 } from "./api";
 import { categoryLabel } from "./categoryLabels";
@@ -15,7 +15,7 @@ import DocStructureView from "./components/DocStructureView";
 import type {
   AtlassianAuthStatus, AuditLocation, AuditRun, AuditTarget,
   AtomicFactEntry,
-  BootstrapData, DecisionPackage, SourceProfile, WritebackApprovalRequest,
+  BootstrapData, DecisionPackage, ReviewCard, SourceProfile, WritebackApprovalRequest,
   ConfluencePatchPreview,
 } from "./types";
 
@@ -52,7 +52,14 @@ const CATEGORY_DE: Record<string, string> = {
   terminology_collision: categoryLabel("terminology_collision"), low_confidence_review: categoryLabel("low_confidence_review"),
   obsolete_documentation: categoryLabel("obsolete_documentation"), open_decision: categoryLabel("open_decision"),
 };
-function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? v; }
+const REVIEW_CARD_TYPE_DE: Record<ReviewCard["deviation_type"], string> = {
+  error: "Fehler",
+  gap: "Luecke",
+  misunderstanding: "Missverstaendnis",
+  obsolete: "Veraltet",
+  unclear: "Unklar",
+};
+function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? REVIEW_CARD_TYPE_DE[v as ReviewCard["deviation_type"]] ?? v; }
 
 const ACTION_LANE_DE: Record<AtomicFactEntry["action_lane"], string> = {
   confluence_doc: "Confluence-Doku",
@@ -99,6 +106,15 @@ function SrcBadge({ t }: { t: string }): ReactNode {
 
 function sourceTypeLabel(sourceType: string): string {
   return SRC_CFG[sourceType]?.label ?? sourceType;
+}
+
+function coverageSourceTypeEntries(run: AuditRun | null): [string, number][] {
+  const counts = run?.coverage_summary?.source_type_counts ?? {};
+  return Object.entries(counts).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+}
+
+function coverageScopeLabels(labels: string[] | undefined | null): string[] {
+  return Array.isArray(labels) ? labels.filter((item) => typeof item === "string" && item.trim().length > 0) : [];
 }
 
 function locStr(l: AuditLocation): string {
@@ -165,6 +181,118 @@ function packageNextActions(pkg: DecisionPackage): string[] {
   return actions;
 }
 
+function reviewCardNextActions(card: ReviewCard): string[] {
+  const actions: string[] = [];
+  if (card.follow_up_capabilities.includes("confluence_page_update")) {
+    actions.push("Confluence- oder Doku-Korrektur nach User-Entscheidung vorbereiten");
+  }
+  if (card.follow_up_capabilities.includes("jira_ticket_create")) {
+    actions.push("Jira-Folgeaktion fuer Code- oder Artefaktanpassung vorbereiten");
+  }
+  if (actions.length === 0) {
+    actions.push("Geltende Quelle festlegen und Review-Karte entsprechend schliessen");
+  }
+  return actions;
+}
+
+function reviewCardMetaString(card: ReviewCard, key: string): string {
+  const value = card.metadata?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function reviewCardMetaStrings(card: ReviewCard, key: string): string[] {
+  const value = card.metadata?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function reviewCardDecisionQuestion(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_question") || `Wie soll die Abweichung zu '${card.title}' fachlich bewertet werden?`;
+}
+
+function reviewCardDecisionLabels(card: ReviewCard): { accept: string; reject: string; clarify: string } {
+  return {
+    accept: reviewCardMetaString(card, "accept_label") || "Abweichung bestaetigen",
+    reject: reviewCardMetaString(card, "reject_label") || "Nicht als Befund werten",
+    clarify: reviewCardMetaString(card, "clarify_label") || "Rueckfrage markieren",
+  };
+}
+
+function reviewCardDecisionConsequences(card: ReviewCard): { accept: string[]; reject: string[]; clarify: string[] } {
+  return {
+    accept: reviewCardMetaStrings(card, "accept_consequences").length > 0
+      ? reviewCardMetaStrings(card, "accept_consequences")
+      : ["Die Karte wird akzeptiert und fuer moegliche Folgeaktionen freigegeben."],
+    reject: reviewCardMetaStrings(card, "reject_consequences").length > 0
+      ? reviewCardMetaStrings(card, "reject_consequences")
+      : ["Die Karte wird geschlossen und nicht weiterverfolgt."],
+    clarify: reviewCardMetaStrings(card, "clarify_consequences").length > 0
+      ? reviewCardMetaStrings(card, "clarify_consequences")
+      : ["Die Karte bleibt als Klaerfall offen und erzeugt noch keine Folgeaktion."],
+  };
+}
+
+function reviewCardLaneKey(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_lane") || "process_scope";
+}
+
+function reviewCardLaneLabel(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_lane_label") || "Prozess, Run & Scope";
+}
+
+function reviewCardLaneRank(card: ReviewCard): number {
+  const value = card.metadata?.decision_lane_rank;
+  return typeof value === "number" ? value : 9;
+}
+
+function reviewCardIndependenceNote(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_independence_note") || "Diese Karte basiert auf einem stabilen Run-Snapshot.";
+}
+
+function reviewCardRationale(card: ReviewCard): string {
+  return reviewCardMetaString(card, "rationale_summary") || card.why_it_matters;
+}
+
+function reviewCardSourceGroups(card: ReviewCard): {
+  slotLabel: string;
+  sourceLabel: string;
+  heading?: string;
+  statement: string;
+  fullText?: string;
+  evidence: string[];
+  locations: AuditLocation[];
+}[] {
+  const sourceAStatement = reviewCardMetaString(card, "source_a_claim") || card.source_a_evidence[0] || card.summary;
+  const sourceBStatement = reviewCardMetaString(card, "source_b_claim") || card.source_b_evidence[0] || "Kein belastbares Gegenstueck vorhanden.";
+  const sourceAHeading = reviewCardMetaString(card, "source_a_heading");
+  const sourceBHeading = reviewCardMetaString(card, "source_b_heading");
+  const normalizeEvidence = (items: string[], primary: string): string[] => {
+    const clean = items.filter((item) => item.trim().length > 0);
+    return clean.filter((item, index) => index !== 0 || item.trim() !== primary.trim());
+  };
+  return [
+    {
+      slotLabel: "Quelle A",
+      sourceLabel: card.source_a,
+      heading: sourceAHeading || undefined,
+      statement: sourceAStatement,
+      fullText: reviewCardMetaString(card, "source_a_full_text") || undefined,
+      evidence: normalizeEvidence(card.source_a_evidence, sourceAStatement),
+      locations: card.source_a_locations,
+    },
+    {
+      slotLabel: "Quelle B",
+      sourceLabel: card.source_b,
+      heading: sourceBHeading || undefined,
+      statement: sourceBStatement,
+      fullText: reviewCardMetaString(card, "source_b_full_text") || undefined,
+      evidence: normalizeEvidence(card.source_b_evidence, sourceBStatement),
+      locations: card.source_b_locations,
+    },
+  ];
+}
+
 function approvalPreflight(req: WritebackApprovalRequest): { blockers: string[]; warnings: string[] } {
   const raw = req.metadata?.writeback_preflight;
   if (!raw || typeof raw !== "object") return { blockers: [], warnings: [] };
@@ -226,10 +354,23 @@ export default function App(): ReactNode {
 
   // Derived
   const run = useMemo(() => runs.find((r) => r.run_id === selId) ?? runs[0] ?? null, [runs, selId]);
+  const isFastRun = run?.analysis_mode === "fast";
   const hasActive = useMemo(() => runs.some((r) => r.status === "planned" || r.status === "running"), [runs]);
   const sp = boot?.source_profile ?? EMPTY_SP;
   const ea = atlAuth ?? boot?.atlassian_auth ?? EMPTY_AUTH;
   const openPkgs = useMemo(() => (run?.decision_packages ?? []).filter((p) => p.decision_state === "open"), [run]);
+  const openReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state === "open"),
+    [run],
+  );
+  const decidedReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state !== "open"),
+    [run],
+  );
+  const acceptedReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state === "accepted"),
+    [run],
+  );
   const pendApps = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "pending"), [run]);
   const apprvd = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "approved"), [run]);
   const activeFacts = useMemo(
@@ -246,9 +387,9 @@ export default function App(): ReactNode {
     ),
     [run, pkgFids],
   );
-  const openCount = openPkgs.length + soloFindings.length;
+  const openCount = isFastRun ? openReviewCards.length : openPkgs.length + soloFindings.length;
   const pendCount = pendApps.length;
-  const [cardIdx, setCardIdx] = useState(0);
+  const [, setCardIdx] = useState(0);
   const [elapsed, setElapsed] = useState("");
   // Reset card index when run changes
   useEffect(() => { setCardIdx(0); }, [run?.run_id]);
@@ -277,7 +418,23 @@ export default function App(): ReactNode {
     try {
       const r = await listAuditRuns();
       setRuns(r);
-      if (r.length && !selId) setSelId(r[0].run_id);
+      setSelId((current) => {
+        if (!r.length) return "";
+        if (!current) return r[0].run_id;
+        const selected = r.find((runItem) => runItem.run_id === current);
+        if (!selected) return r[0].run_id;
+        if (view === "history") return current;
+        const latest = r[0];
+        const latestIsActive = latest.status === "planned" || latest.status === "running";
+        const selectedIsActive = selected.status === "planned" || selected.status === "running";
+        const latestCreatedAt = Date.parse(latest.created_at ?? "") || 0;
+        const selectedCreatedAt = Date.parse(selected.created_at ?? "") || 0;
+        const latestIsNewer = latestCreatedAt > selectedCreatedAt;
+        if (latest.run_id !== current && (latestIsActive || (!selectedIsActive && latestIsNewer))) {
+          return latest.run_id;
+        }
+        return current;
+      });
       setGlobalErr("");
     } catch (e) {
       if (!silent) {
@@ -299,9 +456,9 @@ export default function App(): ReactNode {
 
   function upd(u: AuditRun) { setRuns((p) => p.map((r) => (r.run_id === u.run_id ? u : r))); setSelId(u.run_id); }
 
-  async function doCreate(t: AuditTarget) {
+  async function doCreate(t: AuditTarget, analysisMode: AuditRun["analysis_mode"]) {
     setSubmitting(true); setGlobalErr("");
-    try { const c = await createAuditRun(t); setRuns((p) => [c, ...p]); setSelId(c.run_id); setShowModal(false); setView("work"); }
+    try { const c = await createAuditRun(t, analysisMode); setRuns((p) => [c, ...p]); setSelId(c.run_id); setShowModal(false); setView("work"); }
     catch (e) { setGlobalErr(String(e)); }
     finally { setSubmitting(false); }
   }
@@ -316,6 +473,13 @@ export default function App(): ReactNode {
   async function doPkg(id: string, a: "accept" | "reject", c?: string) {
     if (!run) return; setPkgBusy(id); setPkgErr("");
     try { upd(await submitPackageDecision(run.run_id, id, a, c)); /* card list will shrink, cardIdx stays → shows next */ }
+    catch (e) { setPkgErr(String(e)); }
+    finally { setPkgBusy(""); }
+  }
+
+  async function doReviewCard(id: string, a: "accept" | "reject" | "clarify", c?: string) {
+    if (!run) return; setPkgBusy(id); setPkgErr("");
+    try { upd(await submitReviewCardDecision(run.run_id, id, a, c)); }
     catch (e) { setPkgErr(String(e)); }
     finally { setPkgBusy(""); }
   }
@@ -484,7 +648,11 @@ export default function App(): ReactNode {
           <div className="header-left">
             <h1>{view === "work" ? "Befund-Auditierung" : view === "structure" ? "Doku-Strukturierung" : "Verlauf"}</h1>
             {view === "work" && run && (
-              <p className="header-sub">{openCount} Probleme zu bewerten · {activeFacts.length} bestätigte Fakten · {pendCount} Änderungen zur Freigabe</p>
+              <p className="header-sub">
+                {isFastRun
+                  ? `${openCount} Review-Karten offen · ${pendCount} Folgeaktionen zur Freigabe · ${run.coverage_summary?.compared_pairs ?? 0} Vergleichspaare`
+                  : `${openCount} Probleme zu bewerten · ${activeFacts.length} bestätigte Fakten · ${pendCount} Änderungen zur Freigabe`}
+              </p>
             )}
             {view === "structure" && (
               <p className="header-sub">Confluence-Dokumentation analysieren · Struktur bewerten · Fachlich / Technisch trennen</p>
@@ -534,16 +702,22 @@ export default function App(): ReactNode {
                 <div className="metric-card mc-amber">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Unstimmigkeiten</span>
-                    <span className="metric-value">{run?.findings.length ?? 0}</span>
-                    <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "Keine kritischen"; })() : "–"}</span>
+                    <span className="metric-label">{isFastRun ? "Review-Karten" : "Unstimmigkeiten"}</span>
+                    <span className="metric-value">{isFastRun ? (run?.review_cards.length ?? 0) : (run?.findings.length ?? 0)}</span>
+                    <span className="metric-sub">
+                      {run
+                        ? isFastRun
+                          ? `${openReviewCards.length} offen · ${decidedReviewCards.length} bewertet`
+                          : (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "Keine kritischen"; })()
+                        : "–"}
+                    </span>
                   </div>
                 </div>
                 <div className="metric-card mc-purple">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Offene Entscheidungen</span>
-                    <span className="metric-value">{openPkgs.length}</span>
+                    <span className="metric-value">{openCount}</span>
                     <span className="metric-sub">{run ? `${pendApps.length} Freigaben ausstehend` : "–"}</span>
                   </div>
                 </div>
@@ -551,40 +725,76 @@ export default function App(): ReactNode {
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Entschieden</span>
-                    <span className="metric-value">{run ? run.decision_packages.filter(p => p.decision_state !== "open").length : 0}</span>
-                    <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen` : "–"}</span>
+                    <span className="metric-value">{run ? (isFastRun ? decidedReviewCards.length : run.decision_packages.filter(p => p.decision_state !== "open").length) : 0}</span>
+                    <span className="metric-sub">
+                      {run
+                        ? isFastRun
+                          ? `${run.implemented_changes.length} umgesetzt · ${run.approval_requests.length} Folgeanfragen`
+                          : `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen`
+                        : "–"}
+                    </span>
                   </div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Widersprüche</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["contradiction","policy_conflict","terminology_collision"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Konflikte zwischen Quellen</span>
+                    <span className="metric-label">{isFastRun ? "Abweichungstypen" : "Widersprüche"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.review_cards.filter((card) => card.deviation_type === "error").length
+                          : run.findings.filter(f => ["contradiction","policy_conflict","terminology_collision"].includes(f.category)).length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">{isFastRun ? "Fehlerhafte oder konfliktive Vergleiche" : "Konflikte zwischen Quellen"}</span>
                   </div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Fehler</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Drift und veraltete Quellen</span>
+                    <span className="metric-label">{isFastRun ? "Budget & Fokus" : "Fehler"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.coverage_summary?.prioritized_sections ?? 0
+                          : run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">
+                      {isFastRun
+                        ? run?.budget_limited
+                          ? "Budget begrenzt"
+                          : "Priorisierte Sektionen"
+                        : "Drift und veraltete Quellen"}
+                    </span>
                   </div>
                 </div>
                 <div className="metric-card mc-copper">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18"/><path d="M7 8h6a3 3 0 1 1 0 6H9"/><path d="M9 14h7a3 3 0 1 1 0 6H7"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Boundary-Pfade</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => f.category === "legacy_path_gap").length : 0}</span>
-                    <span className="metric-sub">Manuelle oder Legacy-Entry-Points</span>
+                    <span className="metric-label">{isFastRun ? "Lücken" : "Boundary-Pfade"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.review_cards.filter((card) => card.deviation_type === "gap").length
+                          : run.findings.filter(f => f.category === "legacy_path_gap").length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">{isFastRun ? "Fehlende Gegenstuecke oder Inhalte" : "Manuelle oder Legacy-Entry-Points"}</span>
                   </div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="10" y1="14" x2="14" y2="14"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Lücken</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["missing_definition","missing_documentation","traceability_gap","ownership_gap","clarification_needed"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Fehlende Definitionen & Doku</span>
+                    <span className="metric-label">{isFastRun ? "Klärungsbedarf" : "Lücken"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.review_cards.filter((card) => ["misunderstanding", "unclear"].includes(card.deviation_type)).length
+                          : run.findings.filter(f => ["missing_definition","missing_documentation","traceability_gap","ownership_gap","clarification_needed"].includes(f.category)).length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">{isFastRun ? "Missverstaendnisse oder unklare Punkte" : "Fehlende Definitionen & Doku"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-teal">
@@ -603,15 +813,22 @@ export default function App(): ReactNode {
                   const phaseKey = (run?.progress.phase_key ?? "").toLowerCase();
                   const isRunning = run?.status === "running" || run?.status === "planned";
                   const isDone = run?.status === "completed";
-                  // Match backend AUDIT_PIPELINE_STEPS order
-                  const steps = [
-                    { label: "Metamodell",    keys: ["metamodel_check", "metamodel", "meta"] },
-                    { label: "Code",          keys: ["finai_code_check", "code", "github", "ingestion"] },
-                    { label: "Confluence",    keys: ["confluence_check", "confluence", "atlassian"] },
-                    { label: "Delta",         keys: ["delta_reconciliation", "delta", "retrieval_indexing", "retrieval"] },
-                    { label: "Findings",      keys: ["finding_generation", "finding", "analysis", "claim"] },
-                    { label: "Empfehlungen",  keys: ["llm_recommendations", "recommend", "decision_packages", "package", "decision"] },
-                  ];
+                  const steps = isFastRun
+                    ? [
+                        { label: "Quellen", keys: ["source_collection"] },
+                        { label: "Sektionen", keys: ["section_profiling"] },
+                        { label: "Vergleich", keys: ["candidate_comparison"] },
+                        { label: "Review", keys: ["review_cards"] },
+                        { label: "Folgeaktionen", keys: ["follow_up_preparation"] },
+                      ]
+                    : [
+                        { label: "Metamodell", keys: ["metamodel_check", "metamodel", "meta"] },
+                        { label: "Code", keys: ["finai_code_check", "code", "github", "ingestion"] },
+                        { label: "Confluence", keys: ["confluence_check", "confluence", "atlassian"] },
+                        { label: "Delta", keys: ["delta_reconciliation", "delta", "retrieval_indexing", "retrieval"] },
+                        { label: "Findings", keys: ["finding_generation", "finding", "analysis", "claim"] },
+                        { label: "Empfehlungen", keys: ["llm_recommendations", "recommend", "decision_packages", "package", "decision"] },
+                      ];
                   // Find which step is currently active by matching phase_key
                   let activeIdx = -1;
                   if (isRunning) {
@@ -642,7 +859,7 @@ export default function App(): ReactNode {
                 <div className="empty">
                   <div className="empty-icon">✅</div>
                   <strong>Alle Bewertungen abgeschlossen</strong>
-                  <p>Keine offenen Widersprüche. Im Verlauf findest du die Entscheidungen.</p>
+                  <p>{isFastRun ? "Keine offenen Review-Karten mehr. Im Verlauf findest du die Entscheidungen." : "Keine offenen Widersprüche. Im Verlauf findest du die Entscheidungen."}</p>
                 </div>
               )}
 
@@ -650,7 +867,7 @@ export default function App(): ReactNode {
                 <div className="empty">
                   <div className="empty-icon">⏳</div>
                   <strong>Analyse läuft…</strong>
-                  <p>Sobald Widersprüche erkannt werden, erscheinen sie hier.</p>
+                  <p>{isFastRun ? "Sobald priorisierte Abweichungen erkannt werden, erscheinen hier Review-Karten." : "Sobald Widersprüche erkannt werden, erscheinen sie hier."}</p>
                 </div>
               )}
 
@@ -660,117 +877,339 @@ export default function App(): ReactNode {
               {appErr && <div className="error-box">{appErr}</div>}
               {exErr && <div className="error-box">{exErr}</div>}
 
+              {isFastRun && run?.coverage_summary && (
+                <section className="coverage-panel">
+                  <div className="section-head">
+                    <h2>Scope & Abdeckung</h2>
+                    <span className="section-count">
+                      {run.coverage_summary.total_documents} Quellen · {run.coverage_summary.total_sections} Sektionen
+                    </span>
+                  </div>
+                  <p className="coverage-summary-text">
+                    Der Fast Audit vergleicht nicht den gesamten Scope vollstaendig, sondern priorisiert. Diese Ansicht zeigt
+                    explizit, was gesammelt, was wirklich gespiegelt und was in diesem Lauf zurueckgestellt wurde.
+                  </p>
+                  <div className="coverage-grid">
+                    <section className="coverage-block">
+                      <h3>Eingesammelt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.total_documents} Quellen wurden geladen.</li>
+                        <li>{run.coverage_summary.total_sections} Sektionen wurden aus dem Scope zugeschnitten.</li>
+                      </ul>
+                      {coverageSourceTypeEntries(run).length > 0 && (
+                        <>
+                          <div className="coverage-label">Quellarten im Lauf</div>
+                          <ul className="coverage-chip-list">
+                            {coverageSourceTypeEntries(run).map(([sourceType, count]) => (
+                              <li key={sourceType}>{sourceTypeLabel(sourceType)}: {count}</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Priorisiert geprueft</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.prioritized_sections} Sektionen kamen in die schnelle Vergleichsmenge.</li>
+                        <li>{run.coverage_summary.compared_pairs} Vergleichspaare wurden tatsaechlich gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.compared_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Tatsaechlich verglichene Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.compared_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Bewusst zurueckgestellt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.skipped_sections_due_to_prioritization} Sektionen blieben ausserhalb der priorisierten Menge.</li>
+                        <li>{run.coverage_summary.skipped_pairs_due_to_budget} potenzielle Vergleiche wurden aus Budgetgruenden nicht mehr gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Beispiele fuer zurueckgestellte Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                  </div>
+                  {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Priorisierte Bereiche im Lauf</div>
+                      <ul className="coverage-list">
+                        {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {run.coverage_summary.notes.length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Audit-Hinweise</div>
+                      <ul className="coverage-list">
+                        {run.coverage_summary.notes.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* ── Issue Card Stack ── */}
-              {(() => {
-                /* Build unified card list: packages first, then solo findings */
-                type CardItem = { kind: "pkg"; pkg: typeof openPkgs[0] } | { kind: "finding"; f: typeof soloFindings[0] };
-                const cards: CardItem[] = [
-                  ...openPkgs.map(pkg => ({ kind: "pkg" as const, pkg })),
-                  ...soloFindings.map(f => ({ kind: "finding" as const, f })),
-                ];
-                if (cards.length === 0) return null;
-                // Group by scope cluster: show root issue per group, count related
-                const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-                // SDD: documentation sources are primary, code is only indication
-                const srcPriority = (card: CardItem): number => {
-                  const srcs: string[] = card.kind === "pkg"
-                    ? (card.pkg.metadata?.source_types as string[] ?? [])
-                    : (card.f.metadata?.source_types as string[] ?? (card.f.metadata?.source_type ? [card.f.metadata.source_type as string] : []));
-                  // Doku-Quellen = Priorität 0 (höchste), Code = 2 (niedrigste)
-                  if (srcs.some(s => ["confluence_page", "metamodel", "local_doc"].includes(s))) return 0;
-                  if (srcs.some(s => ["jira_ticket"].includes(s))) return 1;
-                  return 2; // github_file / code
-                };
-                const sorted = [...cards].sort((a, b) => {
-                  const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
-                  const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
-                  const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
-                  if (sevDiff !== 0) return sevDiff;
-                  // Bei gleicher Severity: Doku-Findings vor Code-Findings
-                  return srcPriority(a) - srcPriority(b);
-                });
-                // Cluster by base scope — first per cluster = root issue
-                const scopeGroups = new Map<string, CardItem[]>();
-                for (const card of sorted) {
-                  const baseScope = clusterScopeKey(card);
-                  if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
-                  scopeGroups.get(baseScope)!.push(card);
-                }
-                // Root issues = first of each group, sorted by severity + source priority
-                const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
-                  .sort((a, b) => {
-                    const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
-                    const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
+              {isFastRun ? (
+                openReviewCards.length > 0 && (
+                  (() => {
+                    const priorityOrder: Record<ReviewCard["priority"], number> = { high: 0, medium: 1, low: 2 };
+                    const sortedCards = [...openReviewCards].sort((left, right) => {
+                      const laneDiff = reviewCardLaneRank(left) - reviewCardLaneRank(right);
+                      if (laneDiff !== 0) return laneDiff;
+                      const priorityDiff = (priorityOrder[left.priority] ?? 9) - (priorityOrder[right.priority] ?? 9);
+                      if (priorityDiff !== 0) return priorityDiff;
+                      return right.confidence - left.confidence;
+                    });
+                    const laneGroups = new Map<string, ReviewCard[]>();
+                    for (const card of sortedCards) {
+                      const key = reviewCardLaneKey(card);
+                      if (!laneGroups.has(key)) laneGroups.set(key, []);
+                      laneGroups.get(key)!.push(card);
+                    }
+                    return (
+                      <section>
+                        <div className="section-head">
+                          <h2>Fast Review</h2>
+                          <span className="section-count">
+                            {openReviewCards.length} Review-Karten offen
+                            {run?.budget_limited ? " · budgetbegrenzt" : ""}
+                          </span>
+                        </div>
+                        <div className="fast-review-note">
+                          Entscheidungen sind von innen nach aussen in unabhängigen Lanes sortiert: erst Properties und Schema, dann Objekte und Lifecycle, danach Prozess und Scope, zuletzt Doku-Struktur.
+                        </div>
+                        {[...laneGroups.entries()].map(([laneKey, cards]) => (
+                          <section className="lane-section" key={laneKey}>
+                            <div className="lane-head">
+                              <h3>{reviewCardLaneLabel(cards[0])}</h3>
+                              <span className="section-count">{cards.length} Karten</span>
+                            </div>
+                            <p className="lane-note">{reviewCardIndependenceNote(cards[0])}</p>
+                            <div className="card-list">
+                              {cards.map((card, index) => {
+                                const labels = reviewCardDecisionLabels(card);
+                                const consequences = reviewCardDecisionConsequences(card);
+                                return (
+                                  <WorkCard
+                                    key={card.card_id}
+                                    id={card.card_id}
+                                    rank={index + 1}
+                                    severity={card.priority}
+                                    category={card.deviation_type}
+                                    title={card.title}
+                                    scope={card.summary}
+                                    recommendation={card.recommended_decision}
+                                    decisionQuestion={reviewCardDecisionQuestion(card)}
+                                    decisionQuestionLabel="Frage zur Entscheidung"
+                                    acceptLabel={labels.accept}
+                                    rejectLabel={labels.reject}
+                                    clarifyLabel={labels.clarify}
+                                    acceptConsequences={consequences.accept}
+                                    rejectConsequences={consequences.reject}
+                                    clarifyConsequences={consequences.clarify}
+                                    analysisContext={[
+                                      reviewCardRationale(card),
+                                      `Vertrauen: ${Math.round(card.confidence * 100)}%`,
+                                      `Vergleichsfokus: ${reviewCardMetaString(card, "comparison_focus") || card.title}`,
+                                    ]}
+                                    independenceNote={reviewCardIndependenceNote(card)}
+                                    nextActions={reviewCardNextActions(card)}
+                                    sourceGroups={reviewCardSourceGroups(card)}
+                                    busy={pkgBusy === card.card_id}
+                                    onAccept={() => void doReviewCard(card.card_id, "accept")}
+                                    onReject={() => void doReviewCard(card.card_id, "reject")}
+                                    onClarify={() => void doReviewCard(card.card_id, "clarify")}
+                                  />
+                                );
+                              })}
+                            </div>
+                          </section>
+                        ))}
+                      </section>
+                    );
+                  })()
+                )
+              ) : (
+                (() => {
+                  type CardItem = { kind: "pkg"; pkg: typeof openPkgs[0] } | { kind: "finding"; f: typeof soloFindings[0] };
+                  const cards: CardItem[] = [
+                    ...openPkgs.map(pkg => ({ kind: "pkg" as const, pkg })),
+                    ...soloFindings.map(f => ({ kind: "finding" as const, f })),
+                  ];
+                  if (cards.length === 0) return null;
+                  const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+                  const srcPriority = (card: CardItem): number => {
+                    const srcs: string[] = card.kind === "pkg"
+                      ? (card.pkg.metadata?.source_types as string[] ?? [])
+                      : (card.f.metadata?.source_types as string[] ?? (card.f.metadata?.source_type ? [card.f.metadata.source_type as string] : []));
+                    if (srcs.some(s => ["confluence_page", "metamodel", "local_doc"].includes(s))) return 0;
+                    if (srcs.some(s => ["jira_ticket"].includes(s))) return 1;
+                    return 2;
+                  };
+                  const sorted = [...cards].sort((a, b) => {
+                    const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
+                    const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
                     const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
                     if (sevDiff !== 0) return sevDiff;
-                    return srcPriority(a.root) - srcPriority(b.root);
+                    return srcPriority(a) - srcPriority(b);
                   });
-                const idx = Math.min(cardIdx, finalCards.length - 1);
-                const visibleCards = finalCards.slice(idx, idx + 3);
-                return (
-                  <section>
-                    <div className="section-head">
-                      <h2>Offene Probleme</h2>
-                      <span className="section-count">{finalCards.length} Entscheidungen ausstehend — sortiert nach Dringlichkeit</span>
-                    </div>
-                    <div className="card-list">
-                      {finalCards.map((group, cardRank) => {
-                        const item = group.root;
-                        return (
-                          <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id} className="card-list-item">
-                            {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
-                            {item.kind === "pkg" ? (
-                              <WorkCard id={item.pkg.package_id}
-                                rank={cardRank + 1}
-                                severity={item.pkg.severity_summary} category={item.pkg.category}
-                                title={item.pkg.title} scope={item.pkg.scope_summary}
-                                recommendation={item.pkg.recommendation_summary}
-                                positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
-                                negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
-                                deltaHints={strs(item.pkg.metadata?.delta_summary)}
-                                analysisContext={packageContextLines(item.pkg)}
-                                nextActions={packageNextActions(item.pkg)}
-                                elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
-                                busy={pkgBusy === item.pkg.package_id || commentBusy}
-                                onAccept={() => void doPkg(item.pkg.package_id, "accept")}
-                                onReject={() => void doPkg(item.pkg.package_id, "reject")}
-                                onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
-                                onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
-                                appBusy={appBusy}
-                                clarificationPanel={
-                                  run ? <ClarificationPanel run={run} packageId={item.pkg.package_id} onRunUpdated={upd} /> : undefined
-                                }
-                              />
-                            ) : (
-                              <WorkCard id={item.f.finding_id}
-                                rank={cardRank + 1}
-                                severity={item.f.severity} category={item.f.category}
-                                title={item.f.title} scope={item.f.summary}
-                                recommendation={item.f.recommendation}
-                                positiveConsequences={strs(item.f.metadata?.positive_consequences)}
-                                negativeConsequences={strs(item.f.metadata?.negative_consequences)}
-                                analysisContext={[
-                                  ...strs(item.f.metadata?.semantic_context).slice(0, 2),
-                                  ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
-                                  ...strs(item.f.metadata?.causal_persistence_schema_targets).slice(0, 1).map((v) => `Schema-Ziel: ${v}`),
-                                ]}
-                                proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
-                                proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
-                                metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
-                                metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
-                                elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
-                                busy={commentBusy}
-                                onAccept={() => { void doComment(`[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
-                                onReject={() => { void doComment(`[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
-                              />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                );
-              })()}
+                  const scopeGroups = new Map<string, CardItem[]>();
+                  for (const card of sorted) {
+                    const baseScope = clusterScopeKey(card);
+                    if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
+                    scopeGroups.get(baseScope)!.push(card);
+                  }
+                  const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
+                    .sort((a, b) => {
+                      const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
+                      const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
+                      const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                      if (sevDiff !== 0) return sevDiff;
+                      return srcPriority(a.root) - srcPriority(b.root);
+                    });
+                  return (
+                    <section>
+                      <div className="section-head">
+                        <h2>Offene Probleme</h2>
+                        <span className="section-count">{finalCards.length} Entscheidungen ausstehend — sortiert nach Dringlichkeit</span>
+                      </div>
+                      <div className="card-list">
+                        {finalCards.map((group, cardRank) => {
+                          const item = group.root;
+                          return (
+                            <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id} className="card-list-item">
+                              {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
+                              {item.kind === "pkg" ? (
+                                <WorkCard id={item.pkg.package_id}
+                                  rank={cardRank + 1}
+                                  severity={item.pkg.severity_summary} category={item.pkg.category}
+                                  title={item.pkg.title} scope={item.pkg.scope_summary}
+                                  recommendation={item.pkg.recommendation_summary}
+                                  positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
+                                  negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
+                                  deltaHints={strs(item.pkg.metadata?.delta_summary)}
+                                  analysisContext={packageContextLines(item.pkg)}
+                                  nextActions={packageNextActions(item.pkg)}
+                                  elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
+                                  busy={pkgBusy === item.pkg.package_id || commentBusy}
+                                  onAccept={() => void doPkg(item.pkg.package_id, "accept")}
+                                  onReject={() => void doPkg(item.pkg.package_id, "reject")}
+                                  onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
+                                  onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
+                                  appBusy={appBusy}
+                                  clarificationPanel={
+                                    run ? <ClarificationPanel run={run} packageId={item.pkg.package_id} onRunUpdated={upd} /> : undefined
+                                  }
+                                />
+                              ) : (
+                                <WorkCard id={item.f.finding_id}
+                                  rank={cardRank + 1}
+                                  severity={item.f.severity} category={item.f.category}
+                                  title={item.f.title} scope={item.f.summary}
+                                  recommendation={item.f.recommendation}
+                                  positiveConsequences={strs(item.f.metadata?.positive_consequences)}
+                                  negativeConsequences={strs(item.f.metadata?.negative_consequences)}
+                                  analysisContext={[
+                                    ...strs(item.f.metadata?.semantic_context).slice(0, 2),
+                                    ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
+                                    ...strs(item.f.metadata?.causal_persistence_schema_targets).slice(0, 1).map((v) => `Schema-Ziel: ${v}`),
+                                  ]}
+                                  proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
+                                  proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
+                                  metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
+                                  metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
+                                  elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
+                                  busy={commentBusy}
+                                  onAccept={() => { void doComment(`[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                  onReject={() => { void doComment(`[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })()
+              )}
+
+              {isFastRun && acceptedReviewCards.length > 0 && (
+                <section>
+                  <div className="section-head">
+                    <h2>Akzeptierte Review-Karten</h2>
+                    <span className="section-count">{acceptedReviewCards.length} fuer Folgeaktionen freigegeben</span>
+                  </div>
+                  {acceptedReviewCards.map((card) => (
+                    <article className="wc" key={`accepted:${card.card_id}`}>
+                      <div className="wc-badges">
+                        <span className="badge badge-approved">akzeptiert</span>
+                        <span className="badge badge-cat">{de(card.deviation_type)}</span>
+                        <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+                      </div>
+                      <h3 className="wc-title">{card.title}</h3>
+                      <p className="wc-scope">{card.summary}</p>
+                      <div className="wc-context">
+                        <div className="wc-label">Entscheidung</div>
+                        <ul>
+                          <li>{card.why_it_matters}</li>
+                          {card.decision_comment && <li>Kommentar: {card.decision_comment}</li>}
+                          <li>Confidence: {Math.round(card.confidence * 100)}%</li>
+                        </ul>
+                      </div>
+                      <div className="wc-actions">
+                        <div className="wc-decision-label">Folgeaktion vorbereiten</div>
+                        <div className="wc-btns wc-btns-primary">
+                          {card.follow_up_capabilities.includes("confluence_page_update") && (
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              disabled={appBusy === "c"}
+                              onClick={() => void doCreateApp({
+                                target_type: "confluence_page_update",
+                                title: `Confluence-Writeback: ${card.title}`,
+                                summary: card.recommended_decision,
+                                target_url: sp.confluence_url,
+                                related_review_card_ids: [card.card_id],
+                                related_package_ids: [],
+                                related_finding_ids: card.related_finding_ids,
+                                payload_preview: [card.summary, card.why_it_matters, card.recommended_decision],
+                              })}
+                            >
+                              📄 Confluence-Freigabe
+                            </button>
+                          )}
+                          {card.follow_up_capabilities.includes("jira_ticket_create") && (
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              disabled={appBusy === "c"}
+                              onClick={() => void doCreateApp({
+                                target_type: "jira_ticket_create",
+                                title: `Jira-Ticket: ${card.title}`,
+                                summary: card.recommended_decision,
+                                target_url: sp.jira_url,
+                                related_review_card_ids: [card.card_id],
+                                related_package_ids: [],
+                                related_finding_ids: card.related_finding_ids,
+                                payload_preview: [card.summary, card.why_it_matters, card.recommended_decision],
+                              })}
+                            >
+                              🎫 Jira-Freigabe
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </section>
+              )}
 
               {/* ── Pending approvals ── */}
               {pendApps.length > 0 && (
@@ -960,7 +1399,7 @@ export default function App(): ReactNode {
         sp={sp}
         boot={boot}
         onClose={() => setShowModal(false)}
-        onStart={async (t) => { await doCreate(t); }}
+        onStart={async (t, analysisMode) => { await doCreate(t, analysisMode); }}
         submitting={submitting}
       />}
     </div>
@@ -975,23 +1414,46 @@ function WorkCard(props: {
   id: string; severity: string; category: string; title: string; scope: string;
   recommendation: string; deltaHints?: string[];
   proposedPageMd?: string; proposedPageTitle?: string;
-  elements: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
+  elements?: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
+  sourceGroups?: {
+    slotLabel: string;
+    sourceLabel: string;
+    heading?: string;
+    statement: string;
+    fullText?: string;
+    evidence: string[];
+    locations: AuditLocation[];
+  }[];
   analysisContext?: string[];
   nextActions?: string[];
   positiveConsequences?: string[];
   negativeConsequences?: string[];
+  decisionQuestion?: string;
+  decisionQuestionLabel?: string;
+  acceptLabel?: string;
+  rejectLabel?: string;
+  clarifyLabel?: string;
+  acceptConsequences?: string[];
+  rejectConsequences?: string[];
+  clarifyConsequences?: string[];
+  independenceNote?: string;
   busy: boolean;
   onAccept: () => void; onReject: () => void;
+  onClarify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
   metaSourceType?: string; metaSourceTypes?: string[];
   clarificationPanel?: ReactNode;
   rank?: number;
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
+  const acceptLabel = props.acceptLabel ?? "Annehmen";
+  const rejectLabel = props.rejectLabel ?? "Ablehnen";
+  const clarifyLabel = props.clarifyLabel ?? "Klärung nötig";
+  const decisionQuestionLabel = props.decisionQuestionLabel ?? "Konkrete Entscheidungsfrage";
   // Determine the PRIMARY source — the one most likely causing the irregularity
   // Priority: metaSourceType (from detector) → first location → metaSourceTypes[0]
   const primarySrc = props.metaSourceType
-    || props.elements.flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean)[0]
+    || (props.elements ?? []).flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean)[0]
     || (props.metaSourceTypes?.[0])
     || "";
   const primaryCfg = primarySrc ? (SRC_CFG[primarySrc] ?? null) : null;
@@ -1017,19 +1479,55 @@ function WorkCard(props: {
       {/* 3. Quellen mit Zitaten */}
       <div className="wc-evidence">
         <div className="wc-label">Betroffene Quellen</div>
-        {props.elements.map((el, i) => (
-          <div className="ev-block" key={i}>
-            <p className="ev-explain">{el.explanation}</p>
-            <div className="ev-locs">
-              {el.locations.map((loc) => (
-                <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
-                  <SrcBadge t={loc.source_type} />
-                  {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+        {props.sourceGroups && props.sourceGroups.length > 0 ? (
+          <div className="wc-source-grid">
+            {props.sourceGroups.map((group, i) => (
+              <section className="wc-source-panel" key={`${group.slotLabel}:${group.sourceLabel}:${i}`}>
+                <div className="wc-source-head">
+                  <span className="badge badge-cat">{group.slotLabel}</span>
+                  <strong>{group.sourceLabel}</strong>
                 </div>
-              ))}
-            </div>
+                {group.heading && <div className="wc-source-heading">{group.heading}</div>}
+                <div className="wc-source-statement">{group.statement}</div>
+                {group.fullText && group.fullText.trim() !== group.statement.trim() && (
+                  <details className="wc-source-full">
+                    <summary>Volltext anzeigen</summary>
+                    <div className="wc-source-fulltext">{group.fullText}</div>
+                  </details>
+                )}
+                {group.evidence.length > 0 && (
+                  <ul className="wc-source-evidence">
+                    {group.evidence.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                )}
+                {group.locations.length > 0 && (
+                  <div className="ev-locs">
+                    {group.locations.map((loc) => (
+                      <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                        <SrcBadge t={loc.source_type} />
+                        {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ))}
           </div>
-        ))}
+        ) : (
+          (props.elements ?? []).map((el, i) => (
+            <div className="ev-block" key={i}>
+              <p className="ev-explain">{el.explanation}</p>
+              <div className="ev-locs">
+                {el.locations.map((loc) => (
+                  <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                    <SrcBadge t={loc.source_type} />
+                    {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       {/* 4. Empfehlung mit Begründung */}
@@ -1073,6 +1571,13 @@ function WorkCard(props: {
         </div>
       )}
 
+      {props.independenceNote && (
+        <div className="wc-context">
+          <div className="wc-label">Unabhaengigkeit</div>
+          <ul><li>{props.independenceNote}</li></ul>
+        </div>
+      )}
+
       {props.nextActions && props.nextActions.length > 0 && (
         <div className="wc-context">
           <div className="wc-label">Naechste Folgeschritte</div>
@@ -1101,9 +1606,38 @@ function WorkCard(props: {
       {/* Entscheidung */}
       <div className="wc-actions">
         <div className="wc-decision-label">Ihre Entscheidung</div>
+        {props.decisionQuestion && (
+          <div className="wc-question-block wc-question-block-end">
+            <div className="wc-label">{decisionQuestionLabel}</div>
+            <div className="wc-question-text">{props.decisionQuestion}</div>
+          </div>
+        )}
+        {(props.acceptConsequences?.length || props.rejectConsequences?.length || props.clarifyConsequences?.length) && (
+          <div className="wc-action-outcomes">
+            {props.acceptConsequences && props.acceptConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-accept">
+                <div className="wc-action-card-head">{acceptLabel}</div>
+                <ul>{props.acceptConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+            {props.rejectConsequences && props.rejectConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-reject">
+                <div className="wc-action-card-head">{rejectLabel}</div>
+                <ul>{props.rejectConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+            {props.onClarify && props.clarifyConsequences && props.clarifyConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-clarify">
+                <div className="wc-action-card-head">{clarifyLabel}</div>
+                <ul>{props.clarifyConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+          </div>
+        )}
         <div className="wc-btns wc-btns-primary">
-          <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ Annehmen</button>
-          <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ Ablehnen</button>
+          <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ {acceptLabel}</button>
+          <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ {rejectLabel}</button>
+          {props.onClarify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onClarify}>{clarifyLabel}</button>}
         </div>
         {(props.onConfluence || props.onJira) && (
           <div className="wc-writeback">
@@ -1131,7 +1665,9 @@ function WorkCard(props: {
 function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData | null }): ReactNode {
   if (!run) return <div className="empty"><div className="empty-icon">📋</div><strong>Kein Run ausgewählt</strong></div>;
 
+  const isFastRun = run.analysis_mode === "fast";
   const decided = run.decision_packages.filter((p) => p.decision_state !== "open");
+  const decidedReviewCards = run.review_cards.filter((card) => card.decision_state !== "open");
   const resolved = run.findings.filter((f) => f.resolution_state && f.resolution_state !== "open");
   const truths = run.truths.filter((t) => t.truth_status === "active");
   const atomicFacts = [...run.atomic_facts].sort((left, right) => left.fact_key.localeCompare(right.fact_key));
@@ -1148,14 +1684,31 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
       <section className="hsection">
         <h2 className="hsection-title">Run-Zusammenfassung</h2>
         <div className="hgrid">
-          <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Befunde</span></div>
-          <div className="hstat"><span className="hstat-val">{run.decision_packages.length}</span><span className="hstat-label">Pakete</span></div>
-          <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Behauptungen</span></div>
-          <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Wahrheiten</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? run.review_cards.length : run.findings.length}</span><span className="hstat-label">{isFastRun ? "Review-Karten" : "Befunde"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? decidedReviewCards.length : run.decision_packages.length}</span><span className="hstat-label">{isFastRun ? "Bewertet" : "Pakete"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? (run.coverage_summary?.compared_pairs ?? 0) : run.claims.length}</span><span className="hstat-label">{isFastRun ? "Vergleichspaare" : "Behauptungen"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? (run.coverage_summary?.prioritized_sections ?? 0) : truths.length}</span><span className="hstat-label">{isFastRun ? "Sektionen" : "Wahrheiten"}</span></div>
           <div className="hstat"><span className="hstat-val">{changes.length}</span><span className="hstat-label">Umgesetzt</span></div>
         </div>
         {run.summary && <p className="text-secondary">{run.summary}</p>}
       </section>
+
+      {isFastRun && decidedReviewCards.length > 0 && (
+        <section className="hsection">
+          <h2 className="hsection-title">Bewertete Review-Karten <span className="hsection-count">{decidedReviewCards.length}</span></h2>
+          {decidedReviewCards.map((card) => (
+            <div className="hitem" key={card.card_id}>
+              <div className="hitem-head">
+                <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+                <span className="badge badge-cat">{de(card.deviation_type)}</span>
+                <span className={`badge badge-${card.decision_state === "accepted" ? "approved" : card.decision_state === "rejected" ? "rejected" : "pending"}`}>{de(card.decision_state)}</span>
+              </div>
+              <strong>{card.title}</strong>
+              <p>{card.summary}</p>
+            </div>
+          ))}
+        </section>
+      )}
 
       {decided.length > 0 && (
         <section className="hsection">

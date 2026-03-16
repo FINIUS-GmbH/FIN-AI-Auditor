@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 def connect_database(*, db_path: Path) -> sqlite3.Connection:
@@ -32,12 +32,16 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             CREATE TABLE IF NOT EXISTS audit_runs (
                 run_id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
+                analysis_mode TEXT NOT NULL DEFAULT 'fast',
                 target_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 started_at TEXT,
                 finished_at TEXT,
                 progress_json TEXT NOT NULL DEFAULT '{}',
+                review_cards_json TEXT NOT NULL DEFAULT '[]',
+                coverage_summary_json TEXT NOT NULL DEFAULT '{}',
+                budget_limited INTEGER NOT NULL DEFAULT 0,
                 analysis_log_json TEXT NOT NULL DEFAULT '[]',
                 implemented_changes_json TEXT NOT NULL DEFAULT '[]',
                 clarification_threads_json TEXT NOT NULL DEFAULT '[]',
@@ -458,6 +462,8 @@ def ensure_schema(*, connection: sqlite3.Connection) -> None:
             _ensure_atomic_fact_entries_table(connection=connection)
         if current < 17:
             _ensure_clarification_threads_column(connection=connection)
+        if current < 18:
+            _ensure_fast_audit_columns(connection=connection)
         connection.execute(
             """
             INSERT INTO schema_meta(key, value)
@@ -525,6 +531,17 @@ def _ensure_llm_usage_column(*, connection: sqlite3.Connection) -> None:
     if _column_exists(connection=connection, table_name="audit_runs", column_name="llm_usage_json"):
         return
     connection.execute("ALTER TABLE audit_runs ADD COLUMN llm_usage_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _ensure_fast_audit_columns(*, connection: sqlite3.Connection) -> None:
+    if not _column_exists(connection=connection, table_name="audit_runs", column_name="analysis_mode"):
+        connection.execute("ALTER TABLE audit_runs ADD COLUMN analysis_mode TEXT NOT NULL DEFAULT 'fast'")
+    if not _column_exists(connection=connection, table_name="audit_runs", column_name="review_cards_json"):
+        connection.execute("ALTER TABLE audit_runs ADD COLUMN review_cards_json TEXT NOT NULL DEFAULT '[]'")
+    if not _column_exists(connection=connection, table_name="audit_runs", column_name="coverage_summary_json"):
+        connection.execute("ALTER TABLE audit_runs ADD COLUMN coverage_summary_json TEXT NOT NULL DEFAULT '{}'")
+    if not _column_exists(connection=connection, table_name="audit_runs", column_name="budget_limited"):
+        connection.execute("ALTER TABLE audit_runs ADD COLUMN budget_limited INTEGER NOT NULL DEFAULT 0")
 
 
 def _ensure_schema_truth_entries_table(*, connection: sqlite3.Connection) -> None:

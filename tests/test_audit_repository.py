@@ -17,6 +17,7 @@ from fin_ai_auditor.domain.models import (
     DecisionPackage,
     DecisionProblemElement,
     RetrievalSegment,
+    ReviewCard,
     SchemaTruthEntry,
 )
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
@@ -128,6 +129,56 @@ def test_repository_persists_findings_with_positions_and_links(tmp_path: Path) -
     assert finding_by_id["finding_1"].locations[0].position is not None
     assert finding_by_id["finding_1"].locations[0].position.anchor_value == "src/finai/example.py#L10-L18"
     assert loaded.finding_links[0].relation_type == "gap_hint"
+
+
+def test_repository_persists_fast_audit_review_cards(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    run = AuditRun(
+        analysis_mode="fast",
+        target=AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI"),
+        review_cards=[
+            ReviewCard(
+                card_id="review_demo_1",
+                title="Statement Review fehlt",
+                deviation_type="gap",
+                summary="Die priorisierte Vergleichsmenge enthaelt kein belastbares Gegenstueck.",
+                source_a="Confluence: Statement Contract",
+                source_b="Kein priorisierter Gegenstand",
+                source_a_evidence=["Statement Contract beschreibt den Review-Status."],
+                source_b_evidence=["Kein passender Gegenabschnitt innerhalb des Budgets gefunden."],
+                why_it_matters="Die Aussage ist nicht ausreichend gegengeprueft.",
+                recommended_decision="Fehlende Quelle oder Dokumentationsluecke klaeren.",
+                priority="medium",
+            )
+        ],
+        budget_limited=True,
+        coverage_summary={
+            "total_documents": 5,
+            "total_sections": 18,
+            "prioritized_sections": 8,
+            "compared_pairs": 4,
+            "skipped_sections_due_to_prioritization": 10,
+            "skipped_pairs_due_to_budget": 3,
+            "source_type_counts": {"confluence_page": 2, "github_file": 2, "metamodel": 1},
+            "prioritized_scope_labels": ["Confluence: Statement Contract · Review"],
+            "compared_scope_labels": ["Confluence: Statement Contract · Review", "Code: statement_writer.py · def write_statement_directly"],
+            "deferred_scope_labels": ["Lokale Doku: Legacy Guide · Optional Write Path"],
+            "notes": ["Fast Audit hat restliche Vergleiche zurueckgestellt."],
+        },
+    )
+
+    saved = repository.upsert_run(run=run)
+    loaded = repository.get_run(run_id=saved.run_id)
+
+    assert loaded is not None
+    assert loaded.analysis_mode == "fast"
+    assert loaded.budget_limited is True
+    assert loaded.coverage_summary is not None
+    assert loaded.coverage_summary.compared_pairs == 4
+    assert loaded.coverage_summary.skipped_sections_due_to_prioritization == 10
+    assert loaded.coverage_summary.source_type_counts["confluence_page"] == 2
+    assert loaded.coverage_summary.deferred_scope_labels[0] == "Lokale Doku: Legacy Guide · Optional Write Path"
+    assert loaded.review_cards[0].card_id == "review_demo_1"
 
 
 def test_repository_persists_schema_truth_registry(tmp_path: Path) -> None:
@@ -292,6 +343,7 @@ def test_service_enforces_fixed_sources_and_metamodel_policy(tmp_path: Path) -> 
 
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -328,6 +380,7 @@ def test_service_progress_advances_through_pipeline_steps(tmp_path: Path) -> Non
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -377,6 +430,7 @@ def test_service_records_decision_comment_effects(tmp_path: Path) -> None:
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -460,6 +514,7 @@ def test_repository_caches_documents_and_service_claim_is_single_consumer(tmp_pa
     service = AuditService(repository=repository, settings=settings)
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI")
         )
     )
@@ -508,6 +563,7 @@ def test_service_rejects_heartbeat_from_foreign_worker(tmp_path: Path) -> None:
     service = AuditService(repository=repository, settings=settings)
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(local_repo_path="/Users/martinwaelter/GitHub/FIN-AI")
         )
     )
@@ -598,6 +654,7 @@ def test_service_processes_decision_comment_into_follow_up_logs(tmp_path: Path) 
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -639,6 +696,7 @@ def test_complete_run_seeds_claims_truths_and_decision_packages(tmp_path: Path) 
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -675,6 +733,7 @@ def test_package_specification_creates_truths_and_marks_impacted_packages(tmp_pa
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -721,6 +780,7 @@ def test_service_records_jira_ticket_with_ai_coding_brief(tmp_path: Path) -> Non
 
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -773,6 +833,88 @@ def test_service_records_jira_ticket_with_ai_coding_brief(tmp_path: Path) -> Non
     assert len(change.jira_ticket.acceptance_criteria) >= 3
     assert len(change.jira_ticket.affected_parts) >= 1
     assert updated.approval_requests[0].status == "executed"
+
+
+def test_fast_review_card_acceptance_can_create_jira_approval(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        fixed_confluence_space_key="FINAI",
+        fixed_jira_project_key="FINAI",
+        confluence_home_url="https://finius.atlassian.net/wiki/home",
+        jira_board_url="https://finius.atlassian.net/jira/software/projects/FINAI/boards/67",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+
+    created = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="fast",
+            target=AuditTarget(
+                local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    snapshot_ids = service._build_demo_snapshot_ids()
+    findings = service._build_demo_findings(run=created, snapshot_ids=snapshot_ids)
+    review_card = ReviewCard(
+        title="Statement Write-Vertrag pruefen",
+        deviation_type="error",
+        summary="Code und Doku weichen fuer den Statement-Write-Vertrag voneinander ab.",
+        source_a="Confluence: Statement Contract",
+        source_b="Code: StatementService.write",
+        source_a_evidence=["Die Dokumentation verlangt eine Review-Freigabe vor dem Write."],
+        source_b_evidence=["Der Code ermoeglicht einen direkten Write-Pfad."],
+        source_a_locations=findings[0].locations[:1],
+        source_b_locations=findings[0].locations[1:2],
+        why_it_matters="Die gueltige Write-Regel ist aktuell nicht eindeutig.",
+        recommended_decision="Gueltigen Write-Pfad festlegen und die abweichende Quelle angleichen.",
+        priority="high",
+        follow_up_capabilities=["jira_ticket_create"],
+        related_finding_ids=[findings[0].finding_id],
+    )
+    run = service._repository.upsert_run(
+        run=created.model_copy(
+            update={
+                "status": "completed",
+                "source_snapshots": service._build_demo_snapshots(run=created, snapshot_ids=snapshot_ids),
+                "findings": findings,
+                "review_cards": [review_card],
+            }
+        )
+    )
+
+    decided = service.apply_review_card_decision(
+        run_id=run.run_id,
+        card_id=review_card.card_id,
+        action="accept",
+        comment_text="Diese Abweichung soll in ein Jira-Ticket ueberfuehrt werden.",
+    )
+
+    assert decided.review_cards[0].decision_state == "accepted"
+    decided_finding = next(item for item in decided.findings if item.finding_id == findings[0].finding_id)
+    assert decided_finding.resolution_state == "accepted"
+
+    updated = service.create_writeback_approval_request(
+        run_id=decided.run_id,
+        target_type="jira_ticket_create",
+        title="Jira-Writeback fuer Statement Write-Vertrag",
+        summary="Akzeptierte Review-Karte soll als Jira-Ticket vorbereitet werden.",
+        target_url="https://finius.atlassian.net/jira/software/projects/FINAI/boards/67",
+        related_review_card_ids=[review_card.card_id],
+        related_package_ids=[],
+        related_finding_ids=[],
+        payload_preview=["Review-Karte akzeptiert", "Jira-Folgeaktion vorbereiten"],
+    )
+
+    approval = updated.approval_requests[0]
+    assert approval.related_finding_ids == [findings[0].finding_id]
+    assert approval.metadata["related_review_card_ids"] == [review_card.card_id]
+    assert approval.metadata["jira_issue_payload"]["fields"]["project"]["key"] == "FINAI"
 
 
 def test_merge_truths_from_specification_never_uses_package_scope_summary_as_subject_key(tmp_path: Path) -> None:

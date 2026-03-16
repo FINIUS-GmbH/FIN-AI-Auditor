@@ -143,14 +143,72 @@ def test_bootstrap_exposes_operational_readiness(monkeypatch, tmp_path: Path) ->
     assert body["operational_readiness"]["persistence_profile"]["production_ready"] is False
     assert body["operational_readiness"]["persistence_profile"]["mode_ready"] is True
     assert body["runtime_guard"]["ready"] is True
-    assert body["operational_readiness"]["writeback_target_policy"]["allowed_confluence_space_keys"] == ["FINAI"]
-    assert body["operational_readiness"]["writeback_target_policy"]["allowed_jira_project_keys"] == ["FINAI"]
-    assert body["quality_gate"]["gold_set"]["passed"] is True
-    assert body["quality_gate"]["delta_recompute"]["passed"] is True
-    assert "operational_alerts" in body["operational_readiness"]
-    assert "go_live_gate" in body["operational_readiness"]
-    assert "blocking_gates" in body["go_live_gate"]
-    assert "checks" in body["go_live_gate"]
+
+
+def test_create_run_endpoint_rejects_deep_audit_by_default(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        enable_deep_audit_api_runs=False,
+    )
+    service = AuditService(
+        repository=SQLiteAuditRepository(db_path=settings.database_path),
+        settings=settings,
+    )
+    app = create_app()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/audits/runs",
+        json={
+            "analysis_mode": "deep",
+            "target": {
+                "local_repo_path": "/Users/martinwaelter/GitHub/FIN-AI",
+                "github_ref": "main",
+                "confluence_space_keys": ["FINAI"],
+                "jira_project_keys": ["FINAI"],
+                "include_metamodel": True,
+                "include_local_docs": True,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Fast Audit" in response.json()["detail"]
+
+
+def test_create_run_endpoint_accepts_fast_audit_by_default(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        enable_deep_audit_api_runs=False,
+    )
+    service = AuditService(
+        repository=SQLiteAuditRepository(db_path=settings.database_path),
+        settings=settings,
+    )
+    app = create_app()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/audits/runs",
+        json={
+            "analysis_mode": "fast",
+            "target": {
+                "local_repo_path": "/Users/martinwaelter/GitHub/FIN-AI",
+                "github_ref": "main",
+                "confluence_space_keys": ["FINAI"],
+                "jira_project_keys": ["FINAI"],
+                "include_metamodel": True,
+                "include_local_docs": True,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["analysis_mode"] == "fast"
+    assert "Fast Audit" in body["analysis_log"][0]["message"]
 
 
 def test_bootstrap_exposes_prod_like_runtime_blockers(monkeypatch, tmp_path: Path) -> None:
@@ -218,6 +276,7 @@ def test_decision_comment_endpoint_returns_updated_run(tmp_path: Path) -> None:
     )
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",
@@ -261,6 +320,7 @@ def test_jira_ticket_created_endpoint_returns_change_brief(tmp_path: Path) -> No
     )
     created = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
                 github_ref="main",

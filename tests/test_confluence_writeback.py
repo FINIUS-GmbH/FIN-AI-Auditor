@@ -204,6 +204,7 @@ def test_create_confluence_approval_request_stores_patch_preview(tmp_path: Path)
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -255,6 +256,7 @@ def test_demo_completion_can_run_multiple_times_without_snapshot_id_collision(tm
 
     first = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -267,6 +269,7 @@ def test_demo_completion_can_run_multiple_times_without_snapshot_id_collision(tm
     )
     second = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -305,6 +308,7 @@ def test_audit_service_executes_approved_confluence_writeback(tmp_path: Path) ->
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -387,6 +391,7 @@ def test_confluence_writeback_failure_persists_http_classification(tmp_path: Pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -450,6 +455,7 @@ def test_audit_service_reuses_existing_confluence_writeback_idempotently(tmp_pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -507,6 +513,7 @@ def test_confluence_writeback_approval_request_blocks_disallowed_space(tmp_path:
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -552,6 +559,7 @@ def test_confluence_writeback_execution_rechecks_target_policy(tmp_path: Path) -
     service = AuditService(repository=repository, settings=allowed_settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",

@@ -14,6 +14,7 @@ from fin_ai_auditor.domain.models import (
     DecisionPackageActionRequest,
     RecordConfluencePageUpdateRequest,
     RecordJiraTicketCreatedRequest,
+    ReviewCardActionRequest,
     ResolveWritebackApprovalRequest,
     SendClarificationMessageRequest,
     SupersedeTruthFromClarificationRequest,
@@ -30,7 +31,10 @@ def create_audit_run(
     payload: CreateAuditRunRequest,
     service: AuditService = Depends(get_audit_service),
 ) -> AuditRun:
-    return service.create_run(payload=payload)
+    try:
+        return service.create_user_run(payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/runs", response_model=AuditRunListResponse)
@@ -60,6 +64,24 @@ def process_decision_comment(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/review-cards/{card_id}/decision", response_model=AuditRun)
+def apply_review_card_decision(
+    run_id: str,
+    card_id: str,
+    payload: ReviewCardActionRequest,
+    service: AuditService = Depends(get_audit_service),
+) -> AuditRun:
+    try:
+        return service.apply_review_card_decision(
+            run_id=run_id,
+            card_id=card_id,
+            action=payload.action,
+            comment_text=payload.comment_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/packages/{package_id}/regenerate", response_model=AuditRun)
@@ -127,6 +149,7 @@ def create_writeback_approval_request(
             title=payload.title,
             summary=payload.summary,
             target_url=payload.target_url,
+            related_review_card_ids=payload.related_review_card_ids,
             related_package_ids=payload.related_package_ids,
             related_finding_ids=payload.related_finding_ids,
             payload_preview=payload.payload_preview,
