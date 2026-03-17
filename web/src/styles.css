@@ -690,6 +690,19 @@ ul,ol{list-style:none}
 .rc-meta-chip{display:inline-flex;align-items:center;font-size:var(--fs-xs);font-weight:600;padding:3px 10px;border-radius:var(--r-pill);background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-subtle)}
 .rc-meta-note{font-size:var(--fs-xs);color:var(--text-muted);font-style:italic}
 
+/* Consequences */
+.rc-consequences{display:flex;flex-direction:column;gap:var(--sp-sm)}
+.rc-consequence-row{display:flex;gap:var(--sp-md);padding:var(--sp-md) var(--sp-lg);background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:var(--r-md);transition:border-color var(--tr-fast)}
+.rc-consequence-row:hover{border-color:var(--border-default)}
+.rc-consequence-icon{flex-shrink:0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-full);font-size:14px;font-weight:700}
+.rc-consequence-icon svg{width:16px;height:16px}
+.rc-consequence-confluence{color:#2684ff;background:rgba(38,132,255,0.1);border:1px solid rgba(38,132,255,0.2)}
+.rc-consequence-jira{color:#2684ff;background:rgba(38,132,255,0.1);border:1px solid rgba(38,132,255,0.2)}
+.rc-consequence-system{color:var(--success);background:var(--success-bg);border:1px solid rgba(61,139,110,0.2)}
+.rc-consequence-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.rc-consequence-body strong{font-size:var(--fs-sm);color:var(--text-primary);font-weight:600}
+.rc-consequence-body span{font-size:var(--fs-sm);color:var(--text-secondary);line-height:1.55}
+
 /* Card-list overlay adaptations for rc */
 .card-list-item-overlay .rc{margin-bottom:0;box-shadow:0 10px 28px rgba(7,10,18,0.22)}
 .card-list-item-overlay:not(:first-child) .rc{background:linear-gradient(180deg,rgba(27,35,54,0.98),rgba(22,29,46,0.98))}

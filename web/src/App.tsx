@@ -271,6 +271,11 @@ function reviewCardCategoryLabel(card: ReviewCard): string {
   return de(card.deviation_type);
 }
 
+function extractReviewCardId(text: string): string | null {
+  const match = text.match(/reviewcard\s+([a-z0-9_-]+)/i);
+  return match ? match[1] : null;
+}
+
 function reviewCardSourceGroups(card: ReviewCard): {
   slotLabel: string;
   sourceLabel: string;
@@ -425,9 +430,24 @@ export default function App(): ReactNode {
       openPkgs.forEach((pkg) => activeIds.add(pkg.package_id));
       soloFindings.forEach((finding) => activeIds.add(finding.finding_id));
     }
+    const confirmedIds = new Set<string>();
+    for (const entry of run.analysis_log ?? []) {
+      const meta = (entry.metadata ?? {}) as Record<string, unknown>;
+      const metaId = typeof meta.review_card_id === "string" ? meta.review_card_id : null;
+      const text = `${entry.title} ${entry.message}`;
+      const textId = extractReviewCardId(text);
+      const cardId = metaId || textId;
+      if (!cardId) continue;
+      const msg = text.toLowerCase();
+      const confirmedByMeta = meta.clarification_confirmed === true || meta.action === "clarify_confirmed";
+      const confirmedByTag = msg.includes("[klaerung_bestaetigt]") || msg.includes("[klaerung_ok]");
+      const confirmedByWording = msg.includes("klaerung") && (msg.includes("bestaetigt") || msg.includes("bestatigt") || msg.includes("confirmed"));
+      if (confirmedByMeta || confirmedByTag || confirmedByWording) confirmedIds.add(cardId);
+    }
+
     setWaitingClarifications((prev) => {
       const next = new Set<string>();
-      prev.forEach((id) => { if (activeIds.has(id)) next.add(id); });
+      prev.forEach((id) => { if (activeIds.has(id) && !confirmedIds.has(id)) next.add(id); });
       return next;
     });
   }, [run?.run_id, run?.analysis_mode, openReviewCards, openPkgs, soloFindings]);
@@ -1696,6 +1716,38 @@ function ReviewCardView(props: {
           <div className="rc-recommendation">{card.recommended_decision}</div>
         </div>
       )}
+
+      {/* ── 9. Konsequenz bei Annahme ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Konsequenz bei Annahme</div>
+        <div className="rc-consequences">
+          {card.follow_up_capabilities.includes("confluence_page_update") && (
+            <div className="rc-consequence-row">
+              <span className="rc-consequence-icon rc-consequence-confluence">{CONF_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Confluence-Korrektur vorbereiten</strong>
+                <span>Die betroffene Doku-Seite wird als Writeback-Kandidat markiert. Nach Freigabe wird ein Patch-Vorschlag erzeugt und zur Genehmigung vorgelegt.</span>
+              </div>
+            </div>
+          )}
+          {card.follow_up_capabilities.includes("jira_ticket_create") && (
+            <div className="rc-consequence-row">
+              <span className="rc-consequence-icon rc-consequence-jira">{JIRA_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Jira-Ticket anlegen</strong>
+                <span>Ein qualifiziertes Jira-Ticket mit Problembeschreibung, betroffenen Artefakten und Korrekturvorschlag wird vorbereitet und zur Freigabe vorgelegt.</span>
+              </div>
+            </div>
+          )}
+          <div className="rc-consequence-row">
+            <span className="rc-consequence-icon rc-consequence-system">✓</span>
+            <div className="rc-consequence-body">
+              <strong>Karte als bestaetigt markieren</strong>
+              <span>Die Review-Karte wird im Audit-Run als akzeptiert gespeichert. Die Abweichung gilt damit als fachlich bewertet und fliesst in die Gesamtauswertung ein.</span>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* ── Kontext (Lane, Independence) ── */}
       <div className="rc-meta-row">
