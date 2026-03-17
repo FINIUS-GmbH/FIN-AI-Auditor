@@ -13,5 +13,8 @@ web/dist/
 web/.vite/
 *.egg-info/
 *.db
+.pids/
+logs/
+data/metamodel/
 tmp/
 web/node_modules/.vite/
