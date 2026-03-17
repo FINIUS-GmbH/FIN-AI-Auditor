@@ -98,7 +98,7 @@ class TestThreadLifecycle:
         thread = result.clarification_threads[0]
         assert [message.role for message in thread.messages[:2]] == ["assistant", "user"]
         assert thread.messages[1].content == "Bitte klaeren, ob API X aktiv ist."
-        assert thread.metadata == {}
+        assert thread.metadata == {"review_card_id": None}
 
     def test_process_answer_adds_messages(self, tmp_path: Path) -> None:
         _, _, cs, run_id, pkg = _make_env(tmp_path)
