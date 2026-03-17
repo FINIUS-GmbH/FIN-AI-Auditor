@@ -1615,6 +1615,12 @@ function ReviewCardView(props: {
   if (card.why_it_matters) impactLines.push(card.why_it_matters);
   for (const action of nextActions) impactLines.push(action);
 
+  // Follow-up checkbox state
+  const hasConfluence = card.follow_up_capabilities.includes("confluence_page_update");
+  const hasJira = card.follow_up_capabilities.includes("jira_ticket_create");
+  const [chkConfluence, setChkConfluence] = useState(hasConfluence);
+  const [chkJira, setChkJira] = useState(hasJira);
+
   return (
     <article className="rc" data-severity={card.priority}>
       {/* ── 1. Badge-Row: Deviation Type + Priority + Truth-Source Icon ── */}
@@ -1717,35 +1723,51 @@ function ReviewCardView(props: {
         </div>
       )}
 
-      {/* ── 9. Konsequenz bei Annahme ── */}
+      {/* ── 9. Konsequenz bei Annahme (Checkboxen) ── */}
       <div className="rc-section">
         <div className="rc-section-label">Konsequenz bei Annahme</div>
         <div className="rc-consequences">
-          {card.follow_up_capabilities.includes("confluence_page_update") && (
-            <div className="rc-consequence-row">
-              <span className="rc-consequence-icon rc-consequence-confluence">{CONF_SVG}</span>
-              <div className="rc-consequence-body">
-                <strong>Confluence-Korrektur vorbereiten</strong>
-                <span>Die betroffene Doku-Seite wird als Writeback-Kandidat markiert. Nach Freigabe wird ein Patch-Vorschlag erzeugt und zur Genehmigung vorgelegt.</span>
-              </div>
-            </div>
-          )}
-          {card.follow_up_capabilities.includes("jira_ticket_create") && (
-            <div className="rc-consequence-row">
-              <span className="rc-consequence-icon rc-consequence-jira">{JIRA_SVG}</span>
-              <div className="rc-consequence-body">
-                <strong>Jira-Ticket anlegen</strong>
-                <span>Ein qualifiziertes Jira-Ticket mit Problembeschreibung, betroffenen Artefakten und Korrekturvorschlag wird vorbereitet und zur Freigabe vorgelegt.</span>
-              </div>
-            </div>
-          )}
-          <div className="rc-consequence-row">
+          {/* Always: mark card as confirmed */}
+          <label className="rc-consequence-row rc-consequence-always">
+            <input type="checkbox" checked disabled className="rc-consequence-check" />
             <span className="rc-consequence-icon rc-consequence-system">✓</span>
             <div className="rc-consequence-body">
               <strong>Karte als bestaetigt markieren</strong>
-              <span>Die Review-Karte wird im Audit-Run als akzeptiert gespeichert. Die Abweichung gilt damit als fachlich bewertet und fliesst in die Gesamtauswertung ein.</span>
+              <span>Die Review-Karte wird als akzeptiert gespeichert und fliesst in die Gesamtauswertung ein.</span>
             </div>
-          </div>
+          </label>
+          {/* Optional: Confluence */}
+          {hasConfluence && (
+            <label className={`rc-consequence-row ${chkConfluence ? "rc-consequence-active" : ""}`}>
+              <input
+                type="checkbox"
+                checked={chkConfluence}
+                onChange={(e) => setChkConfluence(e.target.checked)}
+                className="rc-consequence-check"
+              />
+              <span className="rc-consequence-icon rc-consequence-confluence">{CONF_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Confluence-Korrektur vorbereiten</strong>
+                <span>Die betroffene Doku-Seite wird als Writeback-Kandidat markiert. Ein Patch-Vorschlag wird erzeugt und zur Genehmigung vorgelegt.</span>
+              </div>
+            </label>
+          )}
+          {/* Optional: Jira */}
+          {hasJira && (
+            <label className={`rc-consequence-row ${chkJira ? "rc-consequence-active" : ""}`}>
+              <input
+                type="checkbox"
+                checked={chkJira}
+                onChange={(e) => setChkJira(e.target.checked)}
+                className="rc-consequence-check"
+              />
+              <span className="rc-consequence-icon rc-consequence-jira">{JIRA_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Jira-Ticket anlegen</strong>
+                <span>Ein qualifiziertes Jira-Ticket mit Problembeschreibung, betroffenen Artefakten und Korrekturvorschlag wird vorbereitet.</span>
+              </div>
+            </label>
+          )}
         </div>
       </div>
 
@@ -1761,22 +1783,6 @@ function ReviewCardView(props: {
         <div className="wc-question-block wc-question-block-end">
           <div className="wc-label">Frage zur Entscheidung</div>
           <div className="wc-question-text">{reviewCardDecisionQuestion(card)}</div>
-        </div>
-        <div className="wc-action-outcomes">
-          <div className="wc-action-card wc-action-card-accept">
-            <div className="wc-action-card-head">{labels.accept}</div>
-            <ul>{consequences.accept.map((item, i) => <li key={i}>{item}</li>)}</ul>
-          </div>
-          <div className="wc-action-card wc-action-card-reject">
-            <div className="wc-action-card-head">{labels.reject}</div>
-            <ul>{consequences.reject.map((item, i) => <li key={i}>{item}</li>)}</ul>
-          </div>
-          {props.onClarify && (
-            <div className="wc-action-card wc-action-card-clarify">
-              <div className="wc-action-card-head">{labels.clarify}</div>
-              <ul>{consequences.clarify.map((item, i) => <li key={i}>{item}</li>)}</ul>
-            </div>
-          )}
         </div>
         <div className="wc-btns wc-btns-primary">
           <button className="btn btn-accept" disabled={busy} onClick={props.onAccept}>✓ {labels.accept}</button>

@@ -690,10 +690,15 @@ ul,ol{list-style:none}
 .rc-meta-chip{display:inline-flex;align-items:center;font-size:var(--fs-xs);font-weight:600;padding:3px 10px;border-radius:var(--r-pill);background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-subtle)}
 .rc-meta-note{font-size:var(--fs-xs);color:var(--text-muted);font-style:italic}
 
-/* Consequences */
+/* Consequences (checkbox rows) */
 .rc-consequences{display:flex;flex-direction:column;gap:var(--sp-sm)}
-.rc-consequence-row{display:flex;gap:var(--sp-md);padding:var(--sp-md) var(--sp-lg);background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:var(--r-md);transition:border-color var(--tr-fast)}
-.rc-consequence-row:hover{border-color:var(--border-default)}
+.rc-consequence-row{display:flex;gap:var(--sp-md);padding:var(--sp-md) var(--sp-lg);background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:var(--r-md);transition:all var(--tr-fast);cursor:pointer;align-items:flex-start}
+.rc-consequence-row:hover{border-color:var(--border-default);background:var(--bg-hover)}
+.rc-consequence-active{border-color:rgba(61,139,110,0.3);background:rgba(61,139,110,0.04)}
+.rc-consequence-active:hover{border-color:rgba(61,139,110,0.4);background:rgba(61,139,110,0.06)}
+.rc-consequence-always{cursor:default;opacity:.85}
+.rc-consequence-check{flex-shrink:0;width:18px;height:18px;accent-color:var(--success);margin-top:2px;cursor:pointer}
+.rc-consequence-always .rc-consequence-check{cursor:default}
 .rc-consequence-icon{flex-shrink:0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-full);font-size:14px;font-weight:700}
 .rc-consequence-icon svg{width:16px;height:16px}
 .rc-consequence-confluence{color:#2684ff;background:rgba(38,132,255,0.1);border:1px solid rgba(38,132,255,0.2)}
