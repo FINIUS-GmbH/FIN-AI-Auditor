@@ -195,7 +195,7 @@ class FastAuditService:
             ]
         if deterministic_candidates:
             llm_notes.append(
-                f"{len(deterministic_candidates)} Kandidaten ohne belastbares Gegenstueck wurden deterministisch als Gap-Karten behandelt."
+                f"{len(deterministic_candidates)} Kandidaten ohne belastbares Gegenstueck wurden deterministisch als Spiegelungs-/Abdeckungskarten behandelt."
             )
 
         fast_claim_documents = _select_fast_claim_documents(documents=documents)
@@ -507,20 +507,29 @@ def _heuristic_card(*, candidate: ComparisonCandidate) -> ReviewCard | None:
         source_b_claim = "Kein belastbares Gegenstueck innerhalb des priorisierten Fast-Audit-Budgets gefunden."
         deviation_type = "gap"
         return ReviewCard(
-            title=f"Luecke bei {left.heading}",
+            title=f"Spiegelungsluecke bei {left.heading}",
             deviation_type=deviation_type,
-            summary=f"Fuer {left.heading} wurde kein belastbares Gegenstueck in den priorisierten Quellen gefunden.",
+            summary=(
+                f"Fuer {left.heading} wurde in diesem Fast-Audit-Lauf kein belastbares Gegenstueck "
+                "innerhalb der priorisierten Vergleichsmenge gefunden."
+            ),
             source_a=_source_label(section=left),
             source_b="Kein priorisierter Gegenstand",
             source_a_evidence=[source_a_claim],
             source_b_evidence=[source_b_claim],
             source_a_locations=[left.location],
             source_b_locations=[],
-            why_it_matters="Die Aussage ist damit nicht gegen mindestens eine zweite Quelle gespiegelt.",
-            recommended_decision="Pruefen, ob eine fehlende Quelle, eine echte Dokumentationsluecke oder ein Scope-Fehler vorliegt.",
+            why_it_matters=(
+                "Die Aussage wurde in diesem Run nicht gegen eine zweite Quelle gespiegelt. "
+                "Das ist noch kein nachgewiesener fachlicher Drift, sondern zunaechst eine Abdeckungs- oder Scope-Luecke."
+            ),
+            recommended_decision=(
+                "Pruefen, ob fuer diesen Abschnitt ueberhaupt ein passendes Soll-Gegenstueck im Scope existiert "
+                "oder ob der Fast Audit hier nur am Priorisierungsbudget geendet hat."
+            ),
             confidence=0.62,
             priority="medium",
-            follow_up_capabilities=_follow_up_capabilities(source_types={left.source_type}),
+            follow_up_capabilities=[],
             metadata=_review_card_metadata(
                 left=left,
                 right=right,
@@ -680,9 +689,10 @@ def _review_card_to_finding(*, card: ReviewCard) -> AuditFinding:
         "low": "low",
     }
     locations = [*card.source_a_locations, *card.source_b_locations]
+    is_budget_gap = bool(card.metadata.get("is_budget_gap"))
     return AuditFinding(
         severity=severity_map.get(card.priority, "medium"),
-        category=category_map.get(card.deviation_type, "open_decision"),
+        category="open_decision" if is_budget_gap else category_map.get(card.deviation_type, "open_decision"),
         title=card.title,
         summary=card.summary,
         recommendation=card.recommended_decision,
@@ -1114,30 +1124,64 @@ def _review_card_metadata(
     source_a_claim: str,
     source_b_claim: str,
 ) -> dict[str, object]:
-    labels = _decision_action_labels(deviation_type=deviation_type)
-    capabilities = _follow_up_capabilities(
-        source_types={left.source_type, *( [right.source_type] if right is not None else [] )}
-    )
-    consequences = _decision_consequences(
-        deviation_type=deviation_type,
-        follow_up_capabilities=capabilities,
-    )
+    is_budget_gap = deviation_type == "gap" and right is None
+    if is_budget_gap:
+        labels = {
+            "accept_label": "Als Abdeckungsluecke akzeptieren",
+            "reject_label": "Nicht als fachlichen Befund werten",
+            "clarify_label": "Scope zuerst klaeren",
+        }
+        consequences = {
+            "accept_consequences": [
+                "Die Karte wird als Abdeckungs- bzw. Spiegelungsluecke akzeptiert und aus dem offenen Review entfernt.",
+                "Zugehoerige Findings bleiben als Scope-/Coverage-Hinweis dokumentiert, nicht als nachgewiesene fachliche Abweichung.",
+            ],
+            "reject_consequences": [
+                "Die Karte wird geschlossen und nicht als fachlicher Befund weitergefuehrt.",
+                "Es werden keine Folgefreigaben fuer Doku- oder Code-Korrekturen erzeugt.",
+            ],
+            "clarify_consequences": [
+                "Die Karte bleibt als Klaerfall markiert, bis Scope oder Gegenquelle explizit geklaert sind.",
+                "Erst nach einer Nachspiegelung oder klaren Scope-Entscheidung ist eine fachliche Bewertung belastbar.",
+            ],
+        }
+        decision_question = (
+            f"Soll fuer '{left.heading or left.title}' zuerst Scope bzw. Gegenquelle geklaert werden, "
+            "bevor ueber einen fachlichen Befund entschieden wird?"
+        )
+        rationale_summary = (
+            "Diese Karte zeigt primar eine fehlende Spiegelung im priorisierten Fast-Audit-Scope. "
+            "Ohne Gegenquelle ist daraus noch kein fachlicher Drift ableitbar."
+        )
+    else:
+        labels = _decision_action_labels(deviation_type=deviation_type)
+        capabilities = _follow_up_capabilities(
+            source_types={left.source_type, *( [right.source_type] if right is not None else [] )}
+        )
+        consequences = _decision_consequences(
+            deviation_type=deviation_type,
+            follow_up_capabilities=capabilities,
+        )
+        decision_question = _decision_question(left=left, right=right, deviation_type=deviation_type)
+        rationale_summary = (
+            "Diese Karte ist als atomare Entscheidung innerhalb eines stabilen Run-Snapshots modelliert. "
+            "Andere offene Karten werden nicht sofort neu berechnet."
+        )
     return {
         "comparison_focus": left.heading or left.title,
+        "gap_class": "coverage_gap" if is_budget_gap else ("content_gap" if deviation_type == "gap" else ""),
+        "is_budget_gap": is_budget_gap,
         "source_a_heading": left.heading,
         "source_b_heading": right.heading if right is not None else "",
         "source_a_claim": source_a_claim,
         "source_b_claim": source_b_claim,
         "source_a_full_text": _normalize_text(left.body),
         "source_b_full_text": _normalize_text(right.body) if right is not None else source_b_claim,
-        "decision_question": _decision_question(left=left, right=right, deviation_type=deviation_type),
+        "decision_question": decision_question,
         "accept_label": labels["accept_label"],
         "reject_label": labels["reject_label"],
         "clarify_label": labels["clarify_label"],
-        "rationale_summary": (
-            "Diese Karte ist als atomare Entscheidung innerhalb eines stabilen Run-Snapshots modelliert. "
-            "Andere offene Karten werden nicht sofort neu berechnet."
-        ),
+        "rationale_summary": rationale_summary,
         **_lane_metadata(
             subject_key=left.heading or left.title,
             left=left,

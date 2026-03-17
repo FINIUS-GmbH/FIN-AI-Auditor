@@ -271,6 +271,7 @@ def create_clarification_thread(
             run_id=run_id,
             package_id=payload.package_id,
             atomic_fact_id=payload.atomic_fact_id,
+            review_card_id=payload.review_card_id,
             purpose=payload.purpose,
             initial_content=payload.initial_content,
         )

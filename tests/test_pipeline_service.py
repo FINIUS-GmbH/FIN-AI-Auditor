@@ -627,8 +627,11 @@ def test_fast_audit_treats_unaligned_focus_matches_as_gap(monkeypatch, tmp_path:
 
     assert result.review_cards
     assert result.review_cards[0].deviation_type == "gap"
+    assert result.review_cards[0].metadata["is_budget_gap"] is True
+    assert result.review_cards[0].follow_up_capabilities == []
     assert "Grundprinzipien" in result.review_cards[0].title
     assert "decision_question" in result.review_cards[0].metadata
+    assert result.findings[0].category == "open_decision"
 
 
 def test_fast_audit_detects_bsm_benchmark_contradictions(monkeypatch, tmp_path: Path) -> None:

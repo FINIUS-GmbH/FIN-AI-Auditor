@@ -103,6 +103,7 @@ class ClarificationService:
         run_id: str,
         package_id: str | None = None,
         atomic_fact_id: str | None = None,
+        review_card_id: str | None = None,
         purpose: str,
         initial_content: str | None = None,
     ) -> AuditRun:
@@ -125,6 +126,9 @@ class ClarificationService:
             atomic_fact_id=atomic_fact_id,
             purpose=purpose,
             messages=[first_question],
+            metadata={
+                "review_card_id": review_card_id,
+            }
         )
 
         if initial_content and initial_content.strip():
@@ -147,6 +151,8 @@ class ClarificationService:
                 "package_id": package_id,
                 "atomic_fact_id": atomic_fact_id,
                 "initial_message_provided": bool(initial_content and initial_content.strip()),
+                "review_card_id": review_card_id,
+                "clarification_confirmed": False,
             },
         )
 
@@ -332,6 +338,8 @@ class ClarificationService:
                 "thread_id": thread.thread_id,
                 "old_truth_id": existing_truth_id,
                 "new_truth_id": new_truth.truth_id,
+                "review_card_id": str(thread.metadata.get("review_card_id") or "") or None,
+                "clarification_confirmed": True,
             },
         )
 
@@ -408,7 +416,12 @@ class ClarificationService:
             ),
             derived_changes=[f"Claim {indication_claim.claim_id} mit Confidence {INDICATION_CONFIDENCE} angelegt."],
             impact_summary=["Beeinflusst Scoring, überschreibt keine Wahrheiten."],
-            metadata={"thread_id": thread.thread_id, "claim_id": indication_claim.claim_id},
+            metadata={
+                "thread_id": thread.thread_id,
+                "claim_id": indication_claim.claim_id,
+                "review_card_id": str(thread.metadata.get("review_card_id") or "") or None,
+                "clarification_confirmed": False,
+            },
         )
 
         updated = run.model_copy(
@@ -446,10 +459,23 @@ class ClarificationService:
             }
         )
 
+        log_entry = AuditAnalysisLogEntry(
+            source_type="clarification_dialog",
+            title="Klärungsdialog geschlossen",
+            message="Klärung ohne Ergebnis abgeschlossen.",
+            impact_summary=["Keine neue Wahrheit gesetzt, keine automatische Neuberechnung."],
+            metadata={
+                "thread_id": thread.thread_id,
+                "review_card_id": str(thread.metadata.get("review_card_id") or "") or None,
+                "clarification_confirmed": False,
+            },
+        )
+
         updated = run.model_copy(
             update={
                 "updated_at": utc_now_iso(),
                 "clarification_threads": self._replace_thread(run.clarification_threads, updated_thread),
+                "analysis_log": [*run.analysis_log, log_entry],
             }
         )
         return self._audit.repository.upsert_run(run=updated)
@@ -1129,6 +1155,8 @@ class ClarificationService:
                 "thread_id": thread.thread_id,
                 "truth_id": new_truth.truth_id,
                 "canonical_key": canonical_key,
+                "review_card_id": str(thread.metadata.get("review_card_id") or "") or None,
+                "clarification_confirmed": True,
             },
         )
 

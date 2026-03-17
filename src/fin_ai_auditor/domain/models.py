@@ -893,6 +893,7 @@ class RecordJiraTicketCreatedRequest(BaseModel):
 class CreateClarificationThreadRequest(BaseModel):
     package_id: str | None = None
     atomic_fact_id: str | None = None
+    review_card_id: str | None = None
     purpose: ClarificationPurpose
     initial_content: str | None = Field(default=None, max_length=2000)
 

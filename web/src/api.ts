@@ -306,6 +306,7 @@ export async function createClarificationThread(
   payload: {
     package_id?: string | null;
     atomic_fact_id?: string | null;
+    review_card_id?: string | null;
     purpose: "truth_clarification" | "rating_explanation" | "action_routing";
     initial_content?: string | null;
   },

@@ -320,7 +320,8 @@ export type AuditAnalysisLogEntry = {
     | "decision_comment"
     | "truth_update"
     | "impact_analysis"
-    | "recommendation_regeneration";
+    | "recommendation_regeneration"
+    | "clarification_dialog";
   title: string;
   message: string;
   related_finding_ids: string[];

@@ -16,6 +16,7 @@ import {
 type ClarificationPanelProps = {
   run: AuditRun;
   packageId: string;
+  reviewCardId?: string;
   /** Called with the updated run after any mutation */
   onRunUpdated: (run: AuditRun) => void;
 };
@@ -66,6 +67,7 @@ function relativeTime(isoDate: string): string {
 export function ClarificationPanel({
   run,
   packageId,
+  reviewCardId,
   onRunUpdated,
 }: ClarificationPanelProps): JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -104,6 +106,7 @@ export function ClarificationPanel({
     try {
       const updatedRun = await createClarificationThread(run.run_id, {
         package_id: packageId,
+        review_card_id: reviewCardId ?? null,
         purpose: "truth_clarification",
         initial_content: draft.trim(),
       });
