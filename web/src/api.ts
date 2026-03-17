@@ -1,4 +1,5 @@
 import type {
+  AnalysisMode,
   AtlassianAuthStatus,
   AtlassianAuthorizationStart,
   AuditRun,
@@ -23,13 +24,13 @@ export async function listAuditRuns(): Promise<AuditRun[]> {
   return body.items;
 }
 
-export async function createAuditRun(target: AuditTarget): Promise<AuditRun> {
+export async function createAuditRun(target: AuditTarget, analysisMode: AnalysisMode = "fast"): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ target }),
+    body: JSON.stringify({ target, analysis_mode: analysisMode }),
   });
   return parseResponse<AuditRun>(response);
 }
@@ -83,6 +84,37 @@ export async function listConfluencePages(spaceKey: string): Promise<ConfluenceP
   return parseResponse<ConfluencePageTree>(response);
 }
 
+export async function renameConfluencePage(
+  pageId: string,
+  newTitle: string,
+): Promise<{ ok: boolean; page_id: string; new_title: string; version: number }> {
+  const response = await fetch(
+    `${API_BASE}/api/ingestion/atlassian/confluence/pages/${encodeURIComponent(pageId)}/rename`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_title: newTitle }),
+    },
+  );
+  return parseResponse(response);
+}
+
+export async function moveConfluencePage(
+  pageId: string,
+  newParentId: string,
+): Promise<{ ok: boolean; page_id: string; new_parent_id: string; title: string; version: number }> {
+  const response = await fetch(
+    `${API_BASE}/api/ingestion/atlassian/confluence/pages/${encodeURIComponent(pageId)}/move`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_parent_id: newParentId }),
+    },
+  );
+  return parseResponse(response);
+}
+
+
 export async function submitDecisionComment(runId: string, commentText: string): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/decision-comments`, {
     method: "POST",
@@ -104,6 +136,25 @@ export async function submitPackageDecision(
   commentText?: string,
 ): Promise<AuditRun> {
   const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/packages/${packageId}/decisions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      action,
+      comment_text: commentText ?? null,
+    }),
+  });
+  return parseResponse<AuditRun>(response);
+}
+
+export async function submitReviewCardDecision(
+  runId: string,
+  cardId: string,
+  action: "accept" | "reject" | "clarify",
+  commentText?: string,
+): Promise<AuditRun> {
+  const response = await fetch(`${API_BASE}/api/audits/runs/${runId}/review-cards/${cardId}/decision`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -142,6 +193,7 @@ export async function createWritebackApprovalRequest(
     title: string;
     summary: string;
     target_url?: string | null;
+    related_review_card_ids?: string[];
     related_package_ids: string[];
     related_finding_ids: string[];
     payload_preview: string[];
@@ -254,6 +306,7 @@ export async function createClarificationThread(
   payload: {
     package_id?: string | null;
     atomic_fact_id?: string | null;
+    review_card_id?: string | null;
     purpose: "truth_clarification" | "rating_explanation" | "action_routing";
     initial_content?: string | null;
   },

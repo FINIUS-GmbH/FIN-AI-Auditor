@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { categoryLabel } from "../categoryLabels";
+import { eventualPathMeta } from "../eventualPathMeta";
 import type {
   AuditRun,
   AuditLocation,
@@ -50,6 +52,7 @@ const ALL_CATEGORIES = [
   "missing_definition",
   "clarification_needed",
   "read_write_gap",
+  "legacy_path_gap",
   "stale_source",
   "traceability_gap",
   "ownership_gap",
@@ -141,7 +144,7 @@ export function PackagesView({
             className={`filter-pill${filter === cat ? " active" : ""}`}
             onClick={() => setFilter(cat)}
           >
-            {cat === "Alle" ? `Alle (${totalCount})` : cat}
+            {cat === "Alle" ? `Alle (${totalCount})` : categoryLabel(cat)}
           </button>
         ))}
       </div>
@@ -172,22 +175,64 @@ export function PackagesView({
         packageGroups.map(([category, packages]) => (
           <div className="category-group" key={category}>
             <div className="category-group-head">
-              <h3>{category}</h3>
+              <h3>{categoryLabel(category)}</h3>
               <span className="category-group-count">{packages.length} Paket(e)</span>
             </div>
 
             {packages.map((pkg) => (
               <article className="package-card" key={pkg.package_id} id={`pkg-${pkg.package_id}`}>
+                {(() => {
+                  const meta = eventualPathMeta(pkg.metadata?.eventual_path_type);
+                  return meta && pkg.metadata?.grouped_eventual_paths ? (
+                    <div className={`eventual-chip eventual-chip-${meta.tone}`}>{`${meta.icon} ${meta.label}`}</div>
+                  ) : null;
+                })()}
                 {/* Badges */}
                 <div className="package-badges">
                   <span className={`badge badge-${pkg.severity_summary}`}>{pkg.severity_summary}</span>
-                  <span className="badge badge-category">{pkg.category}</span>
+                  <span className="badge badge-category">{categoryLabel(pkg.category)}</span>
                   <span className={`badge badge-state badge-${pkg.decision_state}`}>{pkg.decision_state}</span>
                 </div>
 
                 {/* Title & Scope */}
                 <h3 className="package-title">{pkg.title}</h3>
                 <p className="package-scope">{pkg.scope_summary}</p>
+                {Boolean(pkg.metadata?.grouped_boundary_paths) ? (
+                  <div className="package-section">
+                    <div className="package-section-label">Boundary-Pfade</div>
+                    <div className="package-recommendation">
+                      {`${Number(pkg.metadata?.boundary_path_count ?? 0)} Pfade betroffen`}
+                      {Array.isArray(pkg.metadata?.boundary_function_names) && pkg.metadata.boundary_function_names.length > 0
+                        ? ` · ${pkg.metadata.boundary_function_names.join(", ")}`
+                        : ""}
+                    </div>
+                  </div>
+                ) : null}
+                {Boolean(pkg.metadata?.grouped_eventual_paths) ? (
+                  <div className="package-section">
+                    <div className="package-section-label">Async-Pfade</div>
+                    <div className="package-recommendation">
+                      {`${Number(pkg.metadata?.eventual_path_count ?? 0)} Pfade betroffen`}
+                      {Array.isArray(pkg.metadata?.eventual_function_names) && pkg.metadata.eventual_function_names.length > 0
+                        ? ` · ${pkg.metadata.eventual_function_names.join(", ")}`
+                        : ""}
+                    </div>
+                  </div>
+                ) : null}
+                {Boolean(pkg.metadata?.grouped_chain_paths) ? (
+                  <div className="package-section">
+                    <div className="package-section-label">Reaggregation-Pfade</div>
+                    <div className="package-recommendation">
+                      {`${Number(pkg.metadata?.chain_path_count ?? 0)} Pfade betroffen`}
+                      {Array.isArray(pkg.metadata?.chain_function_names) && pkg.metadata.chain_function_names.length > 0
+                        ? ` · ${pkg.metadata.chain_function_names.join(", ")}`
+                        : ""}
+                      {Array.isArray(pkg.metadata?.chain_line_windows) && pkg.metadata.chain_line_windows.length > 0
+                        ? ` · ${pkg.metadata.chain_line_windows.join(", ")}`
+                        : ""}
+                    </div>
+                  </div>
+                ) : null}
 
                 {/* Recommendation */}
                 <div className="package-section">
@@ -217,7 +262,7 @@ export function PackagesView({
                       <div className="problem-element" key={prob.problem_id}>
                         <div className="problem-head">
                           <span className={`badge badge-${prob.severity}`}>{prob.severity}</span>
-                          <span className="badge badge-category">{prob.category}</span>
+                          <span className="badge badge-category">{categoryLabel(prob.category)}</span>
                           <span className="problem-confidence">{Math.round(prob.confidence * 100)}%</span>
                         </div>
                         <div className="problem-scope">{prob.scope_summary}</div>

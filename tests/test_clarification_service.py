@@ -41,6 +41,7 @@ def _make_env(tmp_path: Path):
 
     run = audit_svc.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path="/tmp/test-repo",
                 github_ref="main",

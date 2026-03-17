@@ -5,7 +5,7 @@ from collections import defaultdict
 import hashlib
 import logging
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 from uuid import uuid4
 
 from fin_ai_auditor.config import Settings
@@ -37,6 +37,7 @@ from fin_ai_auditor.services.connectors.github_connector import GitHubSnapshotCo
 from fin_ai_auditor.services.connectors.metamodel_connector import MetaModelConnector
 from fin_ai_auditor.services.finding_engine import build_finding_links, derive_truths, generate_findings
 from fin_ai_auditor.services.finding_prioritization import prioritize_findings
+from fin_ai_auditor.services.fast_audit_service import FastAuditService
 from fin_ai_auditor.services.pipeline_models import (
     CollectionBundle,
     CollectedDocument,
@@ -85,6 +86,10 @@ class AuditPipelineService:
             allow_remote_calls=allow_remote_llm,
             db_path=str(audit_service.repository._db_path),
         )
+        self._fast_audit_service = FastAuditService(
+            settings=settings,
+            allow_remote_calls=allow_remote_llm,
+        )
         self._observability = RuntimeObservabilityService(repository=audit_service.repository)
 
     def execute_run(self, *, run_id: str, worker_id: str | None = None) -> AuditRun:
@@ -113,6 +118,7 @@ class AuditPipelineService:
                 source_snapshots=analysis.source_snapshots,
                 findings=analysis.findings,
                 finding_links=analysis.finding_links,
+                review_cards=analysis.review_cards,
                 claims=analysis.claims,
                 truths=analysis.truths,
                 schema_truths=analysis.schema_truths,
@@ -120,6 +126,8 @@ class AuditPipelineService:
                 semantic_relations=analysis.semantic_relations,
                 summary=analysis.summary,
                 analysis_notes=analysis.analysis_log_messages,
+                budget_limited=analysis.budget_limited,
+                coverage_summary=analysis.coverage_summary,
                 llm_usage=analysis.llm_usage,
                 worker_id=worker_id,
             )
@@ -166,6 +174,12 @@ class AuditPipelineService:
         return refreshed
 
     def _run_pipeline(self, *, run: AuditRun, previous_run: AuditRun | None, worker_id: str | None) -> PipelineAnalysisResult:
+        if run.analysis_mode == "fast":
+            return self._run_fast_pipeline(run=run, previous_run=previous_run, worker_id=worker_id)
+
+        return self._run_deep_pipeline(run=run, previous_run=previous_run, worker_id=worker_id)
+
+    def _run_deep_pipeline(self, *, run: AuditRun, previous_run: AuditRun | None, worker_id: str | None) -> PipelineAnalysisResult:
         notes: list[str] = []
 
         # Collect all sources in parallel — they are independent I/O-bound operations
@@ -232,10 +246,25 @@ class AuditPipelineService:
             )
         )
         inherited_truths = _inherit_truths(previous_run=previous_run)
+
+        def _on_semantic_graph_progress(done: int, total: int, message: str) -> None:
+            fraction = done / max(total, 1)
+            progress_pct = 60 + int(fraction * 9)  # 60% -> 69%
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="delta_reconciliation",
+                progress_pct=min(progress_pct, 69),
+                current_activity=message,
+                step_status="running",
+                detail=f"{done}/{total} Claims im Semantik-Graph verarbeitet.",
+                worker_id=worker_id,
+            )
+
         semantic_graph = build_semantic_graph(
             run_id=run.run_id,
             claim_records=claim_records,
             truths=inherited_truths,
+            progress_callback=_on_semantic_graph_progress,
         )
         logger.info("pipeline_semantic_graph_built", extra={"event_name": "pipeline_semantic_graph_built", "event_payload": {"entities": len(semantic_graph.semantic_entities), "relations": len(semantic_graph.semantic_relations)}})
         inherited_causal_graph = build_causal_graph(
@@ -267,6 +296,30 @@ class AuditPipelineService:
             detail="Geaenderte Code-, Doku- und Metamodellsegmente werden fuer spaetere Delta-Neubewertung vorbereitet.",
             worker_id=worker_id,
         )
+
+        def _on_retrieval_index_progress(stage: str, current: int, total: int, message: str) -> None:
+            safe_total = max(1, int(total))
+            ratio = min(1.0, max(0.0, float(current) / float(safe_total)))
+            stage_key = str(stage).strip()
+            progress_pct = 70
+            if stage_key == "segment_documents":
+                progress_pct = 70 + int(round(ratio * 2))
+            elif stage_key == "annotate_deltas":
+                progress_pct = 73
+            elif stage_key == "embed_segments":
+                progress_pct = 74 + int(round(ratio))
+            elif stage_key == "link_claims":
+                progress_pct = 75 + int(round(ratio * 2))
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="retrieval_indexing",
+                progress_pct=min(progress_pct, 77),
+                current_activity=message,
+                step_status="running",
+                detail=message,
+                worker_id=worker_id,
+            )
+
         retrieval_index = build_retrieval_index(
             settings=self._settings,
             run_id=run.run_id,
@@ -274,6 +327,7 @@ class AuditPipelineService:
             claim_records=claim_records,
             previous_segments=previous_segments,
             allow_remote_embeddings=self._recommendation_engine.allow_remote_calls,
+            progress_callback=_on_retrieval_index_progress,
         )
         truths = derive_truths(inherited_truths=inherited_truths, claim_records=claim_records)
         schema_truths = build_schema_truth_registry(claims=claims, truths=truths)
@@ -293,11 +347,34 @@ class AuditPipelineService:
             detail=f"{len(claims)} Claims werden jetzt in Findings und Beziehungen ueberfuehrt.",
             worker_id=worker_id,
         )
+
+        def _on_finding_generation_progress(stage: str, current: int, total: int, message: str) -> None:
+            safe_total = max(1, int(total))
+            ratio = min(1.0, max(0.0, float(current) / float(safe_total)))
+            stage_key = str(stage).strip()
+            progress_pct = 78
+            if stage_key == "scan_subject_groups":
+                progress_pct = 78 + int(round(ratio))
+            elif stage_key in {"truth_conflicts", "merge_findings"}:
+                progress_pct = 79
+            elif stage_key == "link_findings":
+                progress_pct = 79 + int(round(ratio))
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key="finding_generation",
+                progress_pct=min(progress_pct, 80),
+                current_activity=message,
+                step_status="running",
+                detail=message,
+                worker_id=worker_id,
+            )
+
         findings, finding_links = _generate_incremental_findings(
             claim_records=claim_records,
             previous_run=previous_run,
             truths=truths,
             impacted_scope_keys=impacted_scope_keys,
+            progress_callback=_on_finding_generation_progress,
         )
         logger.info("pipeline_findings_generated", extra={"event_name": "pipeline_findings_generated", "event_payload": {"findings": len(findings), "links": len(finding_links)}})
         self._audit_service.update_run_progress(
@@ -531,6 +608,7 @@ class AuditPipelineService:
             source_snapshots=source_snapshots,
             findings=findings,
             finding_links=finding_links,
+            review_cards=[],
             claims=claims,
             truths=truths,
             schema_truths=schema_truths,
@@ -543,12 +621,113 @@ class AuditPipelineService:
             llm_usage=llm_usage,
         )
 
-    def _collect_metamodel(self, *, run: AuditRun, notes: list[str], worker_id: str | None) -> CollectionBundle:
+    def _run_fast_pipeline(self, *, run: AuditRun, previous_run: AuditRun | None, worker_id: str | None) -> PipelineAnalysisResult:
+        notes: list[str] = []
+
+        from concurrent.futures import Future, ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="collect") as pool:
+            metamodel_future: Future[CollectionBundle] | None = None
+            if run.target.include_metamodel:
+                metamodel_future = pool.submit(self._collect_metamodel, run=run, notes=[], worker_id=worker_id)
+            repo_future = pool.submit(self._collect_repo, run=run, previous_run=previous_run, notes=[], worker_id=worker_id)
+            confluence_future = pool.submit(self._collect_confluence, run=run, previous_run=previous_run, notes=[], worker_id=worker_id)
+
+        metamodel_bundle = metamodel_future.result() if metamodel_future is not None else CollectionBundle([], [])
+        repo_bundle = repo_future.result()
+        confluence_bundle = confluence_future.result()
+        code_bundle = _select_bundle_documents(bundle=repo_bundle, source_types={"github_file"})
+        local_docs_bundle = _select_bundle_documents(bundle=repo_bundle, source_types={"local_doc"})
+        all_bundles = [metamodel_bundle, code_bundle, local_docs_bundle, confluence_bundle]
+
+        notes.extend(n for bundle in all_bundles for n in bundle.analysis_notes)
+        source_snapshots = [snapshot for bundle in all_bundles for snapshot in bundle.snapshots]
+        documents = [document for bundle in all_bundles for document in bundle.documents]
+        self._audit_service.cache_documents(documents=documents)
+        source_snapshots = _annotate_snapshot_deltas(
+            current=source_snapshots,
+            previous=previous_run.source_snapshots if previous_run else [],
+        )
+
         self._audit_service.update_run_progress(
             run_id=run.run_id,
-            step_key="metamodel_check",
-            progress_pct=8,
-            current_activity="Metamodell-Dump wird gelesen, aktualisiert und gegen den letzten Stand verglichen.",
+            step_key="section_profiling",
+            progress_pct=35,
+            current_activity="Quellen werden in priorisierte, entscheidungsrelevante Sektionen zerlegt.",
+            step_status="running",
+            detail=f"{len(documents)} Dokumente wurden gesammelt und fuer den Fast Audit vorbereitet.",
+            worker_id=worker_id,
+        )
+
+        def _on_fast_progress(stage: str, current: int, total: int, message: str) -> None:
+            progress_map = {
+                "section_profiling": 35,
+                "candidate_comparison": 58,
+                "review_cards": 82,
+            }
+            progress_pct = progress_map.get(stage, 35)
+            if stage == "candidate_comparison":
+                progress_pct = min(75, 58 + int((current / max(total, 1)) * 17))
+            elif stage == "review_cards":
+                progress_pct = min(90, 82 + int((current / max(total, 1)) * 8))
+            self._audit_service.update_run_progress(
+                run_id=run.run_id,
+                step_key=stage,
+                progress_pct=progress_pct,
+                current_activity=message,
+                step_status="running",
+                detail=message,
+                worker_id=worker_id,
+            )
+
+        fast_result = asyncio.run(
+            self._fast_audit_service.analyze(
+                documents=documents,
+                progress_callback=_on_fast_progress,
+            )
+        )
+        notes.extend(fast_result.analysis_notes)
+        self._audit_service.update_run_progress(
+            run_id=run.run_id,
+            step_key="follow_up_preparation",
+            progress_pct=94,
+            current_activity="Review-Karten werden fuer Folgeaktionen vorbereitet.",
+            step_status="running",
+            detail=f"{len(fast_result.review_cards)} Review-Karten und {len(fast_result.findings)} Folge-Findings wurden vorbereitet.",
+            worker_id=worker_id,
+        )
+        finding_links = build_finding_links(findings=fast_result.findings)
+        summary = fast_result.summary
+        return PipelineAnalysisResult(
+            source_snapshots=source_snapshots,
+            findings=fast_result.findings,
+            finding_links=finding_links,
+            review_cards=fast_result.review_cards,
+            claims=fast_result.claims,
+            truths=[],
+            schema_truths=[],
+            semantic_entities=[],
+            semantic_relations=[],
+            retrieval_segments=[],
+            retrieval_claim_links=[],
+            analysis_log_messages=notes,
+            summary=summary,
+            budget_limited=fast_result.budget_limited,
+            coverage_summary=fast_result.coverage_summary,
+            llm_usage=fast_result.llm_usage,
+        )
+
+    def _collect_metamodel(self, *, run: AuditRun, notes: list[str], worker_id: str | None) -> CollectionBundle:
+        step_key = "source_collection" if run.analysis_mode == "fast" else "metamodel_check"
+        self._audit_service.update_run_progress(
+            run_id=run.run_id,
+            step_key=step_key,
+            progress_pct=8 if run.analysis_mode != "fast" else 10,
+            current_activity=(
+                "Metamodell-Dump wird gelesen und fuer den schnellen Vergleich vorbereitet."
+                if run.analysis_mode == "fast"
+                else "Metamodell-Dump wird gelesen, aktualisiert und gegen den letzten Stand verglichen."
+            ),
             step_status="running",
             detail="Der aktuelle BSM-Katalog wird read-only geladen und als lokaler Dump aktualisiert.",
             worker_id=worker_id,
@@ -571,11 +750,16 @@ class AuditPipelineService:
         notes: list[str],
         worker_id: str | None,
     ) -> CollectionBundle:
+        step_key = "source_collection" if run.analysis_mode == "fast" else "finai_code_check"
         self._audit_service.update_run_progress(
             run_id=run.run_id,
-            step_key="finai_code_check",
-            progress_pct=22,
-            current_activity="Lokales FIN-AI Repo wird auf fachliche Lese- und Schreibpfade geprueft.",
+            step_key=step_key,
+            progress_pct=22 if run.analysis_mode != "fast" else 18,
+            current_activity=(
+                "Lokales FIN-AI Repo wird fuer den schnellen Dokument- und Vertragsvergleich eingelesen."
+                if run.analysis_mode == "fast"
+                else "Lokales FIN-AI Repo wird auf fachliche Lese- und Schreibpfade geprueft."
+            ),
             step_status="running",
             detail="Code- und Doku-Dateien werden aus dem lokalen FIN-AI-Checkout read-only eingesammelt.",
             worker_id=worker_id,
@@ -610,9 +794,13 @@ class AuditPipelineService:
         )
         self._audit_service.update_run_progress(
             run_id=run.run_id,
-            step_key="local_docs_check",
-            progress_pct=46,
-            current_activity="Lokale `_docs` und Arbeitsdokumente werden mit den externen Quellen abgeglichen.",
+            step_key="source_collection" if run.analysis_mode == "fast" else "local_docs_check",
+            progress_pct=46 if run.analysis_mode != "fast" else 28,
+            current_activity=(
+                "Lokale `_docs` und Arbeitsdokumente werden fuer den Fast Audit an die Sammelmenge angehaengt."
+                if run.analysis_mode == "fast"
+                else "Lokale `_docs` und Arbeitsdokumente werden mit den externen Quellen abgeglichen."
+            ),
             step_status="running",
             detail=(
                 f"{code_docs} Code-Artefakte und "
@@ -632,11 +820,16 @@ class AuditPipelineService:
         notes: list[str],
         worker_id: str | None,
     ) -> CollectionBundle:
+        step_key = "source_collection" if run.analysis_mode == "fast" else "confluence_check"
         self._audit_service.update_run_progress(
             run_id=run.run_id,
-            step_key="confluence_check",
-            progress_pct=34,
-            current_activity="Confluence-Seiten werden lesend geladen und auf relevante Aussagen reduziert.",
+            step_key=step_key,
+            progress_pct=34 if run.analysis_mode != "fast" else 24,
+            current_activity=(
+                "Confluence-Seiten werden lesend geladen und fuer den schnellen Vergleich vorbereitet."
+                if run.analysis_mode == "fast"
+                else "Confluence-Seiten werden lesend geladen und auf relevante Aussagen reduziert."
+            ),
             step_status="running",
             detail="Confluence-Collector versucht einen read-only Abruf der relevanten FINAI-Seiten.",
             worker_id=worker_id,
@@ -1040,16 +1233,25 @@ def _generate_incremental_findings(
     previous_run: AuditRun | None,
     truths: list[TruthLedgerEntry],
     impacted_scope_keys: set[str],
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> tuple[list[AuditFinding], list[AuditFindingLink]]:
     if previous_run is None:
         return generate_findings(
             claim_records=claim_records,
             inherited_truths=truths,
             impacted_scope_keys=impacted_scope_keys,
+            progress_callback=progress_callback,
         )
     if not impacted_scope_keys:
         reused = [_clone_reused_finding(finding=finding) for finding in previous_run.findings]
-        return reused, build_finding_links(findings=reused)
+        if progress_callback is not None:
+            progress_callback(
+                "merge_findings",
+                len(reused),
+                max(1, len(reused)),
+                f"{len(reused)} bestehende Findings aus dem letzten Lauf wiederverwendet.",
+            )
+        return reused, build_finding_links(findings=reused, progress_callback=progress_callback)
 
     impacted_claim_records = _filter_claim_records_for_impacted_scopes(
         claim_records=claim_records,
@@ -1059,6 +1261,7 @@ def _generate_incremental_findings(
         claim_records=impacted_claim_records,
         inherited_truths=truths,
         impacted_scope_keys=impacted_scope_keys,
+        progress_callback=progress_callback,
     )
     reused_findings = [
         _clone_reused_finding(finding=finding)
@@ -1066,7 +1269,14 @@ def _generate_incremental_findings(
         if _finding_scope_key(finding=finding) not in impacted_scope_keys
     ]
     merged_findings = [*reused_findings, *regenerated_findings]
-    return merged_findings, build_finding_links(findings=merged_findings)
+    if progress_callback is not None:
+        progress_callback(
+            "merge_findings",
+            len(merged_findings),
+            max(1, len(merged_findings)),
+            f"{len(merged_findings)} deterministische Findings fuer den inkrementellen Lauf zusammengefuehrt.",
+        )
+    return merged_findings, build_finding_links(findings=merged_findings, progress_callback=progress_callback)
 
 
 def _clone_reused_finding(*, finding: AuditFinding) -> AuditFinding:

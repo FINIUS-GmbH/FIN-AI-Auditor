@@ -32,6 +32,12 @@ from fin_ai_auditor.domain.models import (
 )
 from fin_ai_auditor.services.audit_database import connect_database, ensure_schema
 from fin_ai_auditor.services.pipeline_models import CachedCollectedDocument, CollectedDocument
+from fin_ai_auditor.services.secret_store import SecretStore
+
+
+_EXTERNAL_SECRET_SENTINEL = "__external_secret__"
+_ATLASSIAN_ACCESS_SECRET_KEY = "atlassian/access_token"
+_ATLASSIAN_REFRESH_SECRET_KEY = "atlassian/refresh_token"
 
 
 class SQLiteAuditRepository:
@@ -39,20 +45,48 @@ class SQLiteAuditRepository:
     _CONFLUENCE_CACHE_MAX_AGE_DAYS = 30
     _CONFLUENCE_ATTACHMENT_POLICY = "metadata_only"
 
-    def __init__(self, *, db_path: Path) -> None:
+    def __init__(self, *, db_path: Path, secret_store: SecretStore | None = None) -> None:
         self._db_path = Path(db_path)
+        self._secret_store = secret_store
         connection = connect_database(db_path=self._db_path)
         try:
             ensure_schema(connection=connection)
         finally:
             connection.close()
 
+    def get_secret_storage_summary(self) -> dict[str, object]:
+        store = self._secret_store
+        if store is None:
+            return {
+                "mode": "database_legacy",
+                "available": True,
+                "secure": False,
+                "backend": "legacy_database",
+                "notes": ["Secrets werden weiterhin im lokalen SQLite-Store gehalten."],
+            }
+        status = store.status()
+        notes = list(status.notes)
+        if status.mode == "database_legacy":
+            notes.append("Secrets werden weiterhin im lokalen SQLite-Store gehalten.")
+        elif status.available:
+            notes.append("Secrets werden ausserhalb der SQLite-Datenbank gehalten.")
+        else:
+            notes.append("Externer Secret-Store ist aktuell nicht verfuegbar.")
+        return {
+            "mode": status.mode,
+            "available": status.available,
+            "secure": status.secure,
+            "backend": status.backend,
+            "notes": notes,
+        }
+
     def list_runs(self) -> list[AuditRun]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       analysis_mode, progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                       analysis_log_json, implemented_changes_json, clarification_threads_json,
                        llm_usage_json, summary, error
                 FROM audit_runs
                 ORDER BY created_at DESC
@@ -65,7 +99,8 @@ class SQLiteAuditRepository:
             row = connection.execute(
                 """
                 SELECT run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                       progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                       analysis_mode, progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                       analysis_log_json, implemented_changes_json, clarification_threads_json,
                        llm_usage_json, summary, error
                 FROM audit_runs
                 WHERE run_id = ?
@@ -81,19 +116,24 @@ class SQLiteAuditRepository:
             connection.execute(
                 """
                 INSERT INTO audit_runs(
-                    run_id, status, target_json, created_at, updated_at, started_at, finished_at,
-                    progress_json, analysis_log_json, implemented_changes_json, clarification_threads_json,
+                    run_id, status, analysis_mode, target_json, created_at, updated_at, started_at, finished_at,
+                    progress_json, review_cards_json, coverage_summary_json, budget_limited,
+                    analysis_log_json, implemented_changes_json, clarification_threads_json,
                     llm_usage_json, summary, error
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status = excluded.status,
+                    analysis_mode = excluded.analysis_mode,
                     target_json = excluded.target_json,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at,
                     progress_json = excluded.progress_json,
+                    review_cards_json = excluded.review_cards_json,
+                    coverage_summary_json = excluded.coverage_summary_json,
+                    budget_limited = excluded.budget_limited,
                     analysis_log_json = excluded.analysis_log_json,
                     implemented_changes_json = excluded.implemented_changes_json,
                     clarification_threads_json = excluded.clarification_threads_json,
@@ -104,12 +144,16 @@ class SQLiteAuditRepository:
                 (
                     run.run_id,
                     run.status,
+                    run.analysis_mode,
                     run.target.model_dump_json(),
                     run.created_at,
                     run.updated_at,
                     run.started_at,
                     run.finished_at,
                     run.progress.model_dump_json(),
+                    _dump_json_list(run.review_cards),
+                    _dump_json(run.coverage_summary.model_dump(mode="json") if run.coverage_summary is not None else {}),
+                    1 if run.budget_limited else 0,
                     _dump_json_list(run.analysis_log),
                     _dump_json_list(run.implemented_changes),
                     _dump_json_list(run.clarification_threads),
@@ -1362,6 +1406,26 @@ class SQLiteAuditRepository:
             )
 
     def upsert_atlassian_token(self, *, token: AtlassianOAuthTokenRecord) -> AtlassianOAuthTokenRecord:
+        token_metadata = dict(token.metadata or {})
+        access_token_value = token.access_token
+        refresh_token_value = token.refresh_token
+        if self._secret_store is not None and self._secret_store.mode != "database_legacy":
+            self._secret_store.set_secret(key=_ATLASSIAN_ACCESS_SECRET_KEY, value=token.access_token)
+            if token.refresh_token:
+                self._secret_store.set_secret(key=_ATLASSIAN_REFRESH_SECRET_KEY, value=token.refresh_token)
+            else:
+                self._secret_store.delete_secret(key=_ATLASSIAN_REFRESH_SECRET_KEY)
+            access_token_value = _EXTERNAL_SECRET_SENTINEL
+            refresh_token_value = _EXTERNAL_SECRET_SENTINEL if token.refresh_token else None
+            token_metadata.update(
+                {
+                    "secret_storage_mode": self._secret_store.mode,
+                    "access_token_secret_key": _ATLASSIAN_ACCESS_SECRET_KEY,
+                    "refresh_token_secret_key": _ATLASSIAN_REFRESH_SECRET_KEY if token.refresh_token else None,
+                }
+            )
+        else:
+            token_metadata.setdefault("secret_storage_mode", "database_legacy")
         with self._connection() as connection, connection:
             connection.execute(
                 """
@@ -1380,13 +1444,13 @@ class SQLiteAuditRepository:
                 """,
                 (
                     token.provider,
-                    token.access_token,
-                    token.refresh_token,
+                    access_token_value,
+                    refresh_token_value,
                     token.scope,
                     token.token_type,
                     token.obtained_at,
                     token.expires_at,
-                    _dump_json(token.metadata),
+                    _dump_json(token_metadata),
                 ),
             )
         loaded = self.get_atlassian_token()
@@ -1395,6 +1459,14 @@ class SQLiteAuditRepository:
         return loaded
 
     def delete_atlassian_token(self) -> None:
+        existing = self.get_atlassian_token()
+        if existing is not None and self._secret_store is not None:
+            metadata = dict(existing.metadata or {})
+            if metadata.get("secret_storage_mode") != "database_legacy":
+                access_key = str(metadata.get("access_token_secret_key") or _ATLASSIAN_ACCESS_SECRET_KEY)
+                refresh_key = str(metadata.get("refresh_token_secret_key") or _ATLASSIAN_REFRESH_SECRET_KEY)
+                self._secret_store.delete_secret(key=access_key)
+                self._secret_store.delete_secret(key=refresh_key)
         with self._connection() as connection, connection:
             connection.execute("DELETE FROM atlassian_oauth_tokens WHERE provider = 'atlassian'")
 
@@ -1409,15 +1481,28 @@ class SQLiteAuditRepository:
             ).fetchone()
             if row is None:
                 return None
+            metadata = json.loads(row["metadata_json"] or "{}")
+            secret_storage_mode = str(metadata.get("secret_storage_mode") or "database_legacy").strip() or "database_legacy"
+            access_token = row["access_token"]
+            refresh_token = row["refresh_token"]
+            if secret_storage_mode != "database_legacy":
+                if self._secret_store is None:
+                    return None
+                access_key = str(metadata.get("access_token_secret_key") or _ATLASSIAN_ACCESS_SECRET_KEY)
+                refresh_key = str(metadata.get("refresh_token_secret_key") or _ATLASSIAN_REFRESH_SECRET_KEY)
+                access_token = self._secret_store.get_secret(key=access_key)
+                refresh_token = self._secret_store.get_secret(key=refresh_key) if refresh_key else None
+                if not access_token:
+                    return None
             return AtlassianOAuthTokenRecord(
                 provider=row["provider"],
-                access_token=row["access_token"],
-                refresh_token=row["refresh_token"],
+                access_token=access_token,
+                refresh_token=refresh_token,
                 scope=row["scope"],
                 token_type=row["token_type"],
                 obtained_at=row["obtained_at"],
                 expires_at=row["expires_at"],
-                metadata=json.loads(row["metadata_json"] or "{}"),
+                metadata=metadata,
             )
 
     def _load_run(self, *, connection: sqlite3.Connection, row: sqlite3.Row) -> AuditRun:
@@ -1428,12 +1513,20 @@ class SQLiteAuditRepository:
             {
                 "run_id": run_id,
                 "status": row["status"],
+                "analysis_mode": row["analysis_mode"] if "analysis_mode" in row.keys() else "fast",
                 "target": json.loads(row["target_json"]),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "started_at": row["started_at"],
                 "finished_at": row["finished_at"],
                 "progress": json.loads(row["progress_json"] or "{}"),
+                "review_cards": json.loads(row["review_cards_json"] or "[]") if "review_cards_json" in row.keys() else [],
+                "coverage_summary": (
+                    json.loads(row["coverage_summary_json"] or "{}")
+                    if "coverage_summary_json" in row.keys() and str(row["coverage_summary_json"] or "").strip() not in {"", "{}"}
+                    else None
+                ),
+                "budget_limited": bool(row["budget_limited"]) if "budget_limited" in row.keys() else False,
                 "analysis_log": json.loads(row["analysis_log_json"] or "[]"),
                 "implemented_changes": json.loads(row["implemented_changes_json"] or "[]"),
                 "clarification_threads": json.loads(

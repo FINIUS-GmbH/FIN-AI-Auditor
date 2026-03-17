@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 FindingSeverity = Literal["critical", "high", "medium", "low"]
+AnalysisMode = Literal["fast", "deep"]
 FindingCategory = Literal[
     "contradiction",
     "architecture_observation",
@@ -20,6 +21,7 @@ FindingCategory = Literal[
     "traceability_gap",
     "ownership_gap",
     "policy_conflict",
+    "legacy_path_gap",
     "terminology_collision",
     "low_confidence_review",
     "obsolete_documentation",
@@ -118,6 +120,9 @@ SemanticRelationType = Literal[
     "derived_from_truth",
     "contains",
 ]
+ReviewCardDeviationType = Literal["error", "gap", "misunderstanding", "obsolete", "unclear"]
+ReviewCardPriority = Literal["high", "medium", "low"]
+ReviewCardDecisionState = Literal["open", "accepted", "rejected", "clarification_needed"]
 
 
 def utc_now_iso() -> str:
@@ -320,6 +325,44 @@ class AuditRunProgress(BaseModel):
     phase_label: str = Field(default="Wartet", min_length=1)
     current_activity: str = Field(default="Run wurde angelegt und wartet auf Verarbeitung.", min_length=1)
     steps: list[AuditProgressStep] = Field(default_factory=list)
+
+
+class ReviewCardCoverageSummary(BaseModel):
+    total_documents: int = Field(default=0, ge=0)
+    total_sections: int = Field(default=0, ge=0)
+    prioritized_sections: int = Field(default=0, ge=0)
+    compared_pairs: int = Field(default=0, ge=0)
+    skipped_sections_due_to_prioritization: int = Field(default=0, ge=0)
+    skipped_pairs_due_to_budget: int = Field(default=0, ge=0)
+    source_type_counts: dict[str, int] = Field(default_factory=dict)
+    prioritized_scope_labels: list[str] = Field(default_factory=list)
+    compared_scope_labels: list[str] = Field(default_factory=list)
+    deferred_scope_labels: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ReviewCard(BaseModel):
+    card_id: str = Field(default_factory=lambda: f"review_{uuid4().hex}")
+    title: str = Field(min_length=1)
+    deviation_type: ReviewCardDeviationType
+    summary: str = Field(min_length=1)
+    source_a: str = Field(min_length=1)
+    source_b: str = Field(min_length=1)
+    source_a_evidence: list[str] = Field(default_factory=list)
+    source_b_evidence: list[str] = Field(default_factory=list)
+    source_a_locations: list[AuditLocation] = Field(default_factory=list)
+    source_b_locations: list[AuditLocation] = Field(default_factory=list)
+    why_it_matters: str = Field(min_length=1)
+    recommended_decision: str = Field(min_length=1)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    needs_human_decision: bool = True
+    priority: ReviewCardPriority = "medium"
+    follow_up_capabilities: list[str] = Field(default_factory=list)
+    related_finding_ids: list[str] = Field(default_factory=list)
+    decision_state: ReviewCardDecisionState = "open"
+    decided_at: str | None = None
+    decision_comment: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class AuditAnalysisLogEntry(BaseModel):
@@ -751,6 +794,7 @@ class WritebackApprovalRequest(BaseModel):
 class AuditRun(BaseModel):
     run_id: str = Field(default_factory=new_run_id)
     status: AuditRunStatus = "planned"
+    analysis_mode: AnalysisMode = "fast"
     target: AuditTarget
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
@@ -770,6 +814,9 @@ class AuditRun(BaseModel):
     source_snapshots: list[AuditSourceSnapshot] = Field(default_factory=list)
     semantic_entities: list[SemanticEntity] = Field(default_factory=list)
     semantic_relations: list[SemanticRelation] = Field(default_factory=list)
+    review_cards: list[ReviewCard] = Field(default_factory=list)
+    budget_limited: bool = False
+    coverage_summary: ReviewCardCoverageSummary | None = None
     clarification_threads: list[ClarificationThread] = Field(default_factory=list)
     findings: list[AuditFinding] = Field(default_factory=list)
     finding_links: list[AuditFindingLink] = Field(default_factory=list)
@@ -779,6 +826,12 @@ class AuditRun(BaseModel):
 
 class CreateAuditRunRequest(BaseModel):
     target: AuditTarget
+    analysis_mode: AnalysisMode
+
+
+class ReviewCardActionRequest(BaseModel):
+    action: Literal["accept", "reject", "clarify"]
+    comment_text: str | None = None
 
 
 class CreateDecisionCommentRequest(BaseModel):
@@ -808,6 +861,7 @@ class CreateWritebackApprovalRequest(BaseModel):
     title: str = Field(min_length=1)
     summary: str = Field(min_length=1)
     target_url: str | None = None
+    related_review_card_ids: list[str] = Field(default_factory=list)
     related_package_ids: list[str] = Field(default_factory=list)
     related_finding_ids: list[str] = Field(default_factory=list)
     payload_preview: list[str] = Field(default_factory=list)
@@ -839,6 +893,7 @@ class RecordJiraTicketCreatedRequest(BaseModel):
 class CreateClarificationThreadRequest(BaseModel):
     package_id: str | None = None
     atomic_fact_id: str | None = None
+    review_card_id: str | None = None
     purpose: ClarificationPurpose
     initial_content: str | None = Field(default=None, max_length=2000)
 

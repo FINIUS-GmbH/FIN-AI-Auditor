@@ -355,6 +355,10 @@ def test_confluence_connector_extracts_tables_macros_and_attachments(monkeypatch
     assert any(block["kind"] == "table_row" for block in structured_blocks)
     assert any(block["kind"] == "attachment" for block in structured_blocks)
     assert any(block["kind"] == "status" for block in structured_blocks)
+    assert bundle.documents[0].metadata["table_row_count"] >= 1
+    assert bundle.documents[0].metadata["status_count"] >= 1
+    assert bundle.documents[0].metadata["heading_count"] >= 1
+    assert "table_row" in bundle.documents[0].metadata["structured_block_kinds"]
 
 
 def test_confluence_connector_marks_changed_section_paths_against_latest_cached_page(monkeypatch, tmp_path: Path) -> None:

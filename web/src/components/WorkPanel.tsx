@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { categoryLabel } from "../categoryLabels";
+import { eventualPathMeta } from "../eventualPathMeta";
 import type {
   AuditRun, AuditFinding, AuditLocation, DecisionPackage,
   SourceProfile, WritebackApprovalRequest, ConfluencePatchPreview,
@@ -72,9 +74,18 @@ export function WorkPanel({ run, sourceProfile: sp, commentSubmitting: cs, comme
       <div className="section-head"><h2>Zur Bewertung</h2><span className="section-count">{openPkgs.length} offene Widersprüche</span></div>
       {openPkgs.map(pkg => (
         <article className="wc" key={pkg.package_id}>
-          <div className="wc-badges"><span className={`badge badge-${pkg.severity_summary}`}>{pkg.severity_summary}</span><span className="badge badge-cat">{pkg.category}</span></div>
+          {(() => {
+            const meta = eventualPathMeta(pkg.metadata?.eventual_path_type);
+            return meta && pkg.metadata?.grouped_eventual_paths ? (
+              <div className={`eventual-chip eventual-chip-${meta.tone}`}>{`${meta.icon} ${meta.label}`}</div>
+            ) : null;
+          })()}
+          <div className="wc-badges"><span className={`badge badge-${pkg.severity_summary}`}>{pkg.severity_summary}</span><span className="badge badge-cat">{categoryLabel(pkg.category)}</span></div>
           <h3 className="wc-title">{pkg.title}</h3>
           <p className="wc-scope">{pkg.scope_summary}</p>
+          {Boolean(pkg.metadata?.grouped_boundary_paths) && <div className="wc-context"><div className="wc-label">Boundary-Pfade</div><ul><li>{`${Number(pkg.metadata?.boundary_path_count ?? 0)} Pfade betroffen${strings(pkg.metadata?.boundary_function_names).length > 0 ? ` · ${strings(pkg.metadata?.boundary_function_names).join(", ")}` : ""}`}</li></ul></div>}
+          {Boolean(pkg.metadata?.grouped_eventual_paths) && <div className="wc-context"><div className="wc-label">Async-Pfade</div><ul><li>{`${Number(pkg.metadata?.eventual_path_count ?? 0)} Pfade betroffen${strings(pkg.metadata?.eventual_function_names).length > 0 ? ` · ${strings(pkg.metadata?.eventual_function_names).join(", ")}` : ""}`}</li></ul></div>}
+          {Boolean(pkg.metadata?.grouped_chain_paths) && <div className="wc-context"><div className="wc-label">Reaggregation-Pfade</div><ul><li>{`${Number(pkg.metadata?.chain_path_count ?? 0)} Pfade betroffen${strings(pkg.metadata?.chain_function_names).length > 0 ? ` · ${strings(pkg.metadata?.chain_function_names).join(", ")}` : ""}${strings(pkg.metadata?.chain_line_windows).length > 0 ? ` · ${strings(pkg.metadata?.chain_line_windows).join(", ")}` : ""}`}</li></ul></div>}
           <div className="wc-evidence">
             <div className="wc-label">Evidenz</div>
             {pkg.problem_elements.map((el, i) => (
@@ -115,7 +126,7 @@ export function WorkPanel({ run, sourceProfile: sp, commentSubmitting: cs, comme
       <div className="section-head"><h2>Einzelne Findings</h2><span className="section-count">{soloFindings.length}</span></div>
       {soloFindings.map(f => (
         <article className="wc" key={f.finding_id}>
-          <div className="wc-badges"><span className={`badge badge-${f.severity}`}>{f.severity}</span><span className="badge badge-cat">{f.category}</span></div>
+          <div className="wc-badges"><span className={`badge badge-${f.severity}`}>{f.severity}</span><span className="badge badge-cat">{categoryLabel(f.category)}</span></div>
           <h3 className="wc-title">{f.title}</h3>
           <p className="wc-scope">{f.summary}</p>
           <div className="wc-evidence">

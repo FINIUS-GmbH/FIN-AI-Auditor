@@ -188,6 +188,7 @@ def test_audit_service_executes_approved_jira_writeback(tmp_path: Path) -> None:
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -251,6 +252,7 @@ def test_audit_service_reuses_existing_jira_writeback_idempotently(tmp_path: Pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -326,6 +328,7 @@ def test_jira_writeback_failure_persists_scope_mismatch_metadata(tmp_path: Path)
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -374,6 +377,7 @@ def test_build_jira_ticket_brief_includes_write_sink_context(tmp_path: Path) -> 
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -448,6 +452,7 @@ def test_writeback_approval_preview_includes_atomic_facts_and_action_lane(tmp_pa
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -502,6 +507,101 @@ def test_writeback_approval_preview_includes_atomic_facts_and_action_lane(tmp_pa
     assert "Aktionsspur: confluence_and_jira" in approval.payload_preview
     assert "writeback_preflight" in approval.metadata
     assert "execution_token" in approval.metadata
+
+
+def test_jira_writeback_approval_request_blocks_disallowed_project(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        fixed_jira_project_key="OTHER",
+        allowed_writeback_jira_project_keys=["FINAI"],
+        jira_board_url="https://finius.atlassian.net/jira/software/projects/OTHER/boards/1",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="Projekt OTHER ist nicht freigegeben"):
+        service.create_writeback_approval_request(
+            run_id=run.run_id,
+            target_type="jira_ticket_create",
+            title="FIN-AI Codeanpassungs-Ticket erstellen",
+            summary="Das Ticket soll nach expliziter Freigabe extern in Jira erstellt werden.",
+            target_url=settings.jira_board_url,
+            related_package_ids=[],
+            related_finding_ids=[],
+            payload_preview=[],
+        )
+
+
+def test_jira_writeback_execution_rechecks_target_policy(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    allowed_settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        fixed_jira_project_key="FINAI",
+        allowed_writeback_jira_project_keys=["FINAI"],
+        jira_board_url="https://finius.atlassian.net/jira/software/projects/FINAI/boards/67",
+    )
+    service = AuditService(repository=repository, settings=allowed_settings)
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    run = service.create_writeback_approval_request(
+        run_id=run.run_id,
+        target_type="jira_ticket_create",
+        title="FIN-AI Codeanpassungs-Ticket erstellen",
+        summary="Das Ticket soll nach expliziter Freigabe extern in Jira erstellt werden.",
+        target_url=allowed_settings.jira_board_url,
+        related_package_ids=[],
+        related_finding_ids=[],
+        payload_preview=[],
+    )
+    approval_request_id = run.approval_requests[0].approval_request_id
+    service.resolve_writeback_approval_request(
+        run_id=run.run_id,
+        approval_request_id=approval_request_id,
+        decision="approve",
+        comment_text="Freigegeben",
+    )
+
+    blocked_service = AuditService(
+        repository=repository,
+        settings=Settings(
+            database_path=tmp_path / "auditor.db",
+            metamodel_dump_path=tmp_path / "metamodel.json",
+            fixed_jira_project_key="OTHER",
+            allowed_writeback_jira_project_keys=["OTHER"],
+            jira_board_url="https://finius.atlassian.net/jira/software/projects/OTHER/boards/1",
+        ),
+        atlassian_oauth_service=_FakeOAuthService(),
+        jira_ticketing_connector=_FakeJiraConnector(),
+    )
+
+    with pytest.raises(ValueError, match="Projekt FINAI ist nicht freigegeben"):
+        blocked_service.execute_jira_ticket_writeback(run_id=run.run_id, approval_request_id=approval_request_id)
 
 
 def test_jira_connector_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:

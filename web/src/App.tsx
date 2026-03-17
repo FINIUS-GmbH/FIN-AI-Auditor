@@ -5,15 +5,17 @@ import {
   getAtlassianAuthStatus, getBootstrapData, listAuditRuns,
   recordConfluencePageUpdate, recordJiraTicketCreated, resetAuditDatabase,
   resolveWritebackApprovalRequest, startAtlassianAuthorization,
-  submitDecisionComment, submitPackageDecision, updateAtomicFactStatus,
+  submitDecisionComment, submitPackageDecision, submitReviewCardDecision, updateAtomicFactStatus,
   verifyConfluenceAccess,
 } from "./api";
+import { categoryLabel } from "./categoryLabels";
 import RunModal from "./components/RunModal";
 import { ClarificationPanel } from "./components/ClarificationPanel";
+import DocStructureView from "./components/DocStructureView";
 import type {
   AtlassianAuthStatus, AuditLocation, AuditRun, AuditTarget,
   AtomicFactEntry,
-  BootstrapData, DecisionPackage, SourceProfile, WritebackApprovalRequest,
+  BootstrapData, DecisionPackage, ReviewCard, SourceProfile, WritebackApprovalRequest,
   ConfluencePatchPreview,
 } from "./types";
 
@@ -37,18 +39,27 @@ const SEVERITY_DE: Record<string, string> = {
   critical: "Kritisch", high: "Hoch", medium: "Mittel", low: "Gering",
 };
 const CATEGORY_DE: Record<string, string> = {
-  contradiction: "⚠️ Widerspruch", gap: "💭 Lücke", inconsistency: "🔀 Inkonsistenz",
-  missing_implementation: "❌ Fehlende Umsetzung", missing_documentation: "📝 Fehlende Doku",
-  missing_definition: "❓ Definitionslücke", stale_documentation: "📅 Veraltete Doku",
-  policy_violation: "🛡️ Richtlinienverstoß", policy_conflict: "🛡️ Richtlinienkonflikt",
-  process_gap: "⚙️ Prozesslücke", semantic_drift: "🎯 Semantische Abweichung",
-  implementation_drift: "🔧 Implementierungsabweichung", traceability_gap: "🔗 Nachverfolgbarkeitslücke",
-  clarification_needed: "❓ Klärungsbedarf", stale_source: "📅 Veraltete Quelle",
-  read_write_gap: "↔️ Read/Write-Lücke", ownership_gap: "👥 Ownership-Lücke",
-  terminology_collision: "🧭 Begriffskollision", low_confidence_review: "🔍 Niedrige Sicherheit",
-  obsolete_documentation: "🗃️ Obsolete Doku", open_decision: "🧩 Offene Entscheidung",
+  contradiction: categoryLabel("contradiction"), gap: categoryLabel("gap"), inconsistency: categoryLabel("inconsistency"),
+  architecture_observation: categoryLabel("architecture_observation"),
+  missing_implementation: categoryLabel("missing_implementation"), missing_documentation: categoryLabel("missing_documentation"),
+  missing_definition: categoryLabel("missing_definition"), stale_documentation: categoryLabel("stale_documentation"),
+  policy_violation: categoryLabel("policy_violation"), policy_conflict: categoryLabel("policy_conflict"),
+  process_gap: categoryLabel("process_gap"), semantic_drift: categoryLabel("semantic_drift"),
+  implementation_drift: categoryLabel("implementation_drift"), traceability_gap: categoryLabel("traceability_gap"),
+  clarification_needed: categoryLabel("clarification_needed"), stale_source: categoryLabel("stale_source"),
+  read_write_gap: categoryLabel("read_write_gap"), ownership_gap: categoryLabel("ownership_gap"),
+  legacy_path_gap: categoryLabel("legacy_path_gap"),
+  terminology_collision: categoryLabel("terminology_collision"), low_confidence_review: categoryLabel("low_confidence_review"),
+  obsolete_documentation: categoryLabel("obsolete_documentation"), open_decision: categoryLabel("open_decision"),
 };
-function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? v; }
+const REVIEW_CARD_TYPE_DE: Record<ReviewCard["deviation_type"], string> = {
+  error: "Fehler",
+  gap: "Luecke",
+  misunderstanding: "Missverstaendnis",
+  obsolete: "Veraltet",
+  unclear: "Unklar",
+};
+function de(v: string): string { return STATUS_DE[v] ?? SEVERITY_DE[v] ?? CATEGORY_DE[v] ?? REVIEW_CARD_TYPE_DE[v as ReviewCard["deviation_type"]] ?? v; }
 
 const ACTION_LANE_DE: Record<AtomicFactEntry["action_lane"], string> = {
   confluence_doc: "Confluence-Doku",
@@ -95,6 +106,15 @@ function SrcBadge({ t }: { t: string }): ReactNode {
 
 function sourceTypeLabel(sourceType: string): string {
   return SRC_CFG[sourceType]?.label ?? sourceType;
+}
+
+function coverageSourceTypeEntries(run: AuditRun | null): [string, number][] {
+  const counts = run?.coverage_summary?.source_type_counts ?? {};
+  return Object.entries(counts).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+}
+
+function coverageScopeLabels(labels: string[] | undefined | null): string[] {
+  return Array.isArray(labels) ? labels.filter((item) => typeof item === "string" && item.trim().length > 0) : [];
 }
 
 function locStr(l: AuditLocation): string {
@@ -161,6 +181,140 @@ function packageNextActions(pkg: DecisionPackage): string[] {
   return actions;
 }
 
+function reviewCardNextActions(card: ReviewCard): string[] {
+  if (card.deviation_type === "gap" && reviewCardIsBudgetGap(card)) {
+    return [
+      "Scope und moegliche Gegenquelle fuer diesen Abschnitt explizit pruefen",
+      "Bei Bedarf den Fast Audit mit erweiterter Priorisierung oder zusaetzlicher Soll-Quelle erneut laufen lassen",
+    ];
+  }
+  const actions: string[] = [];
+  if (card.follow_up_capabilities.includes("confluence_page_update")) {
+    actions.push("Confluence- oder Doku-Korrektur nach User-Entscheidung vorbereiten");
+  }
+  if (card.follow_up_capabilities.includes("jira_ticket_create")) {
+    actions.push("Jira-Folgeaktion fuer Code- oder Artefaktanpassung vorbereiten");
+  }
+  if (actions.length === 0) {
+    actions.push("Geltende Quelle festlegen und Review-Karte entsprechend schliessen");
+  }
+  return actions;
+}
+
+function reviewCardMetaString(card: ReviewCard, key: string): string {
+  const value = card.metadata?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function reviewCardMetaStrings(card: ReviewCard, key: string): string[] {
+  const value = card.metadata?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function reviewCardDecisionQuestion(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_question") || `Wie soll die Abweichung zu '${card.title}' fachlich bewertet werden?`;
+}
+
+function reviewCardDecisionLabels(card: ReviewCard): { accept: string; reject: string; clarify: string } {
+  return {
+    accept: reviewCardMetaString(card, "accept_label") || "Abweichung bestaetigen",
+    reject: reviewCardMetaString(card, "reject_label") || "Nicht als Befund werten",
+    clarify: reviewCardMetaString(card, "clarify_label") || "Rueckfrage markieren",
+  };
+}
+
+function reviewCardDecisionConsequences(card: ReviewCard): { accept: string[]; reject: string[]; clarify: string[] } {
+  return {
+    accept: reviewCardMetaStrings(card, "accept_consequences").length > 0
+      ? reviewCardMetaStrings(card, "accept_consequences")
+      : ["Die Karte wird akzeptiert und fuer moegliche Folgeaktionen freigegeben."],
+    reject: reviewCardMetaStrings(card, "reject_consequences").length > 0
+      ? reviewCardMetaStrings(card, "reject_consequences")
+      : ["Die Karte wird geschlossen und nicht weiterverfolgt."],
+    clarify: reviewCardMetaStrings(card, "clarify_consequences").length > 0
+      ? reviewCardMetaStrings(card, "clarify_consequences")
+      : ["Die Karte bleibt als Klaerfall offen und erzeugt noch keine Folgeaktion."],
+  };
+}
+
+function reviewCardLaneKey(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_lane") || "process_scope";
+}
+
+function reviewCardLaneLabel(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_lane_label") || "Prozess, Run & Scope";
+}
+
+function reviewCardLaneRank(card: ReviewCard): number {
+  const value = card.metadata?.decision_lane_rank;
+  return typeof value === "number" ? value : 9;
+}
+
+function reviewCardIndependenceNote(card: ReviewCard): string {
+  return reviewCardMetaString(card, "decision_independence_note") || "Diese Karte basiert auf einem stabilen Run-Snapshot.";
+}
+
+function reviewCardRationale(card: ReviewCard): string {
+  return reviewCardMetaString(card, "rationale_summary") || card.why_it_matters;
+}
+
+function reviewCardIsBudgetGap(card: ReviewCard): boolean {
+  return card.metadata?.is_budget_gap === true;
+}
+
+function reviewCardCategoryLabel(card: ReviewCard): string {
+  if (card.deviation_type === "gap" && reviewCardIsBudgetGap(card)) {
+    return "Abdeckungsluecke";
+  }
+  return de(card.deviation_type);
+}
+
+function extractReviewCardId(text: string): string | null {
+  const match = text.match(/reviewcard\s+([a-z0-9_-]+)/i);
+  return match ? match[1] : null;
+}
+
+function reviewCardSourceGroups(card: ReviewCard): {
+  slotLabel: string;
+  sourceLabel: string;
+  heading?: string;
+  statement: string;
+  fullText?: string;
+  evidence: string[];
+  locations: AuditLocation[];
+}[] {
+  const sourceAStatement = reviewCardMetaString(card, "source_a_claim") || card.source_a_evidence[0] || card.summary;
+  const sourceBStatement = reviewCardMetaString(card, "source_b_claim") || card.source_b_evidence[0] || "Kein belastbares Gegenstueck vorhanden.";
+  const sourceAHeading = reviewCardMetaString(card, "source_a_heading");
+  const sourceBHeading = reviewCardMetaString(card, "source_b_heading");
+  const normalizeEvidence = (items: string[], primary: string): string[] => {
+    const clean = items.filter((item) => item.trim().length > 0);
+    return clean.filter((item, index) => index !== 0 || item.trim() !== primary.trim());
+  };
+  return [
+    {
+      slotLabel: "Quelle A",
+      sourceLabel: card.source_a,
+      heading: sourceAHeading || undefined,
+      statement: sourceAStatement,
+      fullText: reviewCardMetaString(card, "source_a_full_text") || undefined,
+      evidence: normalizeEvidence(card.source_a_evidence, sourceAStatement),
+      locations: card.source_a_locations,
+    },
+    {
+      slotLabel: "Quelle B",
+      sourceLabel: card.source_b,
+      heading: sourceBHeading || undefined,
+      statement: sourceBStatement,
+      fullText: reviewCardMetaString(card, "source_b_full_text") || undefined,
+      evidence: normalizeEvidence(card.source_b_evidence, sourceBStatement),
+      locations: card.source_b_locations,
+    },
+  ];
+}
+
 function approvalPreflight(req: WritebackApprovalRequest): { blockers: string[]; warnings: string[] } {
   const raw = req.metadata?.writeback_preflight;
   if (!raw || typeof raw !== "object") return { blockers: [], warnings: [] };
@@ -190,7 +344,7 @@ const EMPTY_AUTH: AtlassianAuthStatus = {
    ============================================================ */
 
 export default function App(): ReactNode {
-  const [view, setView] = useState<"work" | "structure" | "history">("work");
+  const [view, setView] = useState<"work" | "coverage" | "structure" | "history">("work");
   const [runs, setRuns] = useState<AuditRun[]>([]);
   const [selId, setSelId] = useState("");
   const [boot, setBoot] = useState<BootstrapData | null>(null);
@@ -219,13 +373,29 @@ export default function App(): ReactNode {
 
   // Drafts
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [clarifyCard, setClarifyCard] = useState<ReviewCard | null>(null);
+  const [clarifyDraft, setClarifyDraft] = useState("");
+  const [waitingClarifications, setWaitingClarifications] = useState<Set<string>>(new Set());
 
   // Derived
   const run = useMemo(() => runs.find((r) => r.run_id === selId) ?? runs[0] ?? null, [runs, selId]);
+  const isFastRun = run?.analysis_mode === "fast";
   const hasActive = useMemo(() => runs.some((r) => r.status === "planned" || r.status === "running"), [runs]);
   const sp = boot?.source_profile ?? EMPTY_SP;
   const ea = atlAuth ?? boot?.atlassian_auth ?? EMPTY_AUTH;
   const openPkgs = useMemo(() => (run?.decision_packages ?? []).filter((p) => p.decision_state === "open"), [run]);
+  const openReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state === "open"),
+    [run],
+  );
+  const decidedReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state !== "open"),
+    [run],
+  );
+  const acceptedReviewCards = useMemo(
+    () => (run?.review_cards ?? []).filter((card) => card.decision_state === "accepted"),
+    [run],
+  );
   const pendApps = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "pending"), [run]);
   const apprvd = useMemo(() => (run?.approval_requests ?? []).filter((a) => a.status === "approved"), [run]);
   const activeFacts = useMemo(
@@ -233,13 +403,54 @@ export default function App(): ReactNode {
     [run],
   );
   const pkgFids = useMemo(() => { const s = new Set<string>(); openPkgs.forEach((p) => p.related_finding_ids.forEach((id) => s.add(id))); return s; }, [openPkgs]);
-  const soloFindings = useMemo(() => (run?.findings ?? []).filter((f) => (!f.resolution_state || f.resolution_state === "open") && !pkgFids.has(f.finding_id)), [run, pkgFids]);
-  const openCount = openPkgs.length + soloFindings.length;
+  const soloFindings = useMemo(
+    () => (run?.findings ?? []).filter(
+      (f) =>
+        (!f.resolution_state || f.resolution_state === "open") &&
+        !pkgFids.has(f.finding_id) &&
+        f.category !== "architecture_observation",
+    ),
+    [run, pkgFids],
+  );
+  const openCount = isFastRun ? openReviewCards.length : openPkgs.length + soloFindings.length;
   const pendCount = pendApps.length;
-  const [cardIdx, setCardIdx] = useState(0);
+  const [, setCardIdx] = useState(0);
   const [elapsed, setElapsed] = useState("");
   // Reset card index when run changes
   useEffect(() => { setCardIdx(0); }, [run?.run_id]);
+  useEffect(() => {
+    if (!run) {
+      setWaitingClarifications(new Set());
+      return;
+    }
+    const activeIds = new Set<string>();
+    if (run.analysis_mode === "fast") {
+      openReviewCards.forEach((card) => activeIds.add(card.card_id));
+    } else {
+      openPkgs.forEach((pkg) => activeIds.add(pkg.package_id));
+      soloFindings.forEach((finding) => activeIds.add(finding.finding_id));
+    }
+    const confirmedIds = new Set<string>();
+    for (const entry of run.analysis_log ?? []) {
+      const meta = (entry.metadata ?? {}) as Record<string, unknown>;
+      const metaId = typeof meta.review_card_id === "string" ? meta.review_card_id : null;
+      const text = `${entry.title} ${entry.message}`;
+      const textId = extractReviewCardId(text);
+      const cardId = metaId || textId;
+      if (!cardId) continue;
+      const msg = text.toLowerCase();
+      const confirmedByMeta = meta.clarification_confirmed === true || meta.action === "clarify_confirmed";
+      const confirmedByTag = msg.includes("[klaerung_bestaetigt]") || msg.includes("[klaerung_ok]");
+      const confirmedByWording = msg.includes("klaerung") && (msg.includes("bestaetigt") || msg.includes("bestatigt") || msg.includes("confirmed"));
+      if (confirmedByMeta || confirmedByTag || confirmedByWording) confirmedIds.add(cardId);
+    }
+
+    setWaitingClarifications((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => { if (activeIds.has(id) && !confirmedIds.has(id)) next.add(id); });
+      return next;
+    });
+  }, [run?.run_id, run?.analysis_mode, openReviewCards, openPkgs, soloFindings]);
   // Elapsed timer for running runs
   useEffect(() => {
     const startStr = run?.started_at ?? run?.created_at;
@@ -265,7 +476,23 @@ export default function App(): ReactNode {
     try {
       const r = await listAuditRuns();
       setRuns(r);
-      if (r.length && !selId) setSelId(r[0].run_id);
+      setSelId((current) => {
+        if (!r.length) return "";
+        if (!current) return r[0].run_id;
+        const selected = r.find((runItem) => runItem.run_id === current);
+        if (!selected) return r[0].run_id;
+        if (view === "history") return current;
+        const latest = r[0];
+        const latestIsActive = latest.status === "planned" || latest.status === "running";
+        const selectedIsActive = selected.status === "planned" || selected.status === "running";
+        const latestCreatedAt = Date.parse(latest.created_at ?? "") || 0;
+        const selectedCreatedAt = Date.parse(selected.created_at ?? "") || 0;
+        const latestIsNewer = latestCreatedAt > selectedCreatedAt;
+        if (latest.run_id !== current && (latestIsActive || (!selectedIsActive && latestIsNewer))) {
+          return latest.run_id;
+        }
+        return current;
+      });
       setGlobalErr("");
     } catch (e) {
       if (!silent) {
@@ -287,9 +514,9 @@ export default function App(): ReactNode {
 
   function upd(u: AuditRun) { setRuns((p) => p.map((r) => (r.run_id === u.run_id ? u : r))); setSelId(u.run_id); }
 
-  async function doCreate(t: AuditTarget) {
+  async function doCreate(t: AuditTarget, analysisMode: AuditRun["analysis_mode"]) {
     setSubmitting(true); setGlobalErr("");
-    try { const c = await createAuditRun(t); setRuns((p) => [c, ...p]); setSelId(c.run_id); setShowModal(false); setView("work"); }
+    try { const c = await createAuditRun(t, analysisMode); setRuns((p) => [c, ...p]); setSelId(c.run_id); setShowModal(false); setView("work"); }
     catch (e) { setGlobalErr(String(e)); }
     finally { setSubmitting(false); }
   }
@@ -301,9 +528,16 @@ export default function App(): ReactNode {
     finally { setCommentBusy(false); setCardIdx(i => i); /* triggers re-render; card list shrinks so it auto-adjusts */ }
   }
 
-  async function doPkg(id: string, a: "accept" | "reject" | "specify", c?: string) {
+  async function doPkg(id: string, a: "accept" | "reject", c?: string) {
     if (!run) return; setPkgBusy(id); setPkgErr("");
     try { upd(await submitPackageDecision(run.run_id, id, a, c)); /* card list will shrink, cardIdx stays → shows next */ }
+    catch (e) { setPkgErr(String(e)); }
+    finally { setPkgBusy(""); }
+  }
+
+  async function doReviewCard(id: string, a: "accept" | "reject" | "clarify", c?: string) {
+    if (!run) return; setPkgBusy(id); setPkgErr("");
+    try { upd(await submitReviewCardDecision(run.run_id, id, a, c)); }
     catch (e) { setPkgErr(String(e)); }
     finally { setPkgBusy(""); }
   }
@@ -437,6 +671,10 @@ export default function App(): ReactNode {
             <span className="nav-text">Befund-Auditierung</span>
             {(openCount + pendCount) > 0 && <span className="nav-badge">{openCount + pendCount}</span>}
           </button>
+          <button className={`nav-item${view === "coverage" ? " active" : ""}`} onClick={() => setView("coverage")}>
+            <span className="nav-icon">🧭</span>
+            <span className="nav-text">Scope & Abdeckung</span>
+          </button>
           <button className={`nav-item${view === "structure" ? " active" : ""}`} onClick={() => setView("structure")}>
             <span className="nav-icon">📐</span>
             <span className="nav-text">Doku-Strukturierung</span>
@@ -470,9 +708,27 @@ export default function App(): ReactNode {
         {/* Header */}
         <header className="header">
           <div className="header-left">
-            <h1>{view === "work" ? "Befund-Auditierung" : view === "structure" ? "Doku-Strukturierung" : "Verlauf"}</h1>
+            <h1>{
+              view === "work"
+                ? "Befund-Auditierung"
+                : view === "coverage"
+                  ? "Scope & Abdeckung"
+                  : view === "structure"
+                    ? "Doku-Strukturierung"
+                    : "Verlauf"
+            }</h1>
             {view === "work" && run && (
-              <p className="header-sub">{openCount} Probleme zu bewerten · {activeFacts.length} bestätigte Fakten · {pendCount} Änderungen zur Freigabe</p>
+              <p className="header-sub">
+                {isFastRun
+                  ? `${openCount} Review-Karten offen · ${pendCount} Folgeaktionen zur Freigabe · ${run.coverage_summary?.compared_pairs ?? 0} Vergleichspaare`
+                  : `${openCount} Probleme zu bewerten · ${activeFacts.length} bestätigte Fakten · ${pendCount} Änderungen zur Freigabe`}
+              </p>
+            )}
+            {view === "coverage" && (
+              <p className="header-sub">Fast-Audit-Scope, Priorisierung und bewusst zurueckgestellte Vergleiche transparent einsehen</p>
+            )}
+            {view === "structure" && (
+              <p className="header-sub">Confluence-Dokumentation analysieren · Struktur bewerten · Fachlich / Technisch trennen</p>
             )}
           </div>
           <div className="header-right">
@@ -519,16 +775,22 @@ export default function App(): ReactNode {
                 <div className="metric-card mc-amber">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Unstimmigkeiten</span>
-                    <span className="metric-value">{run?.findings.length ?? 0}</span>
-                    <span className="metric-sub">{run ? (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "Keine kritischen"; })() : "–"}</span>
+                    <span className="metric-label">{isFastRun ? "Review-Karten" : "Unstimmigkeiten"}</span>
+                    <span className="metric-value">{isFastRun ? (run?.review_cards.length ?? 0) : (run?.findings.length ?? 0)}</span>
+                    <span className="metric-sub">
+                      {run
+                        ? isFastRun
+                          ? `${openReviewCards.length} offen · ${decidedReviewCards.length} bewertet`
+                          : (() => { const c = run.findings.filter(f => f.severity === "critical").length; const h = run.findings.filter(f => f.severity === "high").length; return c || h ? `${c} Kritisch · ${h} Hoch` : "Keine kritischen"; })()
+                        : "–"}
+                    </span>
                   </div>
                 </div>
                 <div className="metric-card mc-purple">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Offene Entscheidungen</span>
-                    <span className="metric-value">{openPkgs.length}</span>
+                    <span className="metric-value">{openCount}</span>
                     <span className="metric-sub">{run ? `${pendApps.length} Freigaben ausstehend` : "–"}</span>
                   </div>
                 </div>
@@ -536,32 +798,62 @@ export default function App(): ReactNode {
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
                   <div className="metric-body">
                     <span className="metric-label">Entschieden</span>
-                    <span className="metric-value">{run ? run.decision_packages.filter(p => p.decision_state !== "open").length : 0}</span>
-                    <span className="metric-sub">{run ? `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen` : "–"}</span>
-                  </div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
-                  <div className="metric-body">
-                    <span className="metric-label">Widersprüche</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["contradiction","policy_conflict","terminology_collision"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Konflikte zwischen Quellen</span>
+                    <span className="metric-value">{run ? (isFastRun ? decidedReviewCards.length : run.decision_packages.filter(p => p.decision_state !== "open").length) : 0}</span>
+                    <span className="metric-sub">
+                      {run
+                        ? isFastRun
+                          ? `${run.implemented_changes.length} umgesetzt · ${run.approval_requests.length} Folgeanfragen`
+                          : `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen`
+                        : "–"}
+                    </span>
                   </div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Fehler</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Drift, veraltete Quellen</span>
+                    <span className="metric-label">{isFastRun ? "Budget & Fokus" : "Fehler"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.coverage_summary?.prioritized_sections ?? 0
+                          : run.findings.filter(f => ["implementation_drift","stale_source","read_write_gap"].includes(f.category)).length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">
+                      {isFastRun
+                        ? run?.budget_limited
+                          ? "Budget begrenzt"
+                          : "Priorisierte Sektionen"
+                        : "Drift und veraltete Quellen"}
+                    </span>
+                  </div>
+                </div>
+                <div className="metric-card mc-copper">
+                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18"/><path d="M7 8h6a3 3 0 1 1 0 6H9"/><path d="M9 14h7a3 3 0 1 1 0 6H7"/></svg></div>
+                  <div className="metric-body">
+                    <span className="metric-label">{isFastRun ? "Lücken" : "Boundary-Pfade"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.review_cards.filter((card) => card.deviation_type === "gap").length
+                          : run.findings.filter(f => f.category === "legacy_path_gap").length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">{isFastRun ? "Fehlende Gegenstuecke oder Inhalte" : "Manuelle oder Legacy-Entry-Points"}</span>
                   </div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="10" y1="14" x2="14" y2="14"/></svg></div>
                   <div className="metric-body">
-                    <span className="metric-label">Lücken</span>
-                    <span className="metric-value">{run ? run.findings.filter(f => ["missing_definition","missing_documentation","traceability_gap","ownership_gap","clarification_needed"].includes(f.category)).length : 0}</span>
-                    <span className="metric-sub">Fehlende Definitionen & Doku</span>
+                    <span className="metric-label">{isFastRun ? "Klärungsbedarf" : "Lücken"}</span>
+                    <span className="metric-value">
+                      {run
+                        ? isFastRun
+                          ? run.review_cards.filter((card) => ["misunderstanding", "unclear"].includes(card.deviation_type)).length
+                          : run.findings.filter(f => ["missing_definition","missing_documentation","traceability_gap","ownership_gap","clarification_needed"].includes(f.category)).length
+                        : 0}
+                    </span>
+                    <span className="metric-sub">{isFastRun ? "Missverstaendnisse oder unklare Punkte" : "Fehlende Definitionen & Doku"}</span>
                   </div>
                 </div>
                 <div className="metric-card mc-teal">
@@ -572,19 +864,6 @@ export default function App(): ReactNode {
                     <span className="metric-sub">{run?.llm_usage?.total_prompt_tokens ? `${((run.llm_usage.total_prompt_tokens ?? 0) + (run.llm_usage.total_completion_tokens ?? 0)).toLocaleString("de-DE")} Token` : "–"}</span>
                   </div>
                 </div>
-                {boot?.quality_gate?.gold_set && (
-                  <div className={`metric-card ${boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "mc-green" : "mc-amber"}`} title="Automatische Qualitätsprüfung: Werden alle bekannten Testfälle korrekt erkannt?">
-                    <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
-                    <div className="metric-body">
-                      <span className="metric-label">Qualitäts-Gate</span>
-                      <span className="metric-value">{boot.quality_gate.gold_set.passed && boot.quality_gate.delta_recompute?.passed ? "✓ Bestanden" : "⚠ Offen"}</span>
-                      <span className="metric-sub">
-                        Ref: {boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations}
-                        {boot.quality_gate.delta_recompute ? ` · Δ: ${boot.quality_gate.delta_recompute.matched_expectations}/${boot.quality_gate.delta_recompute.total_expectations}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Pipeline — horizontal under KPIs */}
@@ -593,15 +872,22 @@ export default function App(): ReactNode {
                   const phaseKey = (run?.progress.phase_key ?? "").toLowerCase();
                   const isRunning = run?.status === "running" || run?.status === "planned";
                   const isDone = run?.status === "completed";
-                  // Match backend AUDIT_PIPELINE_STEPS order
-                  const steps = [
-                    { label: "Metamodell",    keys: ["metamodel_check", "metamodel", "meta"] },
-                    { label: "Code",          keys: ["finai_code_check", "code", "github", "ingestion"] },
-                    { label: "Confluence",    keys: ["confluence_check", "confluence", "atlassian"] },
-                    { label: "Delta",         keys: ["delta_reconciliation", "delta", "retrieval_indexing", "retrieval"] },
-                    { label: "Findings",      keys: ["finding_generation", "finding", "analysis", "claim"] },
-                    { label: "Empfehlungen",  keys: ["llm_recommendations", "recommend", "decision_packages", "package", "decision"] },
-                  ];
+                  const steps = isFastRun
+                    ? [
+                        { label: "Quellen", keys: ["source_collection"] },
+                        { label: "Sektionen", keys: ["section_profiling"] },
+                        { label: "Vergleich", keys: ["candidate_comparison"] },
+                        { label: "Review", keys: ["review_cards"] },
+                        { label: "Folgeaktionen", keys: ["follow_up_preparation"] },
+                      ]
+                    : [
+                        { label: "Metamodell", keys: ["metamodel_check", "metamodel", "meta"] },
+                        { label: "Code", keys: ["finai_code_check", "code", "github", "ingestion"] },
+                        { label: "Confluence", keys: ["confluence_check", "confluence", "atlassian"] },
+                        { label: "Delta", keys: ["delta_reconciliation", "delta", "retrieval_indexing", "retrieval"] },
+                        { label: "Findings", keys: ["finding_generation", "finding", "analysis", "claim"] },
+                        { label: "Empfehlungen", keys: ["llm_recommendations", "recommend", "decision_packages", "package", "decision"] },
+                      ];
                   // Find which step is currently active by matching phase_key
                   let activeIdx = -1;
                   if (isRunning) {
@@ -632,7 +918,7 @@ export default function App(): ReactNode {
                 <div className="empty">
                   <div className="empty-icon">✅</div>
                   <strong>Alle Bewertungen abgeschlossen</strong>
-                  <p>Keine offenen Widersprüche. Im Verlauf findest du die Entscheidungen.</p>
+                  <p>{isFastRun ? "Keine offenen Review-Karten mehr. Im Verlauf findest du die Entscheidungen." : "Keine offenen Widersprüche. Im Verlauf findest du die Entscheidungen."}</p>
                 </div>
               )}
 
@@ -640,7 +926,7 @@ export default function App(): ReactNode {
                 <div className="empty">
                   <div className="empty-icon">⏳</div>
                   <strong>Analyse läuft…</strong>
-                  <p>Sobald Widersprüche erkannt werden, erscheinen sie hier.</p>
+                  <p>{isFastRun ? "Sobald priorisierte Abweichungen erkannt werden, erscheinen hier Review-Karten." : "Sobald Widersprüche erkannt werden, erscheinen sie hier."}</p>
                 </div>
               )}
 
@@ -651,119 +937,300 @@ export default function App(): ReactNode {
               {exErr && <div className="error-box">{exErr}</div>}
 
               {/* ── Issue Card Stack ── */}
-              {(() => {
-                /* Build unified card list: packages first, then solo findings */
-                type CardItem = { kind: "pkg"; pkg: typeof openPkgs[0] } | { kind: "finding"; f: typeof soloFindings[0] };
-                const cards: CardItem[] = [
-                  ...openPkgs.map(pkg => ({ kind: "pkg" as const, pkg })),
-                  ...soloFindings.map(f => ({ kind: "finding" as const, f })),
-                ];
-                if (cards.length === 0) return null;
-                // Group by scope cluster: show root issue per group, count related
-                const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-                // SDD: documentation sources are primary, code is only indication
-                const srcPriority = (card: CardItem): number => {
-                  const srcs: string[] = card.kind === "pkg"
-                    ? (card.pkg.metadata?.source_types as string[] ?? [])
-                    : (card.f.metadata?.source_types as string[] ?? (card.f.metadata?.source_type ? [card.f.metadata.source_type as string] : []));
-                  // Doku-Quellen = Priorität 0 (höchste), Code = 2 (niedrigste)
-                  if (srcs.some(s => ["confluence_page", "metamodel", "local_doc"].includes(s))) return 0;
-                  if (srcs.some(s => ["jira_ticket"].includes(s))) return 1;
-                  return 2; // github_file / code
-                };
-                const sorted = [...cards].sort((a, b) => {
-                  const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
-                  const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
-                  const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
-                  if (sevDiff !== 0) return sevDiff;
-                  // Bei gleicher Severity: Doku-Findings vor Code-Findings
-                  return srcPriority(a) - srcPriority(b);
-                });
-                // Cluster by base scope — first per cluster = root issue
-                const scopeGroups = new Map<string, CardItem[]>();
-                for (const card of sorted) {
-                  const baseScope = clusterScopeKey(card);
-                  if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
-                  scopeGroups.get(baseScope)!.push(card);
-                }
-                // Root issues = first of each group, sorted by severity + source priority
-                const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
-                  .sort((a, b) => {
-                    const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
-                    const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
+              {isFastRun ? (
+                openReviewCards.length > 0 && (
+                  (() => {
+                    const priorityOrder: Record<ReviewCard["priority"], number> = { high: 0, medium: 1, low: 2 };
+                    const sortedCards = [...openReviewCards].sort((left, right) => {
+                      const laneDiff = reviewCardLaneRank(left) - reviewCardLaneRank(right);
+                      if (laneDiff !== 0) return laneDiff;
+                      const priorityDiff = (priorityOrder[left.priority] ?? 9) - (priorityOrder[right.priority] ?? 9);
+                      if (priorityDiff !== 0) return priorityDiff;
+                      return right.confidence - left.confidence;
+                    });
+                    const laneGroups = new Map<string, ReviewCard[]>();
+                    for (const card of sortedCards) {
+                      const key = reviewCardLaneKey(card);
+                      if (!laneGroups.has(key)) laneGroups.set(key, []);
+                      laneGroups.get(key)!.push(card);
+                    }
+                    return (
+                      <section>
+                        <div className="section-head">
+                          <h2>Fast Review</h2>
+                          <span className="section-count">
+                            {openReviewCards.length} Review-Karten offen
+                            {run?.budget_limited ? " · budgetbegrenzt" : ""}
+                          </span>
+                        </div>
+                        <div className="fast-review-note">
+                          Entscheidungen sind von innen nach aussen in unabhängigen Lanes sortiert: erst Properties und Schema, dann Objekte und Lifecycle, danach Prozess und Scope, zuletzt Doku-Struktur.
+                        </div>
+                        {[...laneGroups.entries()].map(([laneKey, cards]) => (
+                          <section className="lane-section" key={laneKey}>
+                            <div className="lane-head">
+                              <h3>{reviewCardLaneLabel(cards[0])}</h3>
+                              <span className="section-count">{cards.length} Karten</span>
+                            </div>
+                            <p className="lane-note">{reviewCardIndependenceNote(cards[0])}</p>
+                            <div className="card-list">
+                              {cards.map((card, index) => {
+                                if (index > 0) return null;
+                                return (
+                                  <div
+                                    key={card.card_id}
+                                    className="card-list-item card-list-item-overlay"
+                                    style={{
+                                      zIndex: cards.length - index,
+                                      marginTop: index === 0 ? 0 : -48,
+                                      marginLeft: index * 10,
+                                      marginRight: index * 10,
+                                      transform: `scale(${Math.max(0.94, 1 - index * 0.02)})`,
+                                    }}
+                                  >
+                                    <ReviewCardView
+                                      card={card}
+                                      rank={index + 1}
+                                      busy={pkgBusy === card.card_id}
+                                      onAccept={() => void doReviewCard(card.card_id, "accept")}
+                                      onReject={() => void doReviewCard(card.card_id, "reject")}
+                                      onClarify={() => { setClarifyCard(card); setClarifyDraft(""); }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </section>
+                        ))}
+                      </section>
+                    );
+                  })()
+                )
+              ) : (
+                (() => {
+                  type CardItem = { kind: "pkg"; pkg: typeof openPkgs[0] } | { kind: "finding"; f: typeof soloFindings[0] };
+                  const cards: CardItem[] = [
+                    ...openPkgs.map(pkg => ({ kind: "pkg" as const, pkg })),
+                    ...soloFindings.map(f => ({ kind: "finding" as const, f })),
+                  ];
+                  if (cards.length === 0) return null;
+                  const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+                  const srcPriority = (card: CardItem): number => {
+                    const srcs: string[] = card.kind === "pkg"
+                      ? (card.pkg.metadata?.source_types as string[] ?? [])
+                      : (card.f.metadata?.source_types as string[] ?? (card.f.metadata?.source_type ? [card.f.metadata.source_type as string] : []));
+                    if (srcs.some(s => ["confluence_page", "metamodel", "local_doc"].includes(s))) return 0;
+                    if (srcs.some(s => ["jira_ticket"].includes(s))) return 1;
+                    return 2;
+                  };
+                  const sorted = [...cards].sort((a, b) => {
+                    const sa = a.kind === "pkg" ? a.pkg.severity_summary : a.f.severity;
+                    const sb = b.kind === "pkg" ? b.pkg.severity_summary : b.f.severity;
                     const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
                     if (sevDiff !== 0) return sevDiff;
-                    return srcPriority(a.root) - srcPriority(b.root);
+                    return srcPriority(a) - srcPriority(b);
                   });
-                const idx = Math.min(cardIdx, finalCards.length - 1);
-                const visibleCards = finalCards.slice(idx, idx + 3);
-                return (
-                  <section>
-                    <div className="section-head">
-                      <h2>Offene Probleme</h2>
-                      <span className="section-count">{finalCards.length} Entscheidungen ausstehend — sortiert nach Dringlichkeit</span>
-                    </div>
-                    <div className="card-list">
-                      {finalCards.map((group, cardRank) => {
-                        const item = group.root;
-                        return (
-                          <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id} className="card-list-item">
-                            {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
-                            {item.kind === "pkg" ? (
-                              <WorkCard id={item.pkg.package_id}
-                                rank={cardRank + 1}
-                                severity={item.pkg.severity_summary} category={item.pkg.category}
-                                title={item.pkg.title} scope={item.pkg.scope_summary}
-                                recommendation={item.pkg.recommendation_summary}
-                                positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
-                                negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
-                                deltaHints={strs(item.pkg.metadata?.delta_summary)}
-                                analysisContext={packageContextLines(item.pkg)}
-                                nextActions={packageNextActions(item.pkg)}
-                                elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
-                                feedback={draft(item.pkg.package_id)} onFeedback={v => setDraft(item.pkg.package_id, v)}
-                                busy={pkgBusy === item.pkg.package_id || commentBusy}
-                                onAccept={() => void doPkg(item.pkg.package_id, "accept", draft(item.pkg.package_id) || undefined)}
-                                onReject={() => void doPkg(item.pkg.package_id, "reject", draft(item.pkg.package_id) || undefined)}
-                                onSpecify={() => { const d = draft(item.pkg.package_id); if (!d?.trim()) { alert("Bitte geben Sie im Kommentarfeld eine Präzisierung ein, bevor Sie 'Präzisieren' klicken."); return; } void doPkg(item.pkg.package_id, "specify", d); }}
-                                onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
-                                onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
-                                appBusy={appBusy}
-                                clarificationPanel={
-                                  run ? <ClarificationPanel run={run} packageId={item.pkg.package_id} onRunUpdated={upd} /> : undefined
-                                }
-                              />
-                            ) : (
-                              <WorkCard id={item.f.finding_id}
-                                rank={cardRank + 1}
-                                severity={item.f.severity} category={item.f.category}
-                                title={item.f.title} scope={item.f.summary}
-                                recommendation={item.f.recommendation}
-                                positiveConsequences={strs(item.f.metadata?.positive_consequences)}
-                                negativeConsequences={strs(item.f.metadata?.negative_consequences)}
-                                analysisContext={[
-                                  ...strs(item.f.metadata?.semantic_context).slice(0, 2),
-                                  ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
-                                  ...strs(item.f.metadata?.causal_persistence_schema_targets).slice(0, 1).map((v) => `Schema-Ziel: ${v}`),
-                                ]}
-                                proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
-                                proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
-                                metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
-                                metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
-                                elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
-                                feedback={draft(item.f.finding_id)} onFeedback={v => setDraft(item.f.finding_id, v)}
-                                busy={commentBusy}
-                                onAccept={() => { const d = draft(item.f.finding_id); void doComment(d ? `[ANNEHMEN] ${item.f.finding_id}: ${d}` : `[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
-                                onReject={() => { const d = draft(item.f.finding_id); void doComment(d ? `[ABLEHNEN] ${item.f.finding_id}: ${d}` : `[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
-                              />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                );
-              })()}
+                  const scopeGroups = new Map<string, CardItem[]>();
+                  for (const card of sorted) {
+                    const baseScope = clusterScopeKey(card);
+                    if (!scopeGroups.has(baseScope)) scopeGroups.set(baseScope, []);
+                    scopeGroups.get(baseScope)!.push(card);
+                  }
+                  const finalCards = [...scopeGroups.values()].map(g => ({ root: g[0], related: g.length - 1 }))
+                    .sort((a, b) => {
+                      const sa = a.root.kind === "pkg" ? a.root.pkg.severity_summary : a.root.f.severity;
+                      const sb = b.root.kind === "pkg" ? b.root.pkg.severity_summary : b.root.f.severity;
+                      const sevDiff = (sevOrder[sa] ?? 9) - (sevOrder[sb] ?? 9);
+                      if (sevDiff !== 0) return sevDiff;
+                      return srcPriority(a.root) - srcPriority(b.root);
+                    });
+                  return (
+                    <section>
+                      <div className="section-head">
+                        <h2>Offene Probleme</h2>
+                        <span className="section-count">{finalCards.length} Entscheidungen ausstehend — sortiert nach Dringlichkeit</span>
+                      </div>
+                      <div className="card-list">
+                        {finalCards.map((group, cardRank) => {
+                          if (cardRank > 0) return null;
+                          const item = group.root;
+                          const cardId = item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id;
+                          const isWaiting = waitingClarifications.has(cardId);
+                          return (
+                            <div
+                              key={cardId}
+                              className="card-list-item card-list-item-overlay"
+                              style={{
+                                zIndex: finalCards.length - cardRank,
+                                marginTop: cardRank === 0 ? 0 : -48,
+                                marginLeft: cardRank * 10,
+                                marginRight: cardRank * 10,
+                                transform: `scale(${Math.max(0.94, 1 - cardRank * 0.02)})`,
+                              }}
+                            >
+                              {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
+                              {item.kind === "pkg" ? (
+                                <WorkCard id={item.pkg.package_id}
+                                  rank={cardRank + 1}
+                                  severity={item.pkg.severity_summary} category={item.pkg.category}
+                                  title={item.pkg.title} scope={item.pkg.scope_summary}
+                                  recommendation={item.pkg.recommendation_summary}
+                                  waiting={isWaiting}
+                                  onClearWaiting={() => setWaitingClarifications((prev) => {
+                                    const next = new Set(prev);
+                                    next.delete(item.pkg.package_id);
+                                    return next;
+                                  })}
+                                  positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
+                                  negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
+                                  deltaHints={strs(item.pkg.metadata?.delta_summary)}
+                                  analysisContext={packageContextLines(item.pkg)}
+                                  nextActions={packageNextActions(item.pkg)}
+                                  elements={item.pkg.problem_elements.map(el => ({ severity: el.severity, confidence: el.confidence, explanation: el.short_explanation, locations: el.evidence_locations }))}
+                                  busy={pkgBusy === item.pkg.package_id || commentBusy}
+                                  onAccept={() => void doPkg(item.pkg.package_id, "accept")}
+                                  onReject={() => void doPkg(item.pkg.package_id, "reject")}
+                                  onConfluence={() => void doCreateApp({ target_type: "confluence_page_update", title: `Confluence-Writeback: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.confluence_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
+                                  onJira={() => void doCreateApp({ target_type: "jira_ticket_create", title: `Jira-Ticket: ${item.pkg.title}`, summary: "Freigabeanfrage.", target_url: sp.jira_url, related_package_ids: [item.pkg.package_id], related_finding_ids: item.pkg.related_finding_ids, payload_preview: [item.pkg.scope_summary, item.pkg.recommendation_summary] })}
+                                  appBusy={appBusy}
+                                  clarificationPanel={
+                                    run ? <ClarificationPanel run={run} packageId={item.pkg.package_id} onRunUpdated={upd} /> : undefined
+                                  }
+                                />
+                              ) : (
+                                <WorkCard id={item.f.finding_id}
+                                  rank={cardRank + 1}
+                                  severity={item.f.severity} category={item.f.category}
+                                  title={item.f.title} scope={item.f.summary}
+                                  recommendation={item.f.recommendation}
+                                  waiting={isWaiting}
+                                  onClearWaiting={() => setWaitingClarifications((prev) => {
+                                    const next = new Set(prev);
+                                    next.delete(item.f.finding_id);
+                                    return next;
+                                  })}
+                                  positiveConsequences={strs(item.f.metadata?.positive_consequences)}
+                                  negativeConsequences={strs(item.f.metadata?.negative_consequences)}
+                                  analysisContext={[
+                                    ...strs(item.f.metadata?.semantic_context).slice(0, 2),
+                                    ...strs(item.f.metadata?.causal_write_decider_labels).slice(0, 1).map((v) => `Write-Decider: ${v}`),
+                                    ...strs(item.f.metadata?.causal_persistence_schema_targets).slice(0, 1).map((v) => `Schema-Ziel: ${v}`),
+                                  ]}
+                                  proposedPageMd={typeof item.f.metadata?.proposed_page_md === "string" ? item.f.metadata.proposed_page_md : undefined}
+                                  proposedPageTitle={typeof item.f.metadata?.proposed_page_title === "string" ? item.f.metadata.proposed_page_title : undefined}
+                                  metaSourceType={typeof item.f.metadata?.source_type === "string" ? item.f.metadata.source_type : undefined}
+                                  metaSourceTypes={Array.isArray(item.f.metadata?.source_types) ? (item.f.metadata.source_types as string[]) : undefined}
+                                  elements={[{ severity: item.f.severity, confidence: 1, explanation: item.f.summary, locations: item.f.locations }]}
+                                  busy={commentBusy}
+                                  onAccept={() => { void doComment(`[ANNEHMEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                  onReject={() => { void doComment(`[ABLEHNEN] ${item.f.finding_id}`); setDraft(item.f.finding_id, ""); }}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })()
+              )}
+
+              {isFastRun && acceptedReviewCards.length > 0 && (
+                <section>
+                  <div className="section-head">
+                    <h2>Akzeptierte Review-Karten</h2>
+                    <span className="section-count">{acceptedReviewCards.length} fuer Folgeaktionen freigegeben</span>
+                  </div>
+                  {acceptedReviewCards.map((card) => {
+                    const groups = reviewCardSourceGroups(card);
+                    const confidencePct = Math.round(card.confidence * 100);
+                    return (
+                    <article className="rc rc-decided" key={`accepted:${card.card_id}`}>
+                      <div className="rc-badges">
+                        <span className="badge badge-approved">akzeptiert</span>
+                        <span className="badge badge-cat">{reviewCardCategoryLabel(card)}</span>
+                        <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+                      </div>
+                      <h3 className="rc-title">{card.title}</h3>
+                      <p className="rc-subtitle">{card.summary}</p>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Quellenvergleich</div>
+                        <div className="rc-sources">
+                          {groups.map((g, i) => {
+                            const srcType = i === 0 ? card.source_a_locations[0]?.source_type : card.source_b_locations[0]?.source_type;
+                            const srcCfg = srcType ? (SRC_CFG[srcType] ?? null) : null;
+                            return (
+                              <div className="rc-source-row" key={`${g.slotLabel}:${i}`}>
+                                <div className="rc-source-icon">{srcCfg ? srcCfg.icon : <span>•</span>}</div>
+                                <div className="rc-source-body">
+                                  <strong>{g.sourceLabel}</strong>
+                                  <div className="rc-source-quote">"{g.statement}"</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Bewertung</div>
+                        <div className="rc-assessment">
+                          <div className="rc-assessment-bar"><div className="rc-assessment-fill" style={{ width: `${confidencePct}%` }} /></div>
+                          <div className="rc-assessment-text">Confidence: {confidencePct}%</div>
+                        </div>
+                      </div>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Entscheidung</div>
+                        <ul className="rc-impact-list">
+                          <li>{card.why_it_matters}</li>
+                          {card.decision_comment && <li>Kommentar: {card.decision_comment}</li>}
+                        </ul>
+                      </div>
+                      <div className="wc-actions">
+                        <div className="wc-decision-label">Folgeaktion vorbereiten</div>
+                        <div className="wc-btns wc-btns-primary">
+                          {card.follow_up_capabilities.includes("confluence_page_update") && (
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              disabled={appBusy === "c"}
+                              onClick={() => void doCreateApp({
+                                target_type: "confluence_page_update",
+                                title: `Confluence-Writeback: ${card.title}`,
+                                summary: card.recommended_decision,
+                                target_url: sp.confluence_url,
+                                related_review_card_ids: [card.card_id],
+                                related_package_ids: [],
+                                related_finding_ids: card.related_finding_ids,
+                                payload_preview: [card.summary, card.why_it_matters, card.recommended_decision],
+                              })}
+                            >
+                              📄 Confluence-Freigabe
+                            </button>
+                          )}
+                          {card.follow_up_capabilities.includes("jira_ticket_create") && (
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              disabled={appBusy === "c"}
+                              onClick={() => void doCreateApp({
+                                target_type: "jira_ticket_create",
+                                title: `Jira-Ticket: ${card.title}`,
+                                summary: card.recommended_decision,
+                                target_url: sp.jira_url,
+                                related_review_card_ids: [card.card_id],
+                                related_package_ids: [],
+                                related_finding_ids: card.related_finding_ids,
+                                payload_preview: [card.summary, card.why_it_matters, card.recommended_decision],
+                              })}
+                            >
+                              🎫 Jira-Freigabe
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                    );
+                  })}
+                </section>
+              )}
 
               {/* ── Pending approvals ── */}
               {pendApps.length > 0 && (
@@ -936,59 +1403,104 @@ export default function App(): ReactNode {
                 </section>
               )}
 
-              {/* Qualitäts-Gate Detail (aufklappbar) */}
-              {boot?.quality_gate?.gold_set && boot?.quality_gate?.delta_recompute && (
-                <details className="gate-details">
-                  <summary className="gate-summary">Qualitäts-Gate Details</summary>
-                  <div className="gate-grid">
-                    <div className="gate-card">
-                      <div className="gate-card-head">
-                        <span className={`badge badge-${boot.quality_gate.gold_set.passed ? "approved" : "pending"}`}>
-                          {boot.quality_gate.gold_set.passed ? "Bestanden" : "Offen"}
-                        </span>
-                        <strong>Referenz-Set</strong>
-                        <span className="badge badge-cat">{boot.quality_gate.gold_set.matched_expectations}/{boot.quality_gate.gold_set.total_expectations} Treffer</span>
-                      </div>
-                      <ul className="gate-kpis">
-                        <li>Trefferquote: {Math.round(boot.quality_gate.gold_set.recall * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_recall * 100)}%)</li>
-                        <li>Präzision: {Math.round(boot.quality_gate.gold_set.precision * 100)}% (Soll: {Math.round(boot.quality_gate.gold_set.required_precision * 100)}%)</li>
-                        <li>Fehlalarme: {boot.quality_gate.gold_set.false_positives} (Max: {boot.quality_gate.gold_set.max_false_positives})</li>
-                      </ul>
-                      {boot.quality_gate.gold_set.failure_reasons.length > 0 && (
-                        <div className="gate-reasons">{boot.quality_gate.gold_set.failure_reasons.join(" · ")}</div>
-                      )}
-                    </div>
-                    <div className="gate-card">
-                      <div className="gate-card-head">
-                        <span className={`badge badge-${boot.quality_gate.delta_recompute.passed ? "approved" : "pending"}`}>
-                          {boot.quality_gate.delta_recompute.passed ? "Bestanden" : "Offen"}
-                        </span>
-                        <strong>Delta-Neubewertung</strong>
-                        <span className="badge badge-cat">{boot.quality_gate.delta_recompute.matched_expectations}/{boot.quality_gate.delta_recompute.total_expectations} Treffer</span>
-                      </div>
-                      <ul className="gate-kpis">
-                        <li>Trefferquote: {Math.round(boot.quality_gate.delta_recompute.recall * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_recall * 100)}%)</li>
-                        <li>Präzision: {Math.round(boot.quality_gate.delta_recompute.precision * 100)}% (Soll: {Math.round(boot.quality_gate.delta_recompute.required_precision * 100)}%)</li>
-                        <li>Fehlalarme: {boot.quality_gate.delta_recompute.false_positives} (Max: {boot.quality_gate.delta_recompute.max_false_positives})</li>
-                      </ul>
-                      {boot.quality_gate.delta_recompute.failure_reasons.length > 0 && (
-                        <div className="gate-reasons">{boot.quality_gate.delta_recompute.failure_reasons.join(" · ")}</div>
-                      )}
-                    </div>
-                  </div>
-                </details>
-              )}
             </>
+          ) : view === "coverage" ? (
+            run ? (
+              isFastRun && run.coverage_summary ? (
+                <section className="coverage-panel">
+                  <div className="section-head">
+                    <h2>Scope & Abdeckung</h2>
+                    <span className="section-count">
+                      {run.coverage_summary.total_documents} Quellen · {run.coverage_summary.total_sections} Sektionen
+                    </span>
+                  </div>
+                  <p className="coverage-summary-text">
+                    Der Fast Audit vergleicht nicht den gesamten Scope vollstaendig, sondern priorisiert. Diese Ansicht zeigt
+                    explizit, was gesammelt, was wirklich gespiegelt und was in diesem Lauf zurueckgestellt wurde.
+                  </p>
+                  <div className="coverage-grid">
+                    <section className="coverage-block">
+                      <h3>Eingesammelt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.total_documents} Quellen wurden geladen.</li>
+                        <li>{run.coverage_summary.total_sections} Sektionen wurden aus dem Scope zugeschnitten.</li>
+                      </ul>
+                      {coverageSourceTypeEntries(run).length > 0 && (
+                        <>
+                          <div className="coverage-label">Quellarten im Lauf</div>
+                          <ul className="coverage-chip-list">
+                            {coverageSourceTypeEntries(run).map(([sourceType, count]) => (
+                              <li key={sourceType}>{sourceTypeLabel(sourceType)}: {count}</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Priorisiert geprueft</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.prioritized_sections} Sektionen kamen in die schnelle Vergleichsmenge.</li>
+                        <li>{run.coverage_summary.compared_pairs} Vergleichspaare wurden tatsaechlich gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.compared_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Tatsaechlich verglichene Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.compared_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Bewusst zurueckgestellt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.skipped_sections_due_to_prioritization} Sektionen blieben ausserhalb der priorisierten Menge.</li>
+                        <li>{run.coverage_summary.skipped_pairs_due_to_budget} potenzielle Vergleiche wurden aus Budgetgruenden nicht mehr gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Beispiele fuer zurueckgestellte Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                  </div>
+                  {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Priorisierte Bereiche im Lauf</div>
+                      <ul className="coverage-list">
+                        {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {run.coverage_summary.notes.length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Audit-Hinweise</div>
+                      <ul className="coverage-list">
+                        {run.coverage_summary.notes.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </section>
+              ) : (
+                <div className="empty">
+                  <div className="empty-icon">🧭</div>
+                  <strong>Keine Scope-Ansicht fuer diesen Lauf</strong>
+                  <p>Scope & Abdeckung ist aktuell nur fuer Fast-Audit-Laeufe mit Coverage-Daten verfuegbar.</p>
+                </div>
+              )
+            ) : (
+              <div className="empty">
+                <div className="empty-icon">🧭</div>
+                <strong>Kein Audit-Run ausgewaehlt</strong>
+                <p>Waehle oder starte einen Fast-Audit-Run, um Scope & Abdeckung zu sehen.</p>
+              </div>
+            )
           ) : view === "structure" ? (
             /* ═══════════════ DOKU-STRUKTURIERUNG ═══════════════ */
-            <div className="structure-placeholder">
-              <div className="empty-state">
-                <div className="empty-icon">📐</div>
-                <h3>Doku-Strukturierung</h3>
-                <p>Hier können Sie die Dokumentenstruktur im Confluence-Bereich reorganisieren: Seiten umsortieren, umbenennen, verlinken und neu gruppieren.</p>
-                <p className="text-muted">Dieser Bereich wird in einer kommenden Version verfügbar sein.</p>
-              </div>
-            </div>
+            <DocStructureView run={run} boot={boot} sp={sp} />
           ) : (
             /* ═══════════════ HISTORY PANEL ═══════════════ */
             <HistoryView run={run} boot={boot} />
@@ -996,13 +1508,63 @@ export default function App(): ReactNode {
         </div>
       </main>
 
+      {clarifyCard && (
+        <div className="modal-overlay" onClick={() => setClarifyCard(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Zustaendigkeit klaeren</h2>
+            <p>Kurze Einordnung oder Rueckfrage fuer diese Entscheidungskarte erfassen.</p>
+            <div className="clar-body">
+              <div className="clar-messages">
+                <div className="clar-msg clar-msg-system">
+                  <div className="clar-msg-head">
+                    <span className="clar-msg-role">System</span>
+                    <span className="clar-msg-time">jetzt</span>
+                  </div>
+                  <div className="clar-msg-body">
+                    Beschreibe kurz, wer zustaendig ist oder welche Info fehlt, damit die Karte spaeter sauber entschieden werden kann.
+                  </div>
+                </div>
+              </div>
+              <div className="clar-input-area">
+                <textarea
+                  className="clar-input"
+                  value={clarifyDraft}
+                  onChange={(e) => setClarifyDraft(e.target.value)}
+                  placeholder="Zustaendigkeit, fehlende Quelle, Rueckfrage…"
+                />
+                <div className="clar-input-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => setClarifyCard(null)}>Abbrechen</button>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={async () => {
+                      if (!clarifyCard) return;
+                      const payload = clarifyDraft.trim();
+                      if (payload) {
+                        await doComment(`[KLAERUNG] ReviewCard ${clarifyCard.card_id}: ${payload}`);
+                      } else {
+                        await doComment(`[KLAERUNG] ReviewCard ${clarifyCard.card_id}`);
+                      }
+                      setWaitingClarifications((prev) => new Set(prev).add(clarifyCard.card_id));
+                      setClarifyCard(null);
+                      setClarifyDraft("");
+                    }}
+                  >
+                    Klaerung senden
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══════════════ NEW RUN MODAL ═══════════════ */}
       {showModal && <RunModal
         ea={ea}
         sp={sp}
         boot={boot}
         onClose={() => setShowModal(false)}
-        onStart={async (t) => { await doCreate(t); }}
+        onStart={async (t, analysisMode) => { await doCreate(t, analysisMode); }}
         submitting={submitting}
       />}
     </div>
@@ -1013,27 +1575,270 @@ export default function App(): ReactNode {
    WORK CARD (inline component)
    ============================================================ */
 
+/* ============================================================
+   REVIEW CARD VIEW — structured for Fast-Audit Review cards
+   Layout: Badge → Title → Description → Sources → Assessment →
+           Rationale → Impact → Recommendation → Decision
+   ============================================================ */
+function ReviewCardView(props: {
+  card: ReviewCard;
+  rank?: number;
+  busy: boolean;
+  onAccept: () => void;
+  onReject: () => void;
+  onClarify?: () => void;
+}): ReactNode {
+  const { card, rank, busy } = props;
+  const labels = reviewCardDecisionLabels(card);
+  const consequences = reviewCardDecisionConsequences(card);
+  const groups = reviewCardSourceGroups(card);
+  const rationale = reviewCardRationale(card);
+  const nextActions = reviewCardNextActions(card);
+  const confidencePct = Math.round(card.confidence * 100);
+  const comparisonFocus = reviewCardMetaString(card, "comparison_focus") || card.title;
+
+  // Determine which source carries the current truth (the "correct" one)
+  const truthSourceType = card.source_a_locations[0]?.source_type
+    || card.source_b_locations[0]?.source_type
+    || "";
+  const truthCfg = truthSourceType ? (SRC_CFG[truthSourceType] ?? null) : null;
+
+  // Assessment sentence
+  const assessmentText = confidencePct >= 80
+    ? `Nach Auswertung aller Quellen ist die o.g. Aussage zu ${confidencePct}% korrekt.`
+    : confidencePct >= 50
+      ? `Nach Auswertung aller Quellen ist die o.g. Aussage zu ${confidencePct}% belastbar.`
+      : `Die Aussage konnte nur zu ${confidencePct}% quellenseitig abgesichert werden.`;
+
+  // Impact lines
+  const impactLines: string[] = [];
+  if (card.why_it_matters) impactLines.push(card.why_it_matters);
+  for (const action of nextActions) impactLines.push(action);
+
+  // Follow-up checkbox state
+  const hasConfluence = card.follow_up_capabilities.includes("confluence_page_update");
+  const hasJira = card.follow_up_capabilities.includes("jira_ticket_create");
+  const [chkConfluence, setChkConfluence] = useState(hasConfluence);
+  const [chkJira, setChkJira] = useState(hasJira);
+
+  return (
+    <article className="rc" data-severity={card.priority}>
+      {/* ── 1. Badge-Row: Deviation Type + Priority + Truth-Source Icon ── */}
+      {rank != null && <div className="rc-rank" title={`Prioritaet ${rank}`}>#{rank}</div>}
+      <div className="rc-badges">
+        <span className="badge badge-cat">{reviewCardCategoryLabel(card)}</span>
+        <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+        {truthCfg && (
+          <span className={`rc-truth-source ${truthCfg.cls}`} title={`Wahrheitsquelle: ${truthCfg.label}`}>
+            {truthCfg.icon} <span className="rc-truth-label">{truthCfg.label}</span>
+          </span>
+        )}
+      </div>
+
+      {/* ── 2. Ueberschrift: Kurzbeschreibung ── */}
+      <h3 className="rc-title">{card.title}</h3>
+
+      {/* ── 3. Untertitel: Ausfuehrliche Beschreibung ── */}
+      <p className="rc-subtitle">{card.summary}</p>
+
+      {/* ── 4. Quellen-Karte ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Quellenvergleich</div>
+        <div className="rc-sources">
+          {groups.map((g, i) => {
+            const srcType = i === 0 ? card.source_a_locations[0]?.source_type : card.source_b_locations[0]?.source_type;
+            const srcCfg = srcType ? (SRC_CFG[srcType] ?? null) : null;
+            return (
+              <div className="rc-source-row" key={`${g.slotLabel}:${i}`}>
+                <div className="rc-source-icon">
+                  {srcCfg ? srcCfg.icon : <span>•</span>}
+                </div>
+                <div className="rc-source-body">
+                  <strong>{g.sourceLabel}</strong>
+                  {g.heading && <span className="rc-source-heading"> — {g.heading}</span>}
+                  <div className="rc-source-quote">"{g.statement}"</div>
+                  {g.evidence.length > 0 && (
+                    <ul className="rc-source-evidence">
+                      {g.evidence.map((ev, ei) => <li key={ei}>{ev}</li>)}
+                    </ul>
+                  )}
+                  {g.fullText && g.fullText.trim() !== g.statement.trim() && (
+                    <details className="rc-source-full">
+                      <summary>Volltext anzeigen</summary>
+                      <div className="rc-source-fulltext">{g.fullText}</div>
+                    </details>
+                  )}
+                  {g.locations.length > 0 && (
+                    <div className="ev-locs">
+                      {g.locations.map((loc) => (
+                        <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                          <SrcBadge t={loc.source_type} />
+                          {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── 5. Bewertung ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Bewertung</div>
+        <div className="rc-assessment">
+          <div className="rc-assessment-bar">
+            <div className="rc-assessment-fill" style={{ width: `${confidencePct}%` }} />
+          </div>
+          <div className="rc-assessment-text">{assessmentText}</div>
+        </div>
+      </div>
+
+      {/* ── 6. Begruendung ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Begruendung</div>
+        <div className="rc-rationale">{rationale}</div>
+        {comparisonFocus !== card.title && (
+          <div className="rc-comparison-focus">Vergleichsfokus: {comparisonFocus}</div>
+        )}
+      </div>
+
+      {/* ── 7. Auswirkung ── */}
+      {impactLines.length > 0 && (
+        <div className="rc-section">
+          <div className="rc-section-label">Auswirkung</div>
+          <ul className="rc-impact-list">
+            {impactLines.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* ── 8. Empfehlung ── */}
+      {card.recommended_decision && (
+        <div className="rc-section">
+          <div className="rc-section-label">Empfehlung</div>
+          <div className="rc-recommendation">{card.recommended_decision}</div>
+        </div>
+      )}
+
+      {/* ── 9. Konsequenz bei Annahme (Checkboxen) ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Konsequenz bei Annahme</div>
+        <div className="rc-consequences">
+          {/* Always: mark card as confirmed */}
+          <label className="rc-consequence-row rc-consequence-always">
+            <input type="checkbox" checked disabled className="rc-consequence-check" />
+            <span className="rc-consequence-icon rc-consequence-system">✓</span>
+            <div className="rc-consequence-body">
+              <strong>Karte als bestaetigt markieren</strong>
+              <span>Die Review-Karte wird als akzeptiert gespeichert und fliesst in die Gesamtauswertung ein.</span>
+            </div>
+          </label>
+          {/* Optional: Confluence */}
+          {hasConfluence && (
+            <label className={`rc-consequence-row ${chkConfluence ? "rc-consequence-active" : ""}`}>
+              <input
+                type="checkbox"
+                checked={chkConfluence}
+                onChange={(e) => setChkConfluence(e.target.checked)}
+                className="rc-consequence-check"
+              />
+              <span className="rc-consequence-icon rc-consequence-confluence">{CONF_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Confluence-Korrektur vorbereiten</strong>
+                <span>Die betroffene Doku-Seite wird als Writeback-Kandidat markiert. Ein Patch-Vorschlag wird erzeugt und zur Genehmigung vorgelegt.</span>
+              </div>
+            </label>
+          )}
+          {/* Optional: Jira */}
+          {hasJira && (
+            <label className={`rc-consequence-row ${chkJira ? "rc-consequence-active" : ""}`}>
+              <input
+                type="checkbox"
+                checked={chkJira}
+                onChange={(e) => setChkJira(e.target.checked)}
+                className="rc-consequence-check"
+              />
+              <span className="rc-consequence-icon rc-consequence-jira">{JIRA_SVG}</span>
+              <div className="rc-consequence-body">
+                <strong>Jira-Ticket anlegen</strong>
+                <span>Ein qualifiziertes Jira-Ticket mit Problembeschreibung, betroffenen Artefakten und Korrekturvorschlag wird vorbereitet.</span>
+              </div>
+            </label>
+          )}
+        </div>
+      </div>
+
+      {/* ── Kontext (Lane, Independence) ── */}
+      <div className="rc-meta-row">
+        <span className="rc-meta-chip">{reviewCardLaneLabel(card)}</span>
+        <span className="rc-meta-note">{reviewCardIndependenceNote(card)}</span>
+      </div>
+
+      {/* ── Entscheidung ── */}
+      <div className="wc-actions">
+        <div className="wc-decision-label">Ihre Entscheidung</div>
+        <div className="wc-question-block wc-question-block-end">
+          <div className="wc-label">Frage zur Entscheidung</div>
+          <div className="wc-question-text">{reviewCardDecisionQuestion(card)}</div>
+        </div>
+        <div className="wc-btns wc-btns-primary">
+          <button className="btn btn-accept" disabled={busy} onClick={props.onAccept}>✓ {labels.accept}</button>
+          <button className="btn btn-reject" disabled={busy} onClick={props.onReject}>✗ {labels.reject}</button>
+          {props.onClarify && <button className="btn btn-specify" disabled={busy} onClick={props.onClarify}>{labels.clarify}</button>}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function WorkCard(props: {
   id: string; severity: string; category: string; title: string; scope: string;
   recommendation: string; deltaHints?: string[];
+  waiting?: boolean; onClearWaiting?: () => void;
   proposedPageMd?: string; proposedPageTitle?: string;
-  elements: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
+  elements?: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
+  sourceGroups?: {
+    slotLabel: string;
+    sourceLabel: string;
+    heading?: string;
+    statement: string;
+    fullText?: string;
+    evidence: string[];
+    locations: AuditLocation[];
+  }[];
   analysisContext?: string[];
   nextActions?: string[];
-  feedback: string; onFeedback: (v: string) => void; busy: boolean;
-  onAccept: () => void; onReject: () => void; onSpecify?: () => void;
+  positiveConsequences?: string[];
+  negativeConsequences?: string[];
+  decisionQuestion?: string;
+  decisionQuestionLabel?: string;
+  acceptLabel?: string;
+  rejectLabel?: string;
+  clarifyLabel?: string;
+  acceptConsequences?: string[];
+  rejectConsequences?: string[];
+  clarifyConsequences?: string[];
+  independenceNote?: string;
+  busy: boolean;
+  onAccept: () => void; onReject: () => void;
+  onClarify?: () => void;
   onConfluence?: () => void; onJira?: () => void; appBusy?: string;
   metaSourceType?: string; metaSourceTypes?: string[];
   clarificationPanel?: ReactNode;
   rank?: number;
-  positiveConsequences?: string[];
-  negativeConsequences?: string[];
 }): ReactNode {
   const [showMd, setShowMd] = useState(false);
+  const acceptLabel = props.acceptLabel ?? "Annehmen";
+  const rejectLabel = props.rejectLabel ?? "Ablehnen";
+  const clarifyLabel = props.clarifyLabel ?? "Klärung nötig";
+  const decisionQuestionLabel = props.decisionQuestionLabel ?? "Konkrete Entscheidungsfrage";
   // Determine the PRIMARY source — the one most likely causing the irregularity
   // Priority: metaSourceType (from detector) → first location → metaSourceTypes[0]
   const primarySrc = props.metaSourceType
-    || props.elements.flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean)[0]
+    || (props.elements ?? []).flatMap(el => el.locations.map(l => l.source_type)).filter(Boolean)[0]
     || (props.metaSourceTypes?.[0])
     || "";
   const primaryCfg = primarySrc ? (SRC_CFG[primarySrc] ?? null) : null;
@@ -1041,6 +1846,15 @@ function WorkCard(props: {
     <article className="wc" data-severity={props.severity}>
       {/* Rang-Badge */}
       {props.rank != null && <div className="wc-rank" title={`Priorität ${props.rank}`}>#{props.rank}</div>}
+      {props.waiting && (
+        <div className="wc-waiting">
+          <span className="wc-waiting-dot" />
+          <span>Wartet auf Klaerung</span>
+          {props.onClearWaiting && (
+            <button className="btn btn-outline btn-sm" onClick={props.onClearWaiting}>Warten beenden</button>
+          )}
+        </div>
+      )}
       {/* 1. Typ-Badge + Schweregrad + Primary Source */}
       <div className="wc-badges">
         <span className="badge badge-cat">{de(props.category)}</span>
@@ -1059,19 +1873,55 @@ function WorkCard(props: {
       {/* 3. Quellen mit Zitaten */}
       <div className="wc-evidence">
         <div className="wc-label">Betroffene Quellen</div>
-        {props.elements.map((el, i) => (
-          <div className="ev-block" key={i}>
-            <p className="ev-explain">{el.explanation}</p>
-            <div className="ev-locs">
-              {el.locations.map((loc) => (
-                <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
-                  <SrcBadge t={loc.source_type} />
-                  {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+        {props.sourceGroups && props.sourceGroups.length > 0 ? (
+          <div className="wc-source-grid">
+            {props.sourceGroups.map((group, i) => (
+              <section className="wc-source-panel" key={`${group.slotLabel}:${group.sourceLabel}:${i}`}>
+                <div className="wc-source-head">
+                  <span className="badge badge-cat">{group.slotLabel}</span>
+                  <strong>{group.sourceLabel}</strong>
                 </div>
-              ))}
-            </div>
+                {group.heading && <div className="wc-source-heading">{group.heading}</div>}
+                <div className="wc-source-statement">{group.statement}</div>
+                {group.fullText && group.fullText.trim() !== group.statement.trim() && (
+                  <details className="wc-source-full">
+                    <summary>Volltext anzeigen</summary>
+                    <div className="wc-source-fulltext">{group.fullText}</div>
+                  </details>
+                )}
+                {group.evidence.length > 0 && (
+                  <ul className="wc-source-evidence">
+                    {group.evidence.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                )}
+                {group.locations.length > 0 && (
+                  <div className="ev-locs">
+                    {group.locations.map((loc) => (
+                      <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                        <SrcBadge t={loc.source_type} />
+                        {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ))}
           </div>
-        ))}
+        ) : (
+          (props.elements ?? []).map((el, i) => (
+            <div className="ev-block" key={i}>
+              <p className="ev-explain">{el.explanation}</p>
+              <div className="ev-locs">
+                {el.locations.map((loc) => (
+                  <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                    <SrcBadge t={loc.source_type} />
+                    {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       {/* 4. Empfehlung mit Begründung */}
@@ -1115,6 +1965,13 @@ function WorkCard(props: {
         </div>
       )}
 
+      {props.independenceNote && (
+        <div className="wc-context">
+          <div className="wc-label">Unabhaengigkeit</div>
+          <ul><li>{props.independenceNote}</li></ul>
+        </div>
+      )}
+
       {props.nextActions && props.nextActions.length > 0 && (
         <div className="wc-context">
           <div className="wc-label">Naechste Folgeschritte</div>
@@ -1143,9 +2000,38 @@ function WorkCard(props: {
       {/* Entscheidung */}
       <div className="wc-actions">
         <div className="wc-decision-label">Ihre Entscheidung</div>
+        {props.decisionQuestion && (
+          <div className="wc-question-block wc-question-block-end">
+            <div className="wc-label">{decisionQuestionLabel}</div>
+            <div className="wc-question-text">{props.decisionQuestion}</div>
+          </div>
+        )}
+        {(props.acceptConsequences?.length || props.rejectConsequences?.length || props.clarifyConsequences?.length) && (
+          <div className="wc-action-outcomes">
+            {props.acceptConsequences && props.acceptConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-accept">
+                <div className="wc-action-card-head">{acceptLabel}</div>
+                <ul>{props.acceptConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+            {props.rejectConsequences && props.rejectConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-reject">
+                <div className="wc-action-card-head">{rejectLabel}</div>
+                <ul>{props.rejectConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+            {props.onClarify && props.clarifyConsequences && props.clarifyConsequences.length > 0 && (
+              <div className="wc-action-card wc-action-card-clarify">
+                <div className="wc-action-card-head">{clarifyLabel}</div>
+                <ul>{props.clarifyConsequences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </div>
+            )}
+          </div>
+        )}
         <div className="wc-btns wc-btns-primary">
-          <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ Annehmen</button>
-          <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ Ablehnen</button>
+          <button className="btn btn-accept" disabled={props.busy || props.waiting} onClick={props.onAccept}>✓ {acceptLabel}</button>
+          <button className="btn btn-reject" disabled={props.busy || props.waiting} onClick={props.onReject}>✗ {rejectLabel}</button>
+          {props.onClarify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onClarify}>{clarifyLabel}</button>}
         </div>
         {(props.onConfluence || props.onJira) && (
           <div className="wc-writeback">
@@ -1155,18 +2041,13 @@ function WorkCard(props: {
         )}
       </div>
 
-      {/* Präzisierung */}
-      {props.onSpecify && (
-        <div className="wc-specify-area">
-          <div className="wc-specify-label">Noch unklar? Klärung anfordern</div>
-          <p className="wc-specify-hint">Beschreiben Sie, was unklar ist oder was der Auditor genauer untersuchen soll. Nach vollständiger Klärung erhalten Sie eine überarbeitete Entscheidungskarte.</p>
-          <textarea value={props.feedback} onChange={(e) => props.onFeedback(e.target.value)} placeholder="Was genau soll geklärt oder genauer untersucht werden?" />
-          <button className="btn btn-specify" disabled={props.busy} onClick={props.onSpecify}>Klärung anfordern</button>
+      {/* Klärungsdialog */}
+      {props.clarificationPanel && (
+        <div className="wc-context">
+          <div className="wc-label">Klärung & Rückfragen</div>
+          {props.clarificationPanel}
         </div>
       )}
-
-      {/* Klärungsdialog */}
-      {props.clarificationPanel}
     </article>
   );
 }
@@ -1178,7 +2059,9 @@ function WorkCard(props: {
 function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData | null }): ReactNode {
   if (!run) return <div className="empty"><div className="empty-icon">📋</div><strong>Kein Run ausgewählt</strong></div>;
 
+  const isFastRun = run.analysis_mode === "fast";
   const decided = run.decision_packages.filter((p) => p.decision_state !== "open");
+  const decidedReviewCards = run.review_cards.filter((card) => card.decision_state !== "open");
   const resolved = run.findings.filter((f) => f.resolution_state && f.resolution_state !== "open");
   const truths = run.truths.filter((t) => t.truth_status === "active");
   const atomicFacts = [...run.atomic_facts].sort((left, right) => left.fact_key.localeCompare(right.fact_key));
@@ -1195,14 +2078,31 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
       <section className="hsection">
         <h2 className="hsection-title">Run-Zusammenfassung</h2>
         <div className="hgrid">
-          <div className="hstat"><span className="hstat-val">{run.findings.length}</span><span className="hstat-label">Befunde</span></div>
-          <div className="hstat"><span className="hstat-val">{run.decision_packages.length}</span><span className="hstat-label">Pakete</span></div>
-          <div className="hstat"><span className="hstat-val">{run.claims.length}</span><span className="hstat-label">Behauptungen</span></div>
-          <div className="hstat"><span className="hstat-val">{truths.length}</span><span className="hstat-label">Wahrheiten</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? run.review_cards.length : run.findings.length}</span><span className="hstat-label">{isFastRun ? "Review-Karten" : "Befunde"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? decidedReviewCards.length : run.decision_packages.length}</span><span className="hstat-label">{isFastRun ? "Bewertet" : "Pakete"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? (run.coverage_summary?.compared_pairs ?? 0) : run.claims.length}</span><span className="hstat-label">{isFastRun ? "Vergleichspaare" : "Behauptungen"}</span></div>
+          <div className="hstat"><span className="hstat-val">{isFastRun ? (run.coverage_summary?.prioritized_sections ?? 0) : truths.length}</span><span className="hstat-label">{isFastRun ? "Sektionen" : "Wahrheiten"}</span></div>
           <div className="hstat"><span className="hstat-val">{changes.length}</span><span className="hstat-label">Umgesetzt</span></div>
         </div>
         {run.summary && <p className="text-secondary">{run.summary}</p>}
       </section>
+
+      {isFastRun && decidedReviewCards.length > 0 && (
+        <section className="hsection">
+          <h2 className="hsection-title">Bewertete Review-Karten <span className="hsection-count">{decidedReviewCards.length}</span></h2>
+          {decidedReviewCards.map((card) => (
+            <div className="hitem" key={card.card_id}>
+              <div className="hitem-head">
+                <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+                <span className="badge badge-cat">{de(card.deviation_type)}</span>
+                <span className={`badge badge-${card.decision_state === "accepted" ? "approved" : card.decision_state === "rejected" ? "rejected" : "pending"}`}>{de(card.decision_state)}</span>
+              </div>
+              <strong>{card.title}</strong>
+              <p>{card.summary}</p>
+            </div>
+          ))}
+        </section>
+      )}
 
       {decided.length > 0 && (
         <section className="hsection">
@@ -1350,6 +2250,57 @@ function HistoryView({ run, boot }: { run: AuditRun | null; boot: BootstrapData 
               {" "}Präzision {Math.round(boot.quality_gate.delta_recompute.precision * 100)}%
             </p>
           </div>
+        </section>
+      )}
+
+      {(boot?.go_live_gate || boot?.operational_alerts) && (
+        <section className="hsection">
+          <h2 className="hsection-title">
+            Betriebsfreigabe
+            <span className="hsection-count">
+              {boot?.go_live_gate?.ready ? "bereit" : "offen"}
+            </span>
+          </h2>
+          {boot?.go_live_gate && (
+            <div className="hitem">
+              <div className="hitem-head">
+                <span className={`badge badge-${boot.go_live_gate.ready ? "approved" : "pending"}`}>
+                  {boot.go_live_gate.ready ? "Go-Live-Gate grün" : "Go-Live-Gate offen"}
+                </span>
+              </div>
+              <strong>Operative Freigabe</strong>
+              <p>
+                {boot.go_live_gate.checks.filter((check) => check.passed).length}/{boot.go_live_gate.checks.length} Gates erfüllt
+              </p>
+              {boot.go_live_gate.blocking_gates.length > 0 && (
+                <ul>
+                  {boot.go_live_gate.blocking_gates.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+          {boot?.operational_alerts && (
+            <div className="hitem">
+              <div className="hitem-head">
+                <span className={`badge badge-${boot.operational_alerts.status === "ok" ? "approved" : "pending"}`}>
+                  {boot.operational_alerts.status === "ok" ? "Operative Signale ruhig" : "Operative Signale offen"}
+                </span>
+              </div>
+              <strong>Monitoring & Recovery</strong>
+              <p>
+                Traces {boot.operational_alerts.observability_signals.trace_count} ·
+                {" "}Metriken {boot.operational_alerts.observability_signals.metric_sample_count} ·
+                {" "}Fehlerspans 24h {boot.operational_alerts.observability_signals.recent_error_span_count} ·
+                {" "}stale/reclaimbar {boot.operational_alerts.recovery_signals.reclaimable_run_count}
+              </p>
+              {(boot.operational_alerts.blockers.length > 0 || boot.operational_alerts.warnings.length > 0) && (
+                <ul>
+                  {boot.operational_alerts.blockers.map((item) => <li key={`b:${item}`}>Blocker: {item}</li>)}
+                  {boot.operational_alerts.warnings.map((item) => <li key={`w:${item}`}>Warnung: {item}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
         </section>
       )}
 

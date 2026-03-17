@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { categoryLabel, categorySortKey } from "../categoryLabels";
 import type { AuditRun, AuditFinding, AuditLocation } from "../types";
 
 type FindingsViewProps = {
@@ -53,15 +54,31 @@ export function FindingsView({
     }
     return [...filtered].sort((a, b) => {
       if (sortBy === "severity") {
-        return (SEVERITY_ORDER[a.severity] ?? 4) - (SEVERITY_ORDER[b.severity] ?? 4);
+        return (
+          (SEVERITY_ORDER[a.severity] ?? 4)
+          - (SEVERITY_ORDER[b.severity] ?? 4)
+          || categorySortKey(a.category)[0] - categorySortKey(b.category)[0]
+          || a.title.localeCompare(b.title)
+        );
       }
-      return a.category.localeCompare(b.category);
+      return (
+        categorySortKey(a.category)[0] - categorySortKey(b.category)[0]
+        || (SEVERITY_ORDER[a.severity] ?? 4) - (SEVERITY_ORDER[b.severity] ?? 4)
+        || a.title.localeCompare(b.title)
+      );
     });
   }, [run?.findings, filter, sortBy]);
 
   const categories = useMemo(() => {
     const cats = new Set(run?.findings.map((f) => f.category) ?? []);
-    return ["Alle", ...cats];
+    return [
+      "Alle",
+      ...[...cats].sort((left, right) => {
+        const [leftIdx, leftValue] = categorySortKey(left);
+        const [rightIdx, rightValue] = categorySortKey(right);
+        return leftIdx - rightIdx || leftValue.localeCompare(rightValue);
+      }),
+    ];
   }, [run?.findings]);
 
   const severityCounts = useMemo(() => {
@@ -71,6 +88,10 @@ export function FindingsView({
     }
     return counts;
   }, [run?.findings]);
+  const boundaryFindingCount = useMemo(
+    () => run?.findings.filter((finding) => finding.category === "legacy_path_gap").length ?? 0,
+    [run?.findings],
+  );
 
   function toggleExpanded(findingId: string): void {
     setExpandedFindings((prev) => {
@@ -121,6 +142,10 @@ export function FindingsView({
           <span className="metric-label">Low</span>
           <span className="metric-value">{severityCounts.low}</span>
         </div>
+        <div className="metric-card mc-copper">
+          <span className="metric-label">Boundary-Pfade</span>
+          <span className="metric-value">{boundaryFindingCount}</span>
+        </div>
       </div>
 
       {/* Filters */}
@@ -132,7 +157,7 @@ export function FindingsView({
               className={`filter-pill${filter === cat ? " active" : ""}`}
               onClick={() => setFilter(cat)}
             >
-              {cat === "Alle" ? `Alle (${run.findings.length})` : cat}
+              {cat === "Alle" ? `Alle (${run.findings.length})` : categoryLabel(cat)}
             </button>
           ))}
         </div>
@@ -175,7 +200,7 @@ export function FindingsView({
               {/* Header badges */}
               <div className="finding-card-header">
                 <span className={`badge badge-${finding.severity}`}>{finding.severity}</span>
-                <span className="badge badge-category">{finding.category}</span>
+                <span className="badge badge-category">{categoryLabel(finding.category)}</span>
                 <span className={`badge badge-state badge-${finding.resolution_state || "open"}`}>
                   {finding.resolution_state || "open"}
                 </span>

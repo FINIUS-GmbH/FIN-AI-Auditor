@@ -11,6 +11,8 @@ Das Repo ist bewusst **separat von FIN-AI** gehalten. Es wird nicht mit FIN-AI m
 
 Bis zu einer expliziten User-Entscheidung arbeitet der Auditor gegen externe Systeme strikt **read-only**. Schreibend verwendet werden darf ausschliesslich die eigene lokale SQLite-Datenbank des Auditors.
 
+Projektlokale Agenten-Regeln und Guardrails liegen in [AGENTS.md](./AGENTS.md).
+
 ## Zielbild
 
 FIN-AI Auditor soll fachliche und technische Aussagen in ein kanonisches Claim-Modell ueberfuehren und daraus:
@@ -161,6 +163,14 @@ npm run dev
 
 Das Frontend erwartet die API standardmaessig unter `http://127.0.0.1:8088`.
 
+### 5. Alle Dev-Komponenten zusammen starten
+
+```bash
+./dev.sh
+```
+
+`./dev.sh` startet Backend, Worker und Frontend gemeinsam. Ohne laufenden Worker bleiben neue Audit-Runs im Status `planned`.
+
 Der Auditor ist so vorbereitet, dass FIN-AI primaer ueber den lokalen Repo-Pfad im GitHub-Verzeichnis adressiert wird.
 Confluence wird als feste Analysequelle behandelt, Jira nur als festes Ticket-Ziel fuer spaetere Codeaenderungs-Tickets, und das Metamodell ist im Laufprofil immer aktiv.
 Bis zu einer User-Entscheidung sind alle externen Zugriffe lesend. Schreibend genutzt wird nur `data/fin_ai_auditor.db`.
@@ -181,4 +191,6 @@ Wenn `FINAI_LLM_<slot>_*`-Variablen im Auditor-Kontext vorhanden sind, kann die 
 - [Datenmodell](./docs/data-model.md)
 - [Entscheidungs-Pakete und Retrieval](./docs/decision-packages-and-retrieval.md)
 - [Delta und Aufloesungsstrategie](./docs/delta-sync-and-resolution.md)
+- [Forensische Finding-Klassen](./docs/forensic-finding-classes.md)
+- [Forensischer Reifeplan](./docs/forensic-readiness-plan.md)
 - [Roadmap](./docs/roadmap.md)

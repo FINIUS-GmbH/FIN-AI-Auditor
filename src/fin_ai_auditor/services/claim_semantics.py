@@ -89,7 +89,7 @@ _MEANINGFUL_SEMANTIC_TAGS: Final[frozenset[str]] = frozenset(
 
 
 def normalize_claim_value(value: str) -> str:
-    lowered = str(value or "").strip().casefold()
+    lowered = str(value or "").strip().casefold().replace("_", " ").replace("-", " ")
     return _WHITESPACE_PATTERN.sub(" ", lowered)
 
 
@@ -97,6 +97,10 @@ def package_scope_key(subject_key: str) -> str:
     raw_key = str(subject_key or "").strip()
     if not raw_key:
         return "General"
+    if raw_key.startswith("EvidenceChain."):
+        return "EvidenceChain"
+    if raw_key.startswith("TemporalConsistency."):
+        return "TemporalConsistency"
     if raw_key.startswith("BSM.phase."):
         return ".".join(raw_key.split(".")[:3])
     if raw_key.startswith("BSM.process"):

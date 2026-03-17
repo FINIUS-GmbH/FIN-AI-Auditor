@@ -63,11 +63,10 @@ if [[ -f "$PIDFILE_API" ]] && kill -0 "$(cat "$PIDFILE_API" 2>/dev/null)" 2>/dev
     echo "✅ API Server already running (PID $(cat "$PIDFILE_API"))"
 else
     echo "🚀 Starting API Server..."
-    nohup python -m uvicorn fin_ai_auditor.api.app:app \
-        --host 0.0.0.0 --port 8000 --reload \
+    nohup python -m fin_ai_auditor.main \
         > "$LOGDIR/api.log" 2>&1 &
     echo $! > "$PIDFILE_API"
-    wait_for_port 8000 "API Server" 15
+    wait_for_port 8088 "API Server" 15
 fi
 
 # ── 2. Worker ───────────────────────────────────────────────────────────────
@@ -75,7 +74,7 @@ if [[ -f "$PIDFILE_WORKER" ]] && kill -0 "$(cat "$PIDFILE_WORKER" 2>/dev/null)" 
     echo "✅ Worker already running (PID $(cat "$PIDFILE_WORKER"))"
 else
     echo "🚀 Starting Worker..."
-    nohup python -c "from fin_ai_auditor.worker.main import main; main()" \
+    nohup python -m fin_ai_auditor.worker.main \
         > "$LOGDIR/worker.log" 2>&1 &
     echo $! > "$PIDFILE_WORKER"
     sleep 2
@@ -95,14 +94,14 @@ else
     nohup npm run dev > "../$LOGDIR/web.log" 2>&1 &
     echo $! > "../$PIDFILE_WEB"
     cd ..
-    wait_for_port 5173 "Web Dev Server" 20
+    wait_for_port 5174 "Web Dev Server" 20
 fi
 
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  FIN-AI Auditor – All components running"
-echo "  API:    http://localhost:8000"
-echo "  Web:    http://localhost:5173"
+echo "  API:    http://127.0.0.1:8088"
+echo "  Web:    http://127.0.0.1:5174"
 echo "  Worker: background (check $LOGDIR/worker.log)"
 echo "═══════════════════════════════════════════════════"
 echo ""

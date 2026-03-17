@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from fin_ai_auditor.services.connectors import metamodel_connector
 from fin_ai_auditor.services.connectors.metamodel_connector import MetaModelConnector
 from fin_ai_auditor.services import pipeline_service as pipeline_service_module
 from fin_ai_auditor.services.causal_graph_service import build_causal_graph
+from fin_ai_auditor.services.fast_audit_service import FastAuditService
 from fin_ai_auditor.services.pipeline_cache_service import PipelineCacheService
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
 from fin_ai_auditor.services.pipeline_service import (
@@ -158,6 +160,7 @@ def test_pipeline_service_executes_with_local_repo_only(monkeypatch, tmp_path: P
     audit_service = AuditService(repository=repository, settings=settings)
     created = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -184,6 +187,525 @@ def test_pipeline_service_executes_with_local_repo_only(monkeypatch, tmp_path: P
     assert len(completed.findings) >= 1
     assert len(completed.decision_packages) >= 1
     assert any("Confluence-Collector wurde uebersprungen" in entry.message for entry in completed.analysis_log)
+
+
+def test_pipeline_service_executes_fast_audit_with_review_cards(monkeypatch, tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "src").mkdir()
+    (repo_path / "_docs").mkdir()
+    (repo_path / "src" / "statement_writer.py").write_text(
+        "\n".join(
+            [
+                "def write_statement_directly(payload):",
+                '    """Direct write without approval is optional for the statement workflow."""',
+                "    return payload",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (repo_path / "_docs" / "statement_contract.md").write_text(
+        "\n".join(
+            [
+                "# Statement Write Approval",
+                "Every statement write must pass review approval.",
+                "Manual or direct write without approval is not allowed in the documented workflow.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dump_path = tmp_path / "metamodel.json"
+    dump_path.write_text(
+        json.dumps(
+            {
+                "collected_at": "2026-03-14T00:00:00+00:00",
+                "source": "local_dump",
+                "rows": [{"phase_id": "001", "phase_name": "Scoping", "questions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=dump_path,
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    audit_service = AuditService(repository=repository, settings=settings)
+    created = audit_service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="fast",
+            target=AuditTarget(
+                local_repo_path=str(repo_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            ),
+        )
+    )
+    claimed = audit_service.claim_next_planned_run()
+    assert claimed is not None
+
+    pipeline = AuditPipelineService(
+        audit_service=audit_service,
+        settings=settings,
+        allow_remote_llm=False,
+    )
+    completed = pipeline.execute_run(run_id=created.run_id)
+
+    assert completed.status == "completed"
+    assert completed.analysis_mode == "fast"
+    assert len(completed.review_cards) >= 1
+    assert len(completed.findings) == len(completed.review_cards)
+    assert completed.decision_packages == []
+    assert completed.atomic_facts == []
+    assert completed.coverage_summary is not None
+    assert completed.coverage_summary.compared_pairs >= 1
+    assert completed.coverage_summary.source_type_counts["local_doc"] >= 1
+    assert completed.coverage_summary.skipped_sections_due_to_prioritization >= 0
+    assert isinstance(completed.coverage_summary.prioritized_scope_labels, list)
+    first_card = completed.review_cards[0]
+    assert isinstance(first_card.metadata.get("decision_question"), str)
+    assert isinstance(first_card.metadata.get("accept_consequences"), list)
+    assert isinstance(first_card.metadata.get("reject_consequences"), list)
+    assert isinstance(first_card.metadata.get("decision_lane"), str)
+    assert first_card.metadata.get("decision_independence") is True
+    assert any("Fast Audit" in (entry.message + entry.title) for entry in completed.analysis_log)
+
+
+def test_pipeline_service_fast_audit_compares_same_source_type_local_docs(monkeypatch, tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "_docs").mkdir()
+    (repo_path / "_docs" / "statement_contract.md").write_text(
+        "\n".join(
+            [
+                "# Statement Write Approval",
+                "Every statement write must pass review approval before persistence.",
+                "Manual or direct write without approval is not allowed in the documented workflow.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (repo_path / "_docs" / "legacy_statement_contract.md").write_text(
+        "\n".join(
+            [
+                "# Statement Write Approval",
+                "Legacy teams may use direct write without approval when the payload is urgent.",
+                "Review approval is optional for this path.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dump_path = tmp_path / "metamodel.json"
+    dump_path.write_text(
+        json.dumps(
+            {
+                "collected_at": "2026-03-14T00:00:00+00:00",
+                "source": "local_dump",
+                "rows": [{"phase_id": "001", "phase_name": "Scoping", "questions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=dump_path,
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    audit_service = AuditService(repository=repository, settings=settings)
+    created = audit_service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="fast",
+            target=AuditTarget(
+                local_repo_path=str(repo_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            ),
+        )
+    )
+    claimed = audit_service.claim_next_planned_run()
+    assert claimed is not None
+
+    pipeline = AuditPipelineService(
+        audit_service=audit_service,
+        settings=settings,
+        allow_remote_llm=False,
+    )
+    completed = pipeline.execute_run(run_id=created.run_id)
+
+    assert completed.status == "completed"
+    assert completed.analysis_mode == "fast"
+    assert completed.coverage_summary is not None
+    assert completed.coverage_summary.compared_pairs >= 1
+    assert completed.coverage_summary.source_type_counts["local_doc"] >= 2
+    local_doc_cards = [
+        card
+        for card in completed.review_cards
+        if card.source_a.startswith("Lokale Doku:") and card.source_b.startswith("Lokale Doku:")
+    ]
+    assert local_doc_cards
+    assert any(card.deviation_type in {"error", "misunderstanding", "obsolete"} for card in local_doc_cards)
+
+
+def test_pipeline_service_fast_audit_surfaces_bsm_benchmark_contradictions(monkeypatch, tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "models").mkdir()
+    (repo_path / "_docs").mkdir()
+    (repo_path / "models" / "finai_meta_ssot_pipeline_v2.puml").write_text(
+        "\n".join(
+            [
+                "@startuml",
+                "summarisedAnswer : Traceability-Node",
+                "summarisedAnswer : IN_RUN",
+                "summarisedAnswer bucket root in Agent 2",
+                "note right of Statement: No HITL decisions on Statements in MVP",
+                "analysisRun is run_id centric",
+                "Workflow :TO_MODIFY",
+                "@enduml",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (repo_path / "_docs" / "statuslogik.md").write_text(
+        "\n".join(
+            [
+                "# Zielbild",
+                "summarisedAnswer entfaellt und soll kein eigenstaendiges Element mehr sein.",
+                "Die Evidenzkette ist bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element.",
+                "Statement ist zentrales reviewbares Evidenzartefakt mit Accept/Reject/Modify.",
+                "FINAI_AnalysisRun -> FINAI_PhaseRun -> FINAI_ChunkPhaseRun ist fuehrend.",
+                "TO_MODIFY ist nicht Teil des Zielbilds.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dump_path = tmp_path / "metamodel.json"
+    dump_path.write_text(
+        json.dumps(
+            {
+                "collected_at": "2026-03-14T00:00:00+00:00",
+                "source": "local_dump",
+                "rows": [{"phase_id": "001", "phase_name": "Scoping", "questions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=dump_path,
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    audit_service = AuditService(repository=repository, settings=settings)
+    created = audit_service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="fast",
+            target=AuditTarget(
+                local_repo_path=str(repo_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            ),
+        )
+    )
+    claimed = audit_service.claim_next_planned_run()
+    assert claimed is not None
+
+    pipeline = AuditPipelineService(
+        audit_service=audit_service,
+        settings=settings,
+        allow_remote_llm=False,
+    )
+    completed = pipeline.execute_run(run_id=created.run_id)
+
+    subject_keys = {str(card.metadata.get("subject_key")) for card in completed.review_cards if card.metadata}
+    assert completed.status == "completed"
+    assert "summarisedAnswer.role" in subject_keys
+    assert "Statement.hitl" in subject_keys
+    assert "Run.model" in subject_keys
+    assert any(card.deviation_type == "error" for card in completed.review_cards)
+    assert any(card.metadata.get("decision_lane") == "process_scope" for card in completed.review_cards)
+
+
+def test_fast_audit_prioritizes_explicit_confluence_focus_sections(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    (tmp_path / "metamodel.json").write_text(
+        json.dumps({"collected_at": "2026-03-14T00:00:00+00:00", "source": "local_dump", "rows": []}),
+        encoding="utf-8",
+    )
+
+    documents: list[CollectedDocument] = []
+    for index in range(20):
+        snapshot = AuditSourceSnapshot(
+            source_type="github_file",
+            source_id=f"src/noisy_{index}.py",
+            content_hash=f"sha256:noisy_{index}",
+            metadata={"delta_status": "added"},
+        )
+        documents.append(
+            CollectedDocument(
+                snapshot=snapshot,
+                source_type="github_file",
+                source_id=f"src/noisy_{index}.py",
+                title=f"noisy {index}",
+                body=(
+                    "def write_rule():\n"
+                    "    \"\"\"approval review write policy owner workflow required must status phase\"\"\"\n"
+                    "    return True\n"
+                ),
+                metadata={"delta_status": "added"},
+            )
+        )
+
+    confluence_snapshot = AuditSourceSnapshot(
+        source_type="confluence_page",
+        source_id="2654501",
+        content_hash="sha256:focus-page",
+        metadata={"delta_status": "added"},
+    )
+    documents.append(
+        CollectedDocument(
+            snapshot=confluence_snapshot,
+            source_type="confluence_page",
+            source_id="2654501",
+            title="Explizit gewaehlte BSM-Seite",
+            body=(
+                "# Grundprinzipien\n"
+                "Fachlich gibt es genau zwei UI-Phasen: ingestion und genai_ba. "
+                "Der Runtime-Katalog liefert derzeit 26 BSM-Phasen; sie werden in der UI auf diese zwei Fachphasen abgebildet. "
+                "Mining bleibt bewusst ausserhalb der sichtbaren UI-Phasen."
+            ),
+            path_hint="Space FP / Grundprinzipien",
+            metadata={"delta_status": "added", "explicitly_selected": True},
+        )
+    )
+
+    service = FastAuditService(settings=settings, allow_remote_calls=False)
+
+    result = asyncio.run(service.analyze(documents=documents))
+
+    assert result.review_cards
+    assert any("Explizit gewaehlte BSM-Seite" in card.source_a for card in result.review_cards)
+    assert any(card.deviation_type == "gap" for card in result.review_cards)
+    assert any(isinstance(card.metadata.get("source_a_claim"), str) for card in result.review_cards)
+
+
+def test_fast_audit_can_compare_same_source_type_documents(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    (tmp_path / "metamodel.json").write_text(
+        json.dumps({"collected_at": "2026-03-14T00:00:00+00:00", "source": "local_dump", "rows": []}),
+        encoding="utf-8",
+    )
+
+    source_a = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/statement_contract.md", content_hash="sha256:a"),
+        source_type="local_doc",
+        source_id="docs/statement_contract.md",
+        title="Statement Write Approval",
+        body=(
+            "# Statement Write Approval\n"
+            "Every statement write must pass review approval before persistence.\n"
+            "Manual or direct write without approval is not allowed in the documented workflow.\n"
+        ),
+        path_hint="docs/statement_contract.md",
+    )
+    source_b = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/legacy_statement_contract.md", content_hash="sha256:b"),
+        source_type="local_doc",
+        source_id="docs/legacy_statement_contract.md",
+        title="Statement Write Approval Legacy",
+        body=(
+            "# Statement Write Approval\n"
+            "Legacy teams may use direct write without approval when the payload is urgent.\n"
+            "Review approval is optional for this path.\n"
+        ),
+        path_hint="docs/legacy_statement_contract.md",
+    )
+
+    service = FastAuditService(settings=settings, allow_remote_calls=False)
+
+    result = asyncio.run(service.analyze(documents=[source_a, source_b]))
+
+    assert result.coverage_summary is not None
+    assert result.coverage_summary.compared_pairs >= 1
+    assert result.coverage_summary.source_type_counts["local_doc"] == 2
+    assert len(result.coverage_summary.compared_scope_labels) >= 2
+    assert any(card.source_a.startswith("Lokale Doku:") and card.source_b.startswith("Lokale Doku:") for card in result.review_cards)
+    assert any(card.deviation_type in {"error", "misunderstanding", "obsolete"} for card in result.review_cards)
+
+
+def test_fast_audit_treats_unaligned_focus_matches_as_gap(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    (tmp_path / "metamodel.json").write_text(
+        json.dumps({"collected_at": "2026-03-14T00:00:00+00:00", "source": "local_dump", "rows": []}),
+        encoding="utf-8",
+    )
+
+    noisy_snapshot = AuditSourceSnapshot(
+        source_type="github_file",
+        source_id="src/generic_process.py",
+        content_hash="sha256:generic-process",
+        metadata={"delta_status": "added"},
+    )
+    focus_snapshot = AuditSourceSnapshot(
+        source_type="confluence_page",
+        source_id="2654501",
+        content_hash="sha256:focus-anchors",
+        metadata={"delta_status": "added"},
+    )
+    documents = [
+        CollectedDocument(
+            snapshot=noisy_snapshot,
+            source_type="github_file",
+            source_id="src/generic_process.py",
+            title="generic process",
+            body=(
+                "def process_stage():\n"
+                "    \"\"\"ingestion phase status workflow project document created source chunk traceability\"\"\"\n"
+                "    return True\n"
+            ),
+            metadata={"delta_status": "added"},
+        ),
+        CollectedDocument(
+            snapshot=focus_snapshot,
+            source_type="confluence_page",
+            source_id="2654501",
+            title="BSM E2E",
+            body=(
+                "# Grundprinzipien\n"
+                "Ingestion erzeugt Document, InputSource und Chunk. GenAI-BA arbeitet danach auf dem Projektmodell weiter. "
+                "Traceability bleibt ueber den gesamten Ablauf erhalten."
+            ),
+            path_hint="Space FP / Grundprinzipien",
+            metadata={"delta_status": "added", "explicitly_selected": True},
+        ),
+    ]
+
+    service = FastAuditService(settings=settings, allow_remote_calls=False)
+
+    result = asyncio.run(service.analyze(documents=documents))
+
+    assert result.review_cards
+    assert result.review_cards[0].deviation_type == "gap"
+    assert result.review_cards[0].metadata["is_budget_gap"] is True
+    assert result.review_cards[0].follow_up_capabilities == []
+    assert "Grundprinzipien" in result.review_cards[0].title
+    assert "decision_question" in result.review_cards[0].metadata
+    assert result.findings[0].category == "open_decision"
+
+
+def test_fast_audit_detects_bsm_benchmark_contradictions(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Settings, "_collect_external_env_map", lambda self: {})
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        mothership_url="",
+        license_key="",
+        license_tenant="",
+    )
+    (tmp_path / "metamodel.json").write_text(
+        json.dumps({"collected_at": "2026-03-14T00:00:00+00:00", "source": "local_dump", "rows": []}),
+        encoding="utf-8",
+    )
+
+    target_doc = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/statuslogik.md", content_hash="sha256:target"),
+        source_type="local_doc",
+        source_id="docs/statuslogik.md",
+        title="Zielbild Statuslogik",
+        body=(
+            "# Zielbild\n"
+            "summarisedAnswer entfaellt und soll kein eigenstaendiges Element mehr sein.\n"
+            "Die Evidenzkette ist bsmAnswer -> summarisedAnswerUnit -> Statement -> BSM_Element.\n"
+            "Statement ist zentrales reviewbares Evidenzartefakt mit Accept/Reject/Modify.\n"
+            "FINAI_AnalysisRun -> FINAI_PhaseRun -> FINAI_ChunkPhaseRun ist fuehrend.\n"
+            "TO_MODIFY ist nicht Teil des Zielbilds.\n"
+        ),
+        path_hint="docs/statuslogik.md",
+    )
+    puml_doc = CollectedDocument(
+        snapshot=AuditSourceSnapshot(
+            source_type="github_file",
+            source_id="models/finai_meta_ssot_pipeline_v2.puml",
+            content_hash="sha256:v2-puml",
+        ),
+        source_type="github_file",
+        source_id="models/finai_meta_ssot_pipeline_v2.puml",
+        title="finai_meta_ssot_pipeline_v2.puml",
+        body=(
+            "@startuml\n"
+            "summarisedAnswer : Traceability-Node\n"
+            "summarisedAnswer : IN_RUN\n"
+            "summarisedAnswer bucket root in Agent 2\n"
+            "note right of Statement: No HITL decisions on Statements in MVP\n"
+            "analysisRun is run_id centric\n"
+            "Workflow :TO_MODIFY\n"
+            "@enduml\n"
+        ),
+        path_hint="models/finai_meta_ssot_pipeline_v2.puml",
+    )
+    metamodel_doc = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="metamodel", source_id="metamodel_export.json", content_hash="sha256:meta"),
+        source_type="metamodel",
+        source_id="metamodel_export.json",
+        title="metamodel_export.json",
+        body='[{"entity_kind":"metaclass","metaclass_name":"summarisedAnswer"}]',
+        path_hint="metamodel_export.json",
+    )
+
+    service = FastAuditService(settings=settings, allow_remote_calls=False)
+
+    result = asyncio.run(service.analyze(documents=[target_doc, puml_doc, metamodel_doc]))
+
+    contradiction_cards = [card for card in result.review_cards if card.metadata.get("subject_key")]
+    contradiction_subjects = {str(card.metadata.get("subject_key")) for card in contradiction_cards}
+
+    assert result.claims
+    assert "summarisedAnswer.role" in contradiction_subjects
+    assert "Statement.hitl" in contradiction_subjects
+    assert "Run.model" in contradiction_subjects
+    assert any(card.deviation_type == "error" for card in contradiction_cards)
+    assert any(card.metadata.get("decision_lane_label") == "Prozess, Run & Scope" for card in contradiction_cards)
 
 
 def test_pipeline_cache_build_content_hash_falls_back_to_document_body() -> None:
@@ -240,6 +762,7 @@ def test_pipeline_service_can_inherit_truths_across_runs(monkeypatch, tmp_path: 
 
     first_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -255,6 +778,7 @@ def test_pipeline_service_can_inherit_truths_across_runs(monkeypatch, tmp_path: 
 
     second_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -346,6 +870,7 @@ def test_explicit_truth_triggers_next_run_but_not_third_run(monkeypatch, tmp_pat
     def _create_run() -> str:
         created = audit_service.create_run(
             payload=CreateAuditRunRequest(
+                analysis_mode="deep",
                 target=AuditTarget(
                     local_repo_path=str(repo_path),
                     github_ref="main",
@@ -860,6 +1385,7 @@ def test_pipeline_service_marks_semantic_delta_scopes_between_runs(monkeypatch, 
 
     first_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -880,6 +1406,7 @@ def test_pipeline_service_marks_semantic_delta_scopes_between_runs(monkeypatch, 
 
     second_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1003,6 +1530,7 @@ def test_pipeline_service_reuses_unchanged_repo_documents_from_cache(monkeypatch
 
     first_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1022,6 +1550,7 @@ def test_pipeline_service_reuses_unchanged_repo_documents_from_cache(monkeypatch
     monkeypatch.setattr(github_connector, "_read_text_file", fail_on_reread)
     second_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1077,6 +1606,7 @@ def test_pipeline_service_reuses_cached_claims_and_findings_for_unchanged_follow
 
     first_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1106,6 +1636,7 @@ def test_pipeline_service_reuses_cached_claims_and_findings_for_unchanged_follow
 
     second_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1187,6 +1718,7 @@ def test_pipeline_service_persists_semantic_graph_and_enriches_packages(monkeypa
 
     created = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1247,6 +1779,7 @@ def test_pipeline_service_rebuilds_finding_links_after_embedding_findings(monkey
 
     first_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1277,6 +1810,7 @@ def test_pipeline_service_rebuilds_finding_links_after_embedding_findings(monkey
 
     second_run = audit_service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(repo_path),
                 github_ref="main",
@@ -1454,6 +1988,170 @@ def test_decision_packages_group_cross_scope_findings_by_causal_group() -> None:
     statement_fact = next(item for item in atomic_facts if item.fact_key == "Statement.write_path")
     assert statement_fact.action_lane == "jira_code"
     assert statement_fact.related_package_ids == [packages[0].package_id]
+
+
+def test_decision_packages_specialize_grouped_manual_boundary_paths() -> None:
+    finding = AuditFinding(
+        severity="medium",
+        category="legacy_path_gap",
+        title="Manueller Boundary-Pfad propagiert phase_run_id nicht vollstaendig",
+        summary="bsmAnswer.field_propagation zeigt dieselbe Scope-Luecke in 2 manuellen Boundary-Pfaden.",
+        recommendation="Manuelle Antwortpfade auf einen kanonischen Entry-Point zusammenziehen.",
+        canonical_key="bsm_code_risk_group|code_field_propagation_gap|bsmAnswer.field_propagation|manual_answer_entrypoint",
+        metadata={
+            "object_key": "bsmAnswer.field_propagation",
+            "grouped_boundary_paths": True,
+            "boundary_path_type": "manual_answer_entrypoint",
+            "path_count": 2,
+            "boundary_function_names": ["BsmService.capture_ba_answer", "save_ba_answer"],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Manuelle Antwortpfade angleichen (2 Entry-Points)"
+    assert "Manuelle bsmAnswer-Entry-Points" in packages[0].scope_summary
+    assert "2 Pfade betroffen" in packages[0].scope_summary
+    assert "phase_run_id/run_id" in packages[0].recommendation_summary
+    assert "BsmService.capture_ba_answer" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_boundary_paths"] is True
+    assert packages[0].metadata["boundary_path_count"] == 2
+
+
+def test_decision_packages_specialize_grouped_manual_answer_async_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Eventual-Consistency-Luecke im manuellen Antwortpfad",
+        summary="TemporalConsistency.persist_then_enqueue zeigt dieselbe Async-Luecke in 3 Pfaden vom Typ Manueller Antwortpfad.",
+        recommendation="Persistenz und Reaggregations-Trigger fuer manuelle Antwortpfade in denselben Schutzraum ziehen oder den Schreibpfad synchron abschliessen, bevor Folgejobs enqueued werden.",
+        canonical_key="bsm_code_risk_group|code_eventual_consistency_risk|TemporalConsistency.persist_then_enqueue|manual_answer_enqueue",
+        metadata={
+            "object_key": "TemporalConsistency.persist_then_enqueue",
+            "grouped_eventual_paths": True,
+            "eventual_path_type": "manual_answer_enqueue",
+            "grouped_eventual_package_title": "Manuelle Antwortpersistenz atomisch machen",
+            "grouped_eventual_scope_label": "Manuelle Antwort-/Phase-Run-Pfade",
+            "path_count": 3,
+            "sequence_functions": [
+                "delete_manual_answer",
+                "save_phase_run_answer",
+                "update_manual_answer",
+            ],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Manuelle Antwortpersistenz atomisch machen (3 Pfade)"
+    assert "Manuelle Antwort-/Phase-Run-Pfade" in packages[0].scope_summary
+    assert "3 Pfade betroffen" in packages[0].scope_summary
+    assert "Reaggregations-Trigger" in packages[0].recommendation_summary
+    assert "save_phase_run_answer" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_eventual_paths"] is True
+    assert packages[0].metadata["eventual_path_count"] == 3
+
+
+def test_decision_packages_specialize_grouped_connector_ingestion_async_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Eventual-Consistency-Luecke im Connector-/Ingestion-Pfad",
+        summary="TemporalConsistency.persist_then_enqueue zeigt dieselbe Async-Luecke in 4 Pfaden vom Typ Connector-/Ingestion-Pfad.",
+        recommendation="Connector-nahe Persistenz und Folgejobs absichern.",
+        canonical_key="bsm_code_risk_group|code_eventual_consistency_risk|TemporalConsistency.persist_then_enqueue|connector_ingestion_enqueue",
+        metadata={
+            "object_key": "TemporalConsistency.persist_then_enqueue",
+            "grouped_eventual_paths": True,
+            "eventual_path_type": "connector_ingestion_enqueue",
+            "grouped_eventual_package_title": "Connector-/Ingestion-Pfade atomisch machen",
+            "grouped_eventual_scope_label": "Connector-/Ingestion-Pfade",
+            "path_count": 4,
+            "sequence_functions": [
+                "execute_connector_sync",
+                "ingest_stream",
+                "persist_and_ingest_binary",
+                "persist_and_ingest_markdown",
+            ],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Connector-/Ingestion-Pfade atomisch machen (4 Pfade)"
+    assert "Connector-/Ingestion-Pfade" in packages[0].scope_summary
+    assert "4 Pfade betroffen" in packages[0].scope_summary
+    assert "Connector-nahe Persistenz" in packages[0].recommendation_summary
+    assert "execute_connector_sync" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_eventual_paths"] is True
+    assert packages[0].metadata["eventual_path_count"] == 4
+
+
+def test_decision_packages_specialize_grouped_reaggregation_chain_paths() -> None:
+    finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Reaggregation unterbricht die aktive BSM-Kette",
+        summary="TemporalConsistency.supersede_then_rebuild zeigt dieselbe Kettenunterbrechung in 3 Reaggregationspfaden.",
+        recommendation="Supersede- und Rebuild-Schritte transaktional koppeln.",
+        canonical_key="bsm_code_risk_group|code_chain_interruption_risk|TemporalConsistency.supersede_then_rebuild|reaggregation_rebuild_path",
+        metadata={
+            "object_key": "TemporalConsistency.supersede_then_rebuild",
+            "grouped_chain_paths": True,
+            "chain_path_type": "reaggregation_rebuild_path",
+            "path_count": 3,
+            "sequence_functions": [
+                "materialize_statement_chain",
+                "rebuild_chain",
+                "rebuild_review_chain",
+            ],
+            "sequence_line_windows": ["L2→L3", "L41→L47"],
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(findings=[finding], claims=[], truths=[])
+
+    assert packages[0].title == "Reaggregation atomisch schliessen (3 Pfade)"
+    assert "Reaggregation-/Rebuild-Pfade" in packages[0].scope_summary
+    assert "3 Pfade betroffen" in packages[0].scope_summary
+    assert "transaktionalen Schutzraum" in packages[0].recommendation_summary
+    assert "rebuild_chain" in packages[0].recommendation_summary
+    assert packages[0].metadata["grouped_chain_paths"] is True
+    assert packages[0].metadata["chain_path_count"] == 3
+
+
+def test_decision_packages_preserve_primary_finding_priority_for_equal_bucket_packages() -> None:
+    prioritized_finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Zulu kommt spaeter alphabetisch",
+        summary="Higher priority by object key.",
+        recommendation="Prioritized recommendation.",
+        canonical_key="A.scope",
+        metadata={
+            "object_key": "A.scope",
+        },
+    )
+    alphabetic_title_finding = AuditFinding(
+        severity="high",
+        category="read_write_gap",
+        title="Alpha kommt frueher alphabetisch",
+        summary="Lower priority by object key.",
+        recommendation="Alphabetic recommendation.",
+        canonical_key="B.scope",
+        metadata={
+            "object_key": "B.scope",
+        },
+    )
+
+    packages = AuditService._build_demo_decision_packages(
+        findings=[alphabetic_title_finding, prioritized_finding],
+        claims=[],
+        truths=[],
+    )
+
+    assert packages[0].title == "Zulu kommt spaeter alphabetisch"
+    assert packages[0].metadata["primary_finding_rank"] < packages[1].metadata["primary_finding_rank"]
 
 
 def test_atomic_fact_status_update_synchronizes_packages(tmp_path: Path) -> None:

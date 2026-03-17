@@ -5,7 +5,7 @@ import {
   startAtlassianAuthorization,
   type ConfluencePageNode,
 } from "../api";
-import type { AtlassianAuthStatus, AuditTarget, BootstrapData, SourceProfile } from "../types";
+import type { AnalysisMode, AtlassianAuthStatus, AuditTarget, BootstrapData, SourceProfile } from "../types";
 
 /* ============================================================
    Tree helpers
@@ -80,12 +80,13 @@ interface RunModalProps {
   sp: SourceProfile;
   boot: BootstrapData | null;
   onClose: () => void;
-  onStart: (t: AuditTarget) => Promise<void>;
+  onStart: (t: AuditTarget, analysisMode: AnalysisMode) => Promise<void>;
   submitting: boolean;
 }
 
 export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunModalProps): ReactNode {
   const [step, setStep] = useState<Step>(ea.token_valid ? "scope" : "auth");
+  const analysisMode: AnalysisMode = "fast";
   const [authStatus, setAuthStatus] = useState<AtlassianAuthStatus>(ea);
   const [authBusy, setAuthBusy] = useState(false);
   const [authErr, setAuthErr] = useState("");
@@ -218,16 +219,19 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
   }
 
   function handleStart() {
-    void onStart({
-      github_repo_url: GITHUB_URL,
-      local_repo_path: LOCAL_PATH,
-      github_ref: GIT_REF,
-      confluence_space_keys: [spaceKey],
-      confluence_page_ids: [...selectedPages].sort(),
-      jira_project_keys: [sp.jira_project_key],
-      include_metamodel: true,
-      include_local_docs: true,
-    });
+    void onStart(
+      {
+        github_repo_url: GITHUB_URL,
+        local_repo_path: LOCAL_PATH,
+        github_ref: GIT_REF,
+        confluence_space_keys: [spaceKey],
+        confluence_page_ids: [...selectedPages].sort(),
+        jira_project_keys: [sp.jira_project_key],
+        include_metamodel: true,
+        include_local_docs: true,
+      },
+      analysisMode,
+    );
   }
 
   return (
@@ -314,10 +318,19 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
               <div className="confirm-row">{GH_SVG} <strong>FINIUS-GmbH/FIN-AI</strong> @ <code>{GIT_REF}</code></div>
               <div className="confirm-row">◆ <strong>Metamodell</strong> — lokal</div>
             </div>
+            <div className="wc-context" style={{ marginTop: 16 }}>
+              <div className="wc-label">Pruefmodus</div>
+              <p className="text-secondary" style={{ marginBottom: 8 }}>
+                <strong>Fast Audit</strong> ist in der UI der einzige sichtbare Modus.
+              </p>
+              <p className="text-muted">
+                Der Run nutzt den schnellen KI-Vergleich mit priorisierten Review-Karten und Entscheidungsvorschlaegen.
+              </p>
+            </div>
             <div className="form-actions">
               <button type="button" className="btn btn-outline" onClick={() => setStep("scope")}>← Zurück</button>
               <button type="button" className="btn btn-primary btn-lg" onClick={handleStart} disabled={submitting}>
-                {submitting ? "Lege an…" : "🚀 Audit-Run starten"}
+                {submitting ? "Lege an…" : "Fast Audit starten"}
               </button>
               <button type="button" className="btn btn-outline" onClick={onClose}>Abbrechen</button>
             </div>

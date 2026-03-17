@@ -204,6 +204,7 @@ def test_create_confluence_approval_request_stores_patch_preview(tmp_path: Path)
     service = AuditService(repository=repository, settings=settings)
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -255,6 +256,7 @@ def test_demo_completion_can_run_multiple_times_without_snapshot_id_collision(tm
 
     first = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -267,6 +269,7 @@ def test_demo_completion_can_run_multiple_times_without_snapshot_id_collision(tm
     )
     second = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -305,6 +308,7 @@ def test_audit_service_executes_approved_confluence_writeback(tmp_path: Path) ->
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -387,6 +391,7 @@ def test_confluence_writeback_failure_persists_http_classification(tmp_path: Pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -450,6 +455,7 @@ def test_audit_service_reuses_existing_confluence_writeback_idempotently(tmp_pat
     )
     run = service.create_run(
         payload=CreateAuditRunRequest(
+            analysis_mode="deep",
             target=AuditTarget(
                 local_repo_path=str(tmp_path),
                 github_ref="main",
@@ -493,3 +499,118 @@ def test_audit_service_reuses_existing_confluence_writeback_idempotently(tmp_pat
     assert len(second.implemented_changes) == 1
     assert second.approval_requests[0].status == "executed"
     assert any(entry.title == "Writeback bereits ausgefuehrt" for entry in second.analysis_log)
+
+
+def test_confluence_writeback_approval_request_blocks_disallowed_space(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        fixed_confluence_space_key="OTHER",
+        allowed_writeback_confluence_space_keys=["FINAI"],
+        confluence_home_url="https://finius.atlassian.net/wiki/spaces/OTHER/overview",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    snapshot_ids = service._build_demo_snapshot_ids()
+    demo_run = service._repository.upsert_run(
+        run=run.model_copy(
+            update={
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=snapshot_ids)[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Space OTHER ist nicht freigegeben"):
+        service.create_writeback_approval_request(
+            run_id=demo_run.run_id,
+            target_type="confluence_page_update",
+            title="Confluence-Writeback fuer Statement Contract",
+            summary="Die Seite soll nach expliziter Freigabe extern aktualisiert werden.",
+            target_url=settings.confluence_home_url,
+            related_package_ids=[],
+            related_finding_ids=[],
+            payload_preview=[],
+        )
+
+
+def test_confluence_writeback_execution_rechecks_target_policy(tmp_path: Path) -> None:
+    repository = SQLiteAuditRepository(db_path=tmp_path / "auditor.db")
+    allowed_settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        metamodel_dump_path=tmp_path / "metamodel.json",
+        fixed_confluence_space_key="FINAI",
+        allowed_writeback_confluence_space_keys=["FINAI"],
+        confluence_home_url="https://finius.atlassian.net/wiki/spaces/FINAI/overview",
+    )
+    service = AuditService(repository=repository, settings=allowed_settings)
+    run = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path=str(tmp_path),
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    demo_run = service._repository.upsert_run(
+        run=run.model_copy(
+            update={
+                "findings": [service._build_demo_findings(run=run, snapshot_ids=(snapshot_ids := service._build_demo_snapshot_ids()))[0]],
+                "source_snapshots": service._build_demo_snapshots(run=run, snapshot_ids=snapshot_ids),
+            }
+        )
+    )
+    run_with_approval = service.create_writeback_approval_request(
+        run_id=demo_run.run_id,
+        target_type="confluence_page_update",
+        title="Confluence-Writeback fuer Statement Contract",
+        summary="Die Seite soll nach expliziter Freigabe extern aktualisiert werden.",
+        target_url=allowed_settings.confluence_home_url,
+        related_package_ids=[],
+        related_finding_ids=[],
+        payload_preview=[],
+    )
+    approval_request_id = run_with_approval.approval_requests[0].approval_request_id
+    service.resolve_writeback_approval_request(
+        run_id=demo_run.run_id,
+        approval_request_id=approval_request_id,
+        decision="approve",
+        comment_text="Freigegeben",
+    )
+
+    blocked_service = AuditService(
+        repository=repository,
+        settings=Settings(
+            database_path=tmp_path / "auditor.db",
+            metamodel_dump_path=tmp_path / "metamodel.json",
+            fixed_confluence_space_key="OTHER",
+            allowed_writeback_confluence_space_keys=["OTHER"],
+            confluence_home_url="https://finius.atlassian.net/wiki/spaces/OTHER/overview",
+        ),
+        atlassian_oauth_service=_ScopedOAuthService(expected_scopes={"write:page:confluence"}),
+        confluence_page_write_connector=_FakeConfluenceWriteConnector(),
+    )
+
+    with pytest.raises(ValueError, match="Space FINAI ist nicht freigegeben"):
+        blocked_service.execute_confluence_page_writeback(
+            run_id=demo_run.run_id,
+            approval_request_id=approval_request_id,
+        )

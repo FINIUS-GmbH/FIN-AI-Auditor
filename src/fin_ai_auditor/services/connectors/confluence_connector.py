@@ -156,6 +156,7 @@ class ConfluenceKnowledgeBaseConnector:
                     notes.append(f"Confluence Space {normalized_space_key} konnte nicht gelesen werden.")
                     continue
                 selected_page_ids = _normalized_page_ids(request.page_ids)
+                explicitly_selected = bool(selected_page_ids)
                 if selected_page_ids:
                     page_rows = _collect_selected_page_rows(
                         client=client,
@@ -244,6 +245,7 @@ class ConfluenceKnowledgeBaseConnector:
                                         "ancestor_titles": ancestor_titles,
                                         "space_name": space_name,
                                         "incremental_reused": True,
+                                        "explicitly_selected": explicitly_selected,
                                     },
                                 )
                             )
@@ -343,6 +345,7 @@ class ConfluenceKnowledgeBaseConnector:
                                     block_kind="attachment",
                                 ),
                                 "incremental_reused": False,
+                                "explicitly_selected": explicitly_selected,
                             },
                         )
                     )
@@ -721,12 +724,25 @@ def _extract_page_content(
     selected_representation = "atlas_doc_format" if adf_text else "storage"
     selected_text = adf_text or storage_text
     selected_blocks = adf_blocks or storage_blocks
+    structured_block_kinds = {
+        str(block.get("kind") or "").strip()
+        for block in selected_blocks
+        if isinstance(block, dict) and str(block.get("kind") or "").strip()
+    }
     return selected_text, {
         "confluence_representation": selected_representation,
         "storage_html_present": bool(storage_html),
         "adf_present": adf_document is not None,
         "structured_blocks": selected_blocks[:80],
         "structured_block_count": len(selected_blocks),
+        "structured_block_kinds": sorted(structured_block_kinds),
+        "macro_count": _count_structured_blocks(blocks=selected_blocks, block_kind="macro"),
+        "table_row_count": _count_structured_blocks(blocks=selected_blocks, block_kind="table_row"),
+        "status_count": _count_structured_blocks(blocks=selected_blocks, block_kind="status"),
+        "code_block_count": _count_structured_blocks(blocks=selected_blocks, block_kind="code_block"),
+        "card_count": _count_structured_blocks(blocks=selected_blocks, block_kind="card"),
+        "mention_count": _count_structured_blocks(blocks=selected_blocks, block_kind="mention"),
+        "heading_count": _count_structured_blocks(blocks=selected_blocks, block_kind="heading"),
         "storage_heading_paths": [block["section_path"] for block in storage_blocks if block.get("section_path")][:18],
         "adf_heading_paths": [block["section_path"] for block in adf_blocks if block.get("section_path")][:18],
     }

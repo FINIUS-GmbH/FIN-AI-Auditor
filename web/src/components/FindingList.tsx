@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { categoryLabel } from "../categoryLabels";
+import { eventualPathMeta } from "../eventualPathMeta";
 
 import type {
   AuditAnalysisLogEntry,
@@ -466,17 +468,23 @@ export function FindingList(props: FindingListProps): JSX.Element {
             packageGroups.map(([category, packageItems]) => (
               <div className="package-group" key={category}>
                 <div className="section-subhead">
-                  <h3>{category}</h3>
+                  <h3>{categoryLabel(category)}</h3>
                   <p>{packageItems.length} Entscheidungspaket(e) in dieser Bewertungskategorie.</p>
                 </div>
                 {packageItems.map((packageItem) => (
                   <article className="finding-card package-card" key={packageItem.package_id}>
+                    {(() => {
+                      const meta = eventualPathMeta(packageItem.metadata?.eventual_path_type);
+                      return meta && packageItem.metadata?.grouped_eventual_paths ? (
+                        <div className={`eventual-chip eventual-chip-${meta.tone}`}>{`${meta.icon} ${meta.label}`}</div>
+                      ) : null;
+                    })()}
                     <div className="finding-header">
                       <div className="finding-badges">
                         <span className={`severity severity-${packageItem.severity_summary}`}>
                           {packageItem.severity_summary}
                         </span>
-                        <span className="finding-category">{packageItem.category}</span>
+                        <span className="finding-category">{categoryLabel(packageItem.category)}</span>
                         <span className={`resolution-state resolution-${packageItem.decision_state}`}>
                           {packageItem.decision_state}
                         </span>
@@ -484,6 +492,42 @@ export function FindingList(props: FindingListProps): JSX.Element {
                     </div>
                     <h3>{packageItem.title}</h3>
                     <p>{packageItem.scope_summary}</p>
+                    {packageItem.metadata?.grouped_boundary_paths ? (
+                      <div className="finding-block">
+                        <strong>Boundary-Pfade</strong>
+                        <p>
+                          {`${Number(packageItem.metadata?.boundary_path_count ?? 0)} Pfade betroffen`}
+                          {metadataStringEntries(packageItem.metadata?.boundary_function_names).length > 0
+                            ? ` · ${metadataStringEntries(packageItem.metadata?.boundary_function_names).join(", ")}`
+                            : ""}
+                        </p>
+                      </div>
+                    ) : null}
+                    {packageItem.metadata?.grouped_eventual_paths ? (
+                      <div className="finding-block">
+                        <strong>Async-Pfade</strong>
+                        <p>
+                          {`${Number(packageItem.metadata?.eventual_path_count ?? 0)} Pfade betroffen`}
+                          {metadataStringEntries(packageItem.metadata?.eventual_function_names).length > 0
+                            ? ` · ${metadataStringEntries(packageItem.metadata?.eventual_function_names).join(", ")}`
+                            : ""}
+                        </p>
+                      </div>
+                    ) : null}
+                    {packageItem.metadata?.grouped_chain_paths ? (
+                      <div className="finding-block">
+                        <strong>Reaggregation-Pfade</strong>
+                        <p>
+                          {`${Number(packageItem.metadata?.chain_path_count ?? 0)} Pfade betroffen`}
+                          {metadataStringEntries(packageItem.metadata?.chain_function_names).length > 0
+                            ? ` · ${metadataStringEntries(packageItem.metadata?.chain_function_names).join(", ")}`
+                            : ""}
+                          {metadataStringEntries(packageItem.metadata?.chain_line_windows).length > 0
+                            ? ` · ${metadataStringEntries(packageItem.metadata?.chain_line_windows).join(", ")}`
+                            : ""}
+                        </p>
+                      </div>
+                    ) : null}
                     <div className="finding-block">
                       <strong>Empfehlung</strong>
                       <p>{packageItem.recommendation_summary}</p>

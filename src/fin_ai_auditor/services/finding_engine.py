@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from itertools import combinations
-from typing import Iterable
+from typing import Callable, Iterable, Sequence
 
 from fin_ai_auditor.domain.models import AuditFinding, AuditFindingLink, TruthLedgerEntry
 from fin_ai_auditor.services.claim_semantics import (
@@ -21,6 +21,9 @@ from fin_ai_auditor.services.finding_prioritization import (
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
 
 logger = logging.getLogger(__name__)
+
+
+FindingGenerationProgressCallback = Callable[[str, int, int, str], None]
 
 
 def derive_truths(
@@ -59,6 +62,7 @@ def generate_findings(
     claim_records: list[ExtractedClaimRecord],
     inherited_truths: list[TruthLedgerEntry],
     impacted_scope_keys: set[str] | None = None,
+    progress_callback: FindingGenerationProgressCallback | None = None,
 ) -> tuple[list[AuditFinding], list[AuditFindingLink]]:
     """Spec-driven finding generation.
 
@@ -77,7 +81,8 @@ def generate_findings(
     effective_impacted_scope_keys = set(impacted_scope_keys or set())
     logger.info("finding_generation_start", extra={"event_name": "finding_generation_start", "event_payload": {"claim_groups": len(groups), "total_claims": len(claim_records), "impacted_scopes": len(effective_impacted_scope_keys)}})
 
-    for subject_key, records in groups.items():
+    total_groups = len(groups)
+    for index, (subject_key, records) in enumerate(groups.items(), start=1):
         code_records = [record for record in records if record.claim.source_type == "github_file"]
         doc_records = [
             record for record in records if record.claim.source_type in {"confluence_page", "local_doc"}
@@ -224,6 +229,15 @@ def generate_findings(
                     )
                 )
 
+        legacy_path_finding = _find_legacy_path_gap(
+            subject_key=subject_key,
+            doc_records=doc_records,
+            code_records=code_records,
+            delta_scope_affected=delta_scope_affected,
+        )
+        if legacy_path_finding is not None:
+            findings.append(legacy_path_finding)
+
         # Doc specifies something that code doesn't implement at all
         if subject_key.endswith((".write_path", ".read_path")):
             if doc_records and not code_records:
@@ -336,6 +350,13 @@ def generate_findings(
                         delta_scope_affected=delta_scope_affected,
                     )
                 )
+        if progress_callback is not None and (index % 250 == 0 or index == total_groups):
+            progress_callback(
+                "scan_subject_groups",
+                index,
+                total_groups,
+                f"{index}/{total_groups} Claim-Gruppen fuer deterministische Findings geprueft.",
+            )
 
     # ── Truth ledger conflicts ────────────────────────────────────────────
     truth_findings = _find_truth_conflicts(
@@ -344,16 +365,27 @@ def generate_findings(
         impacted_scope_keys=effective_impacted_scope_keys,
     )
     findings.extend(truth_findings)
+    if progress_callback is not None:
+        progress_callback(
+            "truth_conflicts",
+            len(truth_findings),
+            max(1, len(truth_findings)),
+            f"{len(truth_findings)} Truth-Konflikt-Findings abgeleitet.",
+        )
 
-    links = _build_links(findings=findings)
+    links = _build_links(findings=findings, progress_callback=progress_callback)
     from collections import Counter
     cat_counts = dict(Counter(f.category for f in findings))
     logger.info("finding_generation_done", extra={"event_name": "finding_generation_done", "event_payload": {"total_findings": len(findings), "links": len(links), "by_category": cat_counts}})
     return findings, links
 
 
-def build_finding_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
-    return _build_links(findings=findings)
+def build_finding_links(
+    *,
+    findings: list[AuditFinding],
+    progress_callback: FindingGenerationProgressCallback | None = None,
+) -> list[AuditFindingLink]:
+    return _build_links(findings=findings, progress_callback=progress_callback)
 
 
 def _group_claims(*, claim_records: list[ExtractedClaimRecord]) -> dict[str, list[ExtractedClaimRecord]]:
@@ -525,8 +557,1233 @@ def _find_truth_conflicts(
     return findings
 
 
+def _find_legacy_path_gap(
+    *,
+    subject_key: str,
+    doc_records: list[ExtractedClaimRecord],
+    code_records: list[ExtractedClaimRecord],
+    delta_scope_affected: bool,
+) -> AuditFinding | None:
+    if not _is_legacy_path_scope(subject_key=subject_key):
+        return None
+    all_records = [*doc_records, *code_records]
+    if len(all_records) < 2:
+        return None
+
+    substantive_doc_records = [record for record in doc_records if not _is_path_variant_support_claim(record=record)]
+    substantive_code_records = [record for record in code_records if not _is_path_variant_support_claim(record=record)]
+    substantive_records = [*substantive_doc_records, *substantive_code_records]
+    support_records = [record for record in all_records if _is_path_variant_support_claim(record=record)]
+
+    variant_records = [record for record in substantive_code_records if _is_variant_path_record(record=record)]
+    if not variant_records:
+        inferred_roles = _infer_unmarked_path_roles(
+            subject_key=subject_key,
+            primary_records=[],
+            code_records=substantive_code_records,
+        )
+        variant_records = list(inferred_roles["variant_records"])
+    else:
+        inferred_roles = {
+            "primary_records": [],
+            "variant_records": [],
+            "primary_group_keys": [],
+            "variant_group_keys": [],
+            "inference_applied": False,
+        }
+
+    primary_records = [record for record in substantive_records if _is_primary_path_record(record=record)]
+    if not primary_records and substantive_doc_records:
+        primary_records = [record for record in substantive_doc_records if not _is_variant_path_record(record=record)]
+    if inferred_roles["primary_records"]:
+        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
+    if not variant_records:
+        return None
+    if not primary_records:
+        inferred_roles = _infer_unmarked_path_roles(
+            subject_key=subject_key,
+            primary_records=[],
+            code_records=substantive_code_records,
+        )
+        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
+        variant_records = _merge_record_lists(variant_records, list(inferred_roles["variant_records"]))
+    if not primary_records:
+        return None
+    if not inferred_roles["inference_applied"]:
+        inferred_roles = _infer_unmarked_path_roles(
+            subject_key=subject_key,
+            primary_records=primary_records,
+            code_records=substantive_code_records,
+        )
+        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
+        variant_records = _merge_record_lists(variant_records, list(inferred_roles["variant_records"]))
+    if not _values_conflict(primary_records, variant_records, subject_key=subject_key):
+        return None
+
+    variant_roles = sorted(
+        {
+            _path_variant_role(record=record)
+            for record in [*variant_records, *support_records]
+            if _path_variant_role(record=record)
+        }
+    )
+    if inferred_roles["variant_group_keys"]:
+        variant_roles = sorted({*variant_roles, "inferred_variant"})
+    primary_delegate_paths = sorted(
+        {
+            _delegation_path(record=record)
+            for record in [*primary_records, *support_records]
+            if _is_primary_path_record(record=record) and _delegation_path(record=record)
+        }
+    )
+    variant_delegate_paths = sorted(
+        {
+            _delegation_path(record=record)
+            for record in [*variant_records, *support_records]
+            if _is_variant_path_record(record=record) and _delegation_path(record=record)
+        }
+    )
+    primary_family_keys = sorted(
+        {
+            family_key
+            for record in [*primary_records, *support_records]
+            if _is_primary_path_record(record=record)
+            for family_key in _path_family_keys(record=record)
+        }
+    )
+    variant_family_keys = sorted(
+        {
+            family_key
+            for record in [*variant_records, *support_records]
+            if _is_variant_path_record(record=record)
+            for family_key in _path_family_keys(record=record)
+        }
+    )
+    qualified_primary_family_keys = sorted(
+        {
+            family_key
+            for record in [*primary_records, *support_records]
+            if _is_primary_path_record(record=record)
+            for family_key in _qualified_path_family_keys(record=record)
+        }
+    )
+    qualified_variant_family_keys = sorted(
+        {
+            family_key
+            for record in [*variant_records, *support_records]
+            if _is_variant_path_record(record=record)
+            for family_key in _qualified_path_family_keys(record=record)
+        }
+    )
+    comparison_pairs = _legacy_path_comparison_pairs(
+        primary_records=primary_records,
+        variant_records=variant_records,
+    )
+    primary_family_groups = _primary_family_groups(primary_records=primary_records)
+    primary_source_ids = sorted({record.claim.source_id for record in primary_records})
+    variant_source_ids = sorted({record.claim.source_id for record in variant_records})
+
+    return _build_finding(
+        subject_key=subject_key,
+        category="legacy_path_gap",
+        severity="high",
+        title="Legacy- oder Nebenpfad ist schwaecher als der fuehrende Hauptpfad",
+        summary=(
+            "Fuer diesen Scope existiert ein als historisch, sekundaer oder veraltet "
+            "markierter Implementierungspfad, der fachlich vom fuehrenden Zielpfad abweicht. "
+            "Damit bleibt ein schwaecherer Nebenpfad im System sichtbar und potenziell nutzbar."
+        ),
+        recommendation=(
+            "Den Legacy-/Nebenpfad entweder auf den fuehrenden Pfad angleichen oder konsequent "
+            "entfernen bzw. technisch blockieren. Solange der Nebenpfad aktiv erreichbar bleibt, "
+            "ist der Scope forensisch nicht sauber konsolidiert."
+        ),
+        records=[*primary_records[:2], *variant_records[:2]],
+        delta_scope_affected=delta_scope_affected,
+        extra_metadata={
+            "legacy_path_gap": True,
+            "legacy_record_count": len(variant_records),
+            "primary_record_count": len(primary_records),
+            "variant_roles": variant_roles,
+            "inferred_path_role_inference": bool(inferred_roles["inference_applied"]),
+            "inferred_primary_group_keys": list(inferred_roles["primary_group_keys"]),
+            "inferred_variant_group_keys": list(inferred_roles["variant_group_keys"]),
+            "primary_source_ids": primary_source_ids,
+            "variant_source_ids": variant_source_ids,
+            "primary_delegate_paths": primary_delegate_paths,
+            "variant_delegate_paths": variant_delegate_paths,
+            "primary_family_keys": primary_family_keys,
+            "variant_family_keys": variant_family_keys,
+            "qualified_primary_family_keys": qualified_primary_family_keys,
+            "qualified_variant_family_keys": qualified_variant_family_keys,
+            "primary_family_groups": primary_family_groups,
+            "variant_family_groups": _variant_family_groups(comparison_pairs=comparison_pairs),
+            "variant_family_match_groups": _variant_family_match_groups(comparison_pairs=comparison_pairs),
+            "matched_primary_variant_groups": _matched_primary_variant_groups(
+                primary_family_groups=primary_family_groups,
+                comparison_pairs=comparison_pairs,
+            ),
+            "unmatched_primary_family_groups": _unmatched_primary_family_groups(
+                primary_family_groups=primary_family_groups,
+                comparison_pairs=comparison_pairs,
+            ),
+            "matched_variant_family_groups": _matched_variant_family_groups(comparison_pairs=comparison_pairs),
+            "unmatched_variant_family_groups": _unmatched_variant_family_groups(comparison_pairs=comparison_pairs),
+            "shared_variant_family_match_groups": _shared_variant_family_match_groups(comparison_pairs=comparison_pairs),
+            "isolated_variant_family_match_groups": _isolated_variant_family_match_groups(comparison_pairs=comparison_pairs),
+            "primary_variant_family_matches": _primary_variant_family_matches(
+                primary_family_groups=primary_family_groups,
+                comparison_pairs=comparison_pairs,
+            ),
+            "variant_comparisons": comparison_pairs,
+        },
+    )
+
+
 def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
     return truth.source_kind in {"user_specification", "user_acceptance"}
+
+
+def _is_legacy_path_scope(*, subject_key: str) -> bool:
+    return subject_key.endswith(
+        (
+            ".write_path",
+            ".read_path",
+            ".policy",
+            ".approval_policy",
+            ".scope_policy",
+        )
+    )
+
+
+def _is_variant_path_record(*, record: ExtractedClaimRecord) -> bool:
+    claim = record.claim
+    assertion_status = str(getattr(claim, "assertion_status", "asserted") or "asserted").strip()
+    source_authority = str(getattr(claim, "source_authority", "") or "").strip()
+    metadata = getattr(claim, "metadata", {}) or {}
+    temporal_status = str(metadata.get("source_temporal_status") or "").strip()
+    governance_level = str(metadata.get("source_governance_level") or "").strip()
+    role = _path_variant_role(record=record)
+    return (
+        role in {"legacy", "fallback", "compat", "secondary"}
+        or
+        assertion_status in {"deprecated", "secondary_only", "not_ssot"}
+        or source_authority == "historical"
+        or temporal_status == "historical"
+        or governance_level == "historical"
+    )
+
+
+def _is_primary_path_record(*, record: ExtractedClaimRecord) -> bool:
+    role = _path_variant_role(record=record)
+    if role == "primary":
+        return True
+    if record.claim.source_type in {"confluence_page", "local_doc", "metamodel"} and not _is_variant_path_record(record=record):
+        return True
+    return False
+
+
+def _is_path_variant_support_claim(*, record: ExtractedClaimRecord) -> bool:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    return bool(metadata.get("path_variant_claim")) or record.claim.predicate in {
+        "implemented_path_variant_role",
+        "implemented_path_delegate",
+        "implemented_path_family_group",
+        "implemented_path_strength_score",
+        "implemented_path_inference_signal",
+    }
+
+
+def _path_variant_role(*, record: ExtractedClaimRecord) -> str:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    role = str(metadata.get("path_variant_role") or "").strip()
+    if role:
+        return role
+    if record.claim.predicate == "implemented_path_variant_role":
+        normalized = normalize_claim_value(record.claim.normalized_value)
+        if normalized in {"primary", "secondary", "legacy", "fallback", "compat"}:
+            return normalized
+    return ""
+
+
+def _delegation_path(*, record: ExtractedClaimRecord) -> str:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    delegation_path = str(metadata.get("delegation_path") or "").strip()
+    if delegation_path:
+        return delegation_path
+    static_call_graph_paths = metadata.get("static_call_graph_paths")
+    if isinstance(static_call_graph_paths, list):
+        for item in static_call_graph_paths:
+            candidate = str(item or "").strip()
+            if candidate:
+                return candidate
+    if record.claim.predicate == "implemented_path_delegate":
+        return str(record.claim.normalized_value or "").strip()
+    return ""
+
+
+def _delegation_paths(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values: list[str] = []
+    direct = str(metadata.get("delegation_path") or "").strip()
+    if direct:
+        values.append(direct)
+    static_call_graph_paths = metadata.get("static_call_graph_paths")
+    if isinstance(static_call_graph_paths, list):
+        values.extend(str(item or "").strip() for item in static_call_graph_paths if str(item or "").strip())
+    if record.claim.predicate == "implemented_path_delegate":
+        delegate = str(record.claim.normalized_value or "").strip()
+        if delegate:
+            values.append(delegate)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _qualified_delegation_paths(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values: list[str] = []
+    qualified_paths = metadata.get("static_call_graph_qualified_paths")
+    if isinstance(qualified_paths, list):
+        values.extend(str(item or "").strip() for item in qualified_paths if str(item or "").strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _path_family_keys(*, record: ExtractedClaimRecord) -> list[str]:
+    if record.claim.predicate == "implemented_path_family_group":
+        return [
+            value
+            for value in str(record.claim.normalized_value or "").split("|")
+            if str(value).strip()
+        ]
+    adapter_keys = _adapter_family_keys_from_metadata(record=record)
+    if adapter_keys:
+        return adapter_keys
+    family_keys: list[str] = []
+    for path in _delegation_paths(record=record):
+        for segment in str(path or "").split("->"):
+            part = str(segment or "").strip()
+            if not part:
+                continue
+            symbol = part.split(".", 1)[0].strip()
+            if symbol:
+                family_keys.append(symbol)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for family_key in family_keys:
+        if family_key in seen:
+            continue
+        seen.add(family_key)
+        deduped.append(family_key)
+    return deduped
+
+
+def _qualified_path_family_keys(*, record: ExtractedClaimRecord) -> list[str]:
+    if record.claim.predicate == "implemented_path_family_group":
+        return [
+            value
+            for value in str(record.claim.normalized_value or "").split("|")
+            if "." in str(value)
+        ]
+    qualified_adapter_keys = _qualified_adapter_family_keys_from_metadata(record=record)
+    if qualified_adapter_keys:
+        return qualified_adapter_keys
+    family_keys: list[str] = []
+    qualified_paths = _qualified_delegation_paths(record=record)
+    if not qualified_paths:
+        return []
+    for path in qualified_paths:
+        for segment in str(path or "").split("->"):
+            part = str(segment or "").strip()
+            if not part:
+                continue
+            symbol = part.rsplit(".", 1)[0].strip() if "." in part else part
+            if symbol:
+                family_keys.append(symbol)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for family_key in family_keys:
+        if family_key in seen:
+            continue
+        seen.add(family_key)
+        deduped.append(family_key)
+    return deduped
+
+
+def _variant_family_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for comparison in comparison_pairs:
+        variant_role = str(comparison.get("variant_role") or "").strip() or "variant"
+        family_group = grouped.setdefault(
+            variant_role,
+            {
+                "variant_role": variant_role,
+                "primary_family_keys": [],
+                "variant_family_keys": [],
+                "qualified_primary_family_keys": [],
+                "qualified_variant_family_keys": [],
+                "variant_source_ids": [],
+                "family_overlap_keys": [],
+                "qualified_family_overlap_keys": [],
+                "family_alignment": "isolated_service_family",
+            },
+        )
+        family_group["primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["primary_family_keys"]],
+                *[str(item) for item in comparison.get("primary_family_keys", [])],
+            }
+        )
+        family_group["variant_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["variant_family_keys"]],
+                *[str(item) for item in comparison.get("variant_family_keys", [])],
+            }
+        )
+        family_group["qualified_primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["qualified_primary_family_keys"]],
+                *[str(item) for item in comparison.get("qualified_primary_family_keys", [])],
+            }
+        )
+        family_group["qualified_variant_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["qualified_variant_family_keys"]],
+                *[str(item) for item in comparison.get("qualified_variant_family_keys", [])],
+            }
+        )
+        family_group["variant_source_ids"] = sorted(
+            {
+                *[str(item) for item in family_group["variant_source_ids"]],
+                str(comparison.get("variant_source_id") or ""),
+            }
+        )
+        overlap = sorted(
+            {
+                *[str(item) for item in family_group["family_overlap_keys"]],
+                *[str(item) for item in comparison.get("family_overlap_keys", [])],
+            }
+        )
+        qualified_overlap = sorted(
+            {
+                *[str(item) for item in family_group["qualified_family_overlap_keys"]],
+                *[str(item) for item in comparison.get("qualified_family_overlap_keys", [])],
+            }
+        )
+        family_group["family_overlap_keys"] = overlap
+        family_group["qualified_family_overlap_keys"] = qualified_overlap
+        family_group["family_alignment"] = _service_family_alignment(
+            family_overlap_keys=overlap,
+            qualified_family_overlap_keys=qualified_overlap,
+        )
+    return list(grouped.values())
+
+
+def _variant_family_match_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for comparison in comparison_pairs:
+        group_key = _variant_group_key_for_comparison(comparison=comparison)
+        family_group = grouped.setdefault(
+            group_key,
+            {
+                "variant_group_key": group_key,
+                "variant_role": str(comparison.get("variant_role") or "").strip() or "variant",
+                "primary_group_keys": [],
+                "primary_source_ids": [],
+                "variant_source_ids": [],
+                "primary_family_keys": [],
+                "variant_family_keys": [],
+                "qualified_primary_family_keys": [],
+                "qualified_variant_family_keys": [],
+                "family_overlap_keys": [],
+                "qualified_family_overlap_keys": [],
+                "family_alignment_states": [],
+                "chain_similarity_scores": [],
+                "chain_alignment_prefixes": [],
+                "chain_alignment_suffixes": [],
+            },
+        )
+        family_group["primary_group_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["primary_group_keys"]],
+                str(comparison.get("primary_group_key") or ""),
+            }
+        )
+        family_group["primary_source_ids"] = sorted(
+            {
+                *[str(item) for item in family_group["primary_source_ids"]],
+                str(comparison.get("primary_source_id") or ""),
+            }
+        )
+        family_group["variant_source_ids"] = sorted(
+            {
+                *[str(item) for item in family_group["variant_source_ids"]],
+                str(comparison.get("variant_source_id") or ""),
+            }
+        )
+        family_group["primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["primary_family_keys"]],
+                *[str(item) for item in comparison.get("primary_family_keys", [])],
+            }
+        )
+        family_group["variant_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["variant_family_keys"]],
+                *[str(item) for item in comparison.get("variant_family_keys", [])],
+            }
+        )
+        family_group["qualified_primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["qualified_primary_family_keys"]],
+                *[str(item) for item in comparison.get("qualified_primary_family_keys", [])],
+            }
+        )
+        family_group["qualified_variant_family_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["qualified_variant_family_keys"]],
+                *[str(item) for item in comparison.get("qualified_variant_family_keys", [])],
+            }
+        )
+        family_group["family_overlap_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["family_overlap_keys"]],
+                *[str(item) for item in comparison.get("family_overlap_keys", [])],
+            }
+        )
+        family_group["qualified_family_overlap_keys"] = sorted(
+            {
+                *[str(item) for item in family_group["qualified_family_overlap_keys"]],
+                *[str(item) for item in comparison.get("qualified_family_overlap_keys", [])],
+            }
+        )
+        family_group["family_alignment_states"] = sorted(
+            {
+                *[str(item) for item in family_group["family_alignment_states"]],
+                str(comparison.get("family_alignment") or ""),
+            }
+        )
+        score = tuple(int(item) for item in comparison.get("qualified_chain_similarity", []))
+        if score and score not in family_group["chain_similarity_scores"]:
+            family_group["chain_similarity_scores"].append(score)
+            family_group["chain_similarity_scores"] = sorted(
+                family_group["chain_similarity_scores"],
+                reverse=True,
+            )
+        prefix = tuple(str(item) for item in comparison.get("chain_alignment_prefix", []))
+        if prefix and prefix not in family_group["chain_alignment_prefixes"]:
+            family_group["chain_alignment_prefixes"].append(prefix)
+            family_group["chain_alignment_prefixes"] = sorted(family_group["chain_alignment_prefixes"])
+        suffix = tuple(str(item) for item in comparison.get("chain_alignment_suffix", []))
+        if suffix and suffix not in family_group["chain_alignment_suffixes"]:
+            family_group["chain_alignment_suffixes"].append(suffix)
+            family_group["chain_alignment_suffixes"] = sorted(family_group["chain_alignment_suffixes"])
+    normalized: list[dict[str, object]] = []
+    for group in grouped.values():
+        normalized.append(
+            {
+                **group,
+                "chain_similarity_scores": [list(score) for score in group["chain_similarity_scores"]],
+                "chain_alignment_prefixes": [list(prefix) for prefix in group["chain_alignment_prefixes"]],
+                "chain_alignment_suffixes": [list(suffix) for suffix in group["chain_alignment_suffixes"]],
+            }
+        )
+    return sorted(normalized, key=lambda group: str(group.get("variant_group_key") or ""))
+
+
+def _primary_family_groups(*, primary_records: Sequence[ExtractedClaimRecord]) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for record in primary_records:
+        group_key = _primary_group_key(record=record)
+        group = grouped.setdefault(
+            group_key,
+            {
+                "primary_group_key": group_key,
+                "primary_source_ids": [],
+                "primary_source_types": [],
+                "primary_roles": [],
+                "primary_values": [],
+                "primary_delegate_paths": [],
+                "primary_family_keys": [],
+                "qualified_primary_family_keys": [],
+            },
+        )
+        group["primary_source_ids"] = sorted(
+            {
+                *[str(item) for item in group["primary_source_ids"]],
+                record.claim.source_id,
+            }
+        )
+        group["primary_source_types"] = sorted(
+            {
+                *[str(item) for item in group["primary_source_types"]],
+                str(record.claim.source_type),
+            }
+        )
+        role = _path_variant_role(record=record) or "documented_primary"
+        group["primary_roles"] = sorted({*[str(item) for item in group["primary_roles"]], role})
+        group["primary_values"] = sorted(
+            {
+                *[str(item) for item in group["primary_values"]],
+                str(record.claim.normalized_value or "").strip(),
+            }
+        )
+        group["primary_delegate_paths"] = sorted(
+            {
+                *[str(item) for item in group["primary_delegate_paths"]],
+                *[str(item) for item in _delegation_paths(record=record)],
+            }
+        )
+        group["primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in group["primary_family_keys"]],
+                *[str(item) for item in _path_family_keys(record=record)],
+            }
+        )
+        group["qualified_primary_family_keys"] = sorted(
+            {
+                *[str(item) for item in group["qualified_primary_family_keys"]],
+                *[str(item) for item in _qualified_path_family_keys(record=record)],
+            }
+        )
+    return sorted(
+        grouped.values(),
+        key=lambda group: (
+            str(group.get("primary_group_key") or ""),
+            str(group.get("primary_source_ids", [""])[0] if group.get("primary_source_ids") else ""),
+        ),
+    )
+
+
+def _matched_variant_family_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        group
+        for group in _variant_family_groups(comparison_pairs=comparison_pairs)
+        if str(group.get("family_alignment") or "").startswith("shared_")
+    ]
+
+
+def _unmatched_variant_family_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        group
+        for group in _variant_family_groups(comparison_pairs=comparison_pairs)
+        if not str(group.get("family_alignment") or "").startswith("shared_")
+    ]
+
+
+def _shared_variant_family_match_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        group
+        for group in _variant_family_match_groups(comparison_pairs=comparison_pairs)
+        if any(str(item).startswith("shared_") for item in group.get("family_alignment_states", []))
+    ]
+
+
+def _isolated_variant_family_match_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        group
+        for group in _variant_family_match_groups(comparison_pairs=comparison_pairs)
+        if all(str(item) == "isolated_service_family" for item in group.get("family_alignment_states", []))
+    ]
+
+
+def _legacy_path_comparison_pairs(
+    *,
+    primary_records: Sequence[ExtractedClaimRecord],
+    variant_records: Sequence[ExtractedClaimRecord],
+) -> list[dict[str, object]]:
+    primary_candidates = sorted(
+        primary_records,
+        key=lambda record: (
+            0 if record.claim.source_type in {"confluence_page", "local_doc", "metamodel"} else 1,
+            0 if _path_variant_role(record=record) == "primary" else 1,
+            record.claim.source_id,
+        ),
+    )
+    comparisons: list[dict[str, object]] = []
+    for variant in sorted(
+        variant_records,
+        key=lambda record: (
+            _path_variant_role(record=record),
+            record.claim.source_id,
+            record.claim.normalized_value,
+        ),
+    ):
+        baseline = _select_primary_baseline_for_variant(
+            primary_candidates=primary_candidates,
+            variant_record=variant,
+        )
+        if baseline is None:
+            continue
+        family_overlap_keys = _family_overlap_keys(
+            primary_family_keys=_path_family_keys(record=baseline),
+            variant_family_keys=_path_family_keys(record=variant),
+        )
+        qualified_family_overlap_keys = _family_overlap_keys(
+            primary_family_keys=_qualified_path_family_keys(record=baseline),
+            variant_family_keys=_qualified_path_family_keys(record=variant),
+        )
+        comparisons.append(
+            {
+                "primary_group_key": _primary_group_key(record=baseline),
+                "primary_source_id": baseline.claim.source_id,
+                "primary_source_type": baseline.claim.source_type,
+                "primary_role": _path_variant_role(record=baseline) or "documented_primary",
+                "primary_value": baseline.claim.normalized_value,
+                "primary_delegate_path": _delegation_path(record=baseline),
+                "primary_family_keys": _path_family_keys(record=baseline),
+                "qualified_primary_family_keys": _qualified_path_family_keys(record=baseline),
+                "variant_source_id": variant.claim.source_id,
+                "variant_source_type": variant.claim.source_type,
+                "variant_role": _path_variant_role(record=variant),
+                "variant_value": variant.claim.normalized_value,
+                "variant_delegate_path": _delegation_path(record=variant),
+                "variant_family_keys": _path_family_keys(record=variant),
+                "qualified_variant_family_keys": _qualified_path_family_keys(record=variant),
+                "family_overlap_keys": family_overlap_keys,
+                "qualified_family_overlap_keys": qualified_family_overlap_keys,
+                "qualified_chain_similarity": list(
+                    _qualified_chain_similarity_score(
+                        primary_record=baseline,
+                        variant_record=variant,
+                    )
+                ),
+                "chain_alignment_prefix": _best_chain_alignment(
+                    primary_record=baseline,
+                    variant_record=variant,
+                )["prefix"],
+                "chain_alignment_suffix": _best_chain_alignment(
+                    primary_record=baseline,
+                    variant_record=variant,
+                )["suffix"],
+                "family_alignment": _service_family_alignment(
+                    family_overlap_keys=family_overlap_keys,
+                    qualified_family_overlap_keys=qualified_family_overlap_keys,
+                ),
+            }
+        )
+    return comparisons
+
+
+def _matched_primary_variant_groups(
+    *,
+    primary_family_groups: Sequence[dict[str, object]],
+    comparison_pairs: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    comparisons_by_group: dict[str, list[dict[str, object]]] = {}
+    for comparison in comparison_pairs:
+        group_key = str(comparison.get("primary_group_key") or "").strip()
+        if not group_key:
+            continue
+        comparisons_by_group.setdefault(group_key, []).append(comparison)
+    matched_groups: list[dict[str, object]] = []
+    for group in primary_family_groups:
+        group_key = str(group.get("primary_group_key") or "").strip()
+        matches = comparisons_by_group.get(group_key, [])
+        if not matches:
+            continue
+        matched_groups.append(
+            {
+                **group,
+                "variant_roles": sorted({str(match.get("variant_role") or "").strip() for match in matches if str(match.get("variant_role") or "").strip()}),
+                "variant_source_ids": sorted({str(match.get("variant_source_id") or "").strip() for match in matches if str(match.get("variant_source_id") or "").strip()}),
+                "variant_family_keys": sorted({key for match in matches for key in [str(item) for item in match.get("variant_family_keys", [])]}),
+                "qualified_variant_family_keys": sorted({key for match in matches for key in [str(item) for item in match.get("qualified_variant_family_keys", [])]}),
+                "family_alignment_states": sorted({str(match.get("family_alignment") or "").strip() for match in matches if str(match.get("family_alignment") or "").strip()}),
+                "comparison_count": len(matches),
+            }
+        )
+    return sorted(
+        matched_groups,
+        key=lambda group: (
+            str(group.get("primary_group_key") or ""),
+            str(group.get("primary_source_ids", [""])[0] if group.get("primary_source_ids") else ""),
+        ),
+    )
+
+
+def _primary_variant_family_matches(
+    *,
+    primary_family_groups: Sequence[dict[str, object]],
+    comparison_pairs: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    variant_match_groups = _variant_family_match_groups(comparison_pairs=comparison_pairs)
+    grouped_variant_matches: dict[str, list[dict[str, object]]] = {}
+    for variant_group in variant_match_groups:
+        for primary_group_key in variant_group.get("primary_group_keys", []):
+            grouped_variant_matches.setdefault(str(primary_group_key), []).append(variant_group)
+    matches: list[dict[str, object]] = []
+    for primary_group in primary_family_groups:
+        primary_group_key = str(primary_group.get("primary_group_key") or "")
+        variant_groups = sorted(
+            grouped_variant_matches.get(primary_group_key, []),
+            key=lambda group: str(group.get("variant_group_key") or ""),
+        )
+        matches.append(
+            {
+                **primary_group,
+                "matched_variant_group_keys": [
+                    str(group.get("variant_group_key") or "")
+                    for group in variant_groups
+                    if str(group.get("variant_group_key") or "")
+                ],
+                "matched_variant_roles": sorted(
+                    {
+                        str(group.get("variant_role") or "")
+                        for group in variant_groups
+                        if str(group.get("variant_role") or "")
+                    }
+                ),
+                "matched_variant_source_ids": sorted(
+                    {
+                        source_id
+                        for group in variant_groups
+                        for source_id in [str(item) for item in group.get("variant_source_ids", [])]
+                    }
+                ),
+                "match_group_count": len(variant_groups),
+            }
+        )
+    return sorted(matches, key=lambda group: str(group.get("primary_group_key") or ""))
+
+
+def _unmatched_primary_family_groups(
+    *,
+    primary_family_groups: Sequence[dict[str, object]],
+    comparison_pairs: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    matched_group_keys = {
+        str(comparison.get("primary_group_key") or "").strip()
+        for comparison in comparison_pairs
+        if str(comparison.get("primary_group_key") or "").strip()
+    }
+    return [
+        group
+        for group in primary_family_groups
+        if str(group.get("primary_group_key") or "").strip() not in matched_group_keys
+    ]
+
+
+def _infer_unmarked_path_roles(
+    *,
+    subject_key: str,
+    primary_records: Sequence[ExtractedClaimRecord],
+    code_records: Sequence[ExtractedClaimRecord],
+) -> dict[str, object]:
+    explicit_record_ids = {
+        record.claim.claim_id
+        for record in [*primary_records, *code_records]
+        if _is_primary_path_record(record=record) or _is_variant_path_record(record=record)
+    }
+    candidate_records = [
+        record
+        for record in code_records
+        if record.claim.claim_id not in explicit_record_ids
+    ]
+    groups = _path_record_groups(records=candidate_records)
+    if len(groups) < 2:
+        return {
+            "primary_records": [],
+            "variant_records": [],
+            "primary_group_keys": [],
+            "variant_group_keys": [],
+            "inference_applied": False,
+        }
+
+    baseline_records = list(primary_records)
+    primary_groups: list[dict[str, object]] = []
+    if baseline_records:
+        primary_score = max(_path_strength_score(record=record) for record in baseline_records)
+        primary_groups = [
+            group
+            for group in groups
+            if int(group["strength_score"]) >= primary_score
+        ]
+    else:
+        strongest_score = max(int(group["strength_score"]) for group in groups)
+        weakest_score = min(int(group["strength_score"]) for group in groups)
+        if strongest_score == weakest_score:
+            return {
+                "primary_records": [],
+                "variant_records": [],
+                "primary_group_keys": [],
+                "variant_group_keys": [],
+                "inference_applied": False,
+            }
+        primary_groups = [group for group in groups if int(group["strength_score"]) == strongest_score]
+        baseline_records = [record for group in primary_groups for record in group["records"]]
+
+    inferred_variant_groups: list[dict[str, object]] = []
+    baseline_strength = max(_path_strength_score(record=record) for record in baseline_records) if baseline_records else 0
+    for group in groups:
+        if group in primary_groups:
+            continue
+        group_records = list(group["records"])
+        group_strength = int(group["strength_score"])
+        if not _values_conflict(baseline_records, group_records, subject_key=subject_key):
+            continue
+        if group_strength >= baseline_strength and not _group_looks_noncanonical(group=group):
+            continue
+        inferred_variant_groups.append(group)
+
+    if not inferred_variant_groups:
+        return {
+            "primary_records": [record for group in primary_groups for record in group["records"]] if not primary_records else [],
+            "variant_records": [],
+            "primary_group_keys": [str(group["group_key"]) for group in primary_groups] if not primary_records else [],
+            "variant_group_keys": [],
+            "inference_applied": bool(primary_groups and not primary_records),
+        }
+
+    return {
+        "primary_records": [record for group in primary_groups for record in group["records"]] if not primary_records else [],
+        "variant_records": [record for group in inferred_variant_groups for record in group["records"]],
+        "primary_group_keys": [str(group["group_key"]) for group in primary_groups],
+        "variant_group_keys": [str(group["group_key"]) for group in inferred_variant_groups],
+        "inference_applied": True,
+    }
+
+
+def _path_record_groups(*, records: Sequence[ExtractedClaimRecord]) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for record in records:
+        group_key = _record_family_group_key(record=record)
+        group = grouped.setdefault(
+            group_key,
+            {
+                "group_key": group_key,
+                "records": [],
+                "delegate_paths": set(),
+                "qualified_family_keys": set(),
+                "family_keys": set(),
+                "strength_score": 0,
+            },
+        )
+        group["records"].append(record)
+        group["strength_score"] = max(int(group["strength_score"]), _path_strength_score(record=record))
+        group["delegate_paths"].update(_delegation_paths(record=record))
+        group["qualified_family_keys"].update(_qualified_path_family_keys(record=record))
+        group["family_keys"].update(_path_family_keys(record=record))
+    normalized: list[dict[str, object]] = []
+    for group in grouped.values():
+        normalized.append(
+            {
+                **group,
+                "delegate_paths": sorted(str(item) for item in group["delegate_paths"]),
+                "qualified_family_keys": sorted(str(item) for item in group["qualified_family_keys"]),
+                "family_keys": sorted(str(item) for item in group["family_keys"]),
+            }
+        )
+    return sorted(normalized, key=lambda group: str(group["group_key"]))
+
+
+def _record_family_group_key(*, record: ExtractedClaimRecord) -> str:
+    if record.claim.predicate == "implemented_path_family_group":
+        return str(record.claim.normalized_value or "").strip()
+    qualified_family_keys = _qualified_path_family_keys(record=record)
+    if qualified_family_keys:
+        return "|".join(qualified_family_keys)
+    family_keys = _path_family_keys(record=record)
+    if family_keys:
+        return "|".join(family_keys)
+    delegate_paths = _delegation_paths(record=record)
+    if delegate_paths:
+        return "|".join(delegate_paths)
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    section_path = str(metadata.get("evidence_section_path") or metadata.get("claim_section_path") or "").strip()
+    if section_path:
+        return section_path
+    return f"{record.claim.source_id}:{record.claim.predicate}"
+
+
+def _qualified_adapter_family_keys_from_metadata(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values: list[str] = []
+    for key in ("repository_adapter_symbols", "driver_adapter_symbols", "constructor_injection_bindings"):
+        raw = metadata.get(key)
+        if isinstance(raw, list):
+            values.extend(str(item or "").strip() for item in raw if str(item or "").strip())
+        elif raw:
+            values.append(str(raw).strip())
+    family_keys: list[str] = []
+    for value in values:
+        if "." in value:
+            family_keys.append(value.rsplit(".", 1)[0].strip())
+        else:
+            family_keys.append(value)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for key in family_keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _adapter_family_keys_from_metadata(*, record: ExtractedClaimRecord) -> list[str]:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    values: list[str] = []
+    for key in ("repository_adapters", "driver_adapters", "constructor_injection_bindings"):
+        raw = metadata.get(key)
+        if isinstance(raw, list):
+            values.extend(str(item or "").strip() for item in raw if str(item or "").strip())
+        elif raw:
+            values.append(str(raw).strip())
+    family_keys: list[str] = []
+    for value in values:
+        symbol = value.split(".", 1)[0].strip()
+        if symbol:
+            family_keys.append(symbol)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for key in family_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _path_strength_score(*, record: ExtractedClaimRecord) -> int:
+    metadata = getattr(record.claim, "metadata", {}) or {}
+    metadata_score = metadata.get("path_strength_score")
+    if isinstance(metadata_score, int):
+        return metadata_score
+    if isinstance(metadata_score, str) and metadata_score.lstrip("-").isdigit():
+        return int(metadata_score)
+    if record.claim.predicate == "implemented_path_strength_score":
+        normalized = str(record.claim.normalized_value or "").strip()
+        if normalized.lstrip("-").isdigit():
+            return int(normalized)
+    descriptor = " ".join(
+        [
+            str(record.claim.normalized_value or ""),
+            str(record.claim.subject_key or ""),
+            str(record.claim.predicate or ""),
+            *[str(item) for item in _delegation_paths(record=record)],
+            *[str(item) for item in _qualified_delegation_paths(record=record)],
+        ]
+    ).replace("_", " ").replace("-", " ").casefold()
+    score = 0
+    positive_tokens = (
+        "approval required",
+        "approval",
+        "guarded",
+        "review",
+        "phase_run_id",
+        "audit envelope",
+        "ssot",
+        "canonical",
+        "validated",
+    )
+    negative_tokens = (
+        "without approval",
+        "direct write",
+        "direct publish",
+        "bypass",
+        "manual",
+        "compat",
+        "legacy",
+        "fallback",
+        "degraded",
+        "v1",
+        "raw",
+    )
+    for token in positive_tokens:
+        if token in descriptor:
+            score += 2
+    for token in negative_tokens:
+        if token in descriptor:
+            score -= 2
+    if "primary" in descriptor:
+        score += 1
+    if "secondary" in descriptor:
+        score -= 1
+    return score
+
+
+def _group_looks_noncanonical(*, group: dict[str, object]) -> bool:
+    descriptor = " ".join(
+        [
+            str(group.get("group_key") or ""),
+            *[str(item) for item in group.get("delegate_paths", [])],
+        ]
+    ).casefold()
+    return any(
+        token in descriptor
+        for token in ("legacy", "compat", "fallback", "degraded", "secondary", "bypass", "direct", "manual", "v1")
+    )
+
+
+def _merge_record_lists(
+    left: Sequence[ExtractedClaimRecord],
+    right: Sequence[ExtractedClaimRecord],
+) -> list[ExtractedClaimRecord]:
+    merged: dict[str, ExtractedClaimRecord] = {}
+    for record in [*left, *right]:
+        merged.setdefault(record.claim.claim_id, record)
+    return list(merged.values())
+
+
+def _family_overlap_keys(*, primary_family_keys: Sequence[str], variant_family_keys: Sequence[str]) -> list[str]:
+    return sorted(set(primary_family_keys).intersection(variant_family_keys))
+
+
+def _variant_group_key_for_comparison(*, comparison: dict[str, object]) -> str:
+    variant_role = str(comparison.get("variant_role") or "").strip() or "variant"
+    qualified_keys = [str(item) for item in comparison.get("qualified_variant_family_keys", []) if str(item)]
+    if qualified_keys:
+        return f"{variant_role}|{'|'.join(qualified_keys)}"
+    family_keys = [str(item) for item in comparison.get("variant_family_keys", []) if str(item)]
+    if family_keys:
+        return f"{variant_role}|{'|'.join(family_keys)}"
+    variant_source_id = str(comparison.get("variant_source_id") or "").strip()
+    return f"{variant_role}|{variant_source_id}"
+
+
+def _primary_group_key(*, record: ExtractedClaimRecord) -> str:
+    qualified_family_keys = _qualified_path_family_keys(record=record)
+    if qualified_family_keys:
+        return "|".join(qualified_family_keys)
+    family_keys = _path_family_keys(record=record)
+    if family_keys:
+        return "|".join(family_keys)
+    return f"{record.claim.source_type}:{record.claim.source_id}:{record.claim.normalized_value}"
+
+
+def _select_primary_baseline_for_variant(
+    *,
+    primary_candidates: Sequence[ExtractedClaimRecord],
+    variant_record: ExtractedClaimRecord,
+) -> ExtractedClaimRecord | None:
+    if not primary_candidates:
+        return None
+    ranked = sorted(
+        primary_candidates,
+        key=lambda primary: (
+            tuple(-value for value in _qualified_chain_similarity_score(primary_record=primary, variant_record=variant_record)),
+            -len(_qualified_path_family_keys(record=primary)),
+            0 if primary.claim.source_type != "github_file" else 1,
+            primary.claim.source_id,
+        ),
+    )
+    return ranked[0]
+
+
+def _qualified_chain_similarity_score(
+    *,
+    primary_record: ExtractedClaimRecord,
+    variant_record: ExtractedClaimRecord,
+) -> tuple[int, int, int, int]:
+    alignment = _best_chain_alignment(primary_record=primary_record, variant_record=variant_record)
+    return (
+        len(alignment["qualified_overlap"]),
+        len(alignment["prefix"]),
+        len(alignment["suffix"]),
+        len(alignment["simple_overlap"]),
+    )
+
+
+def _best_chain_alignment(
+    *,
+    primary_record: ExtractedClaimRecord,
+    variant_record: ExtractedClaimRecord,
+) -> dict[str, list[str]]:
+    primary_chains = _qualified_family_chains(record=primary_record)
+    variant_chains = _qualified_family_chains(record=variant_record)
+    best = {
+        "prefix": [],
+        "suffix": [],
+        "qualified_overlap": [],
+        "simple_overlap": [],
+    }
+    if not primary_chains or not variant_chains:
+        return best
+    best_score = (-1, -1, -1, -1)
+    for primary_chain in primary_chains:
+        for variant_chain in variant_chains:
+            prefix = _common_prefix(primary_chain, variant_chain)
+            suffix = _common_suffix(primary_chain, variant_chain)
+            qualified_overlap = sorted(set(primary_chain).intersection(variant_chain))
+            simple_overlap = _family_overlap_keys(
+                primary_family_keys=[segment.rsplit(".", 1)[-1] for segment in primary_chain],
+                variant_family_keys=[segment.rsplit(".", 1)[-1] for segment in variant_chain],
+            )
+            score = (
+                len(qualified_overlap),
+                len(prefix),
+                len(suffix),
+                len(simple_overlap),
+            )
+            if score > best_score:
+                best_score = score
+                best = {
+                    "prefix": prefix,
+                    "suffix": suffix,
+                    "qualified_overlap": qualified_overlap,
+                    "simple_overlap": simple_overlap,
+                }
+    return best
+
+
+def _qualified_family_chains(*, record: ExtractedClaimRecord) -> list[list[str]]:
+    chains: list[list[str]] = []
+    for path in _qualified_delegation_paths(record=record):
+        chain: list[str] = []
+        for segment in str(path or "").split("->"):
+            part = str(segment or "").strip()
+            if not part:
+                continue
+            symbol = part.rsplit(".", 1)[0].strip() if "." in part else part
+            if symbol:
+                chain.append(symbol)
+        if chain:
+            chains.append(chain)
+    return chains
+
+
+def _common_prefix(left: Sequence[str], right: Sequence[str]) -> list[str]:
+    prefix: list[str] = []
+    for left_item, right_item in zip(left, right):
+        if left_item != right_item:
+            break
+        prefix.append(left_item)
+    return prefix
+
+
+def _common_suffix(left: Sequence[str], right: Sequence[str]) -> list[str]:
+    suffix: list[str] = []
+    for left_item, right_item in zip(reversed(left), reversed(right)):
+        if left_item != right_item:
+            break
+        suffix.append(left_item)
+    return list(reversed(suffix))
+
+
+def _service_family_alignment(
+    *,
+    family_overlap_keys: Sequence[str],
+    qualified_family_overlap_keys: Sequence[str],
+) -> str:
+    if qualified_family_overlap_keys:
+        return "shared_qualified_service_family"
+    if family_overlap_keys:
+        return "shared_name_only_service_family"
+    return "isolated_service_family"
+
 
 
 def _build_finding(
@@ -609,8 +1866,13 @@ def _build_evidence_quotes(records: list[ExtractedClaimRecord]) -> str:
     return "\n".join(lines)
 
 
-def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
+def _build_links(
+    *,
+    findings: list[AuditFinding],
+    progress_callback: FindingGenerationProgressCallback | None = None,
+) -> list[AuditFindingLink]:
     links: list[AuditFindingLink] = []
+    total_findings = len(findings)
     for index, left in enumerate(findings):
         for right in findings[index + 1 :]:
             classified = _classify_finding_link(left=left, right=right)
@@ -629,6 +1891,14 @@ def _build_links(*, findings: list[AuditFinding]) -> list[AuditFindingLink]:
                         "group_key": str(source.metadata.get("causal_group_key") or target.metadata.get("causal_group_key") or ""),
                     },
                 )
+            )
+        processed = index + 1
+        if progress_callback is not None and (processed % 100 == 0 or processed == total_findings):
+            progress_callback(
+                "link_findings",
+                processed,
+                total_findings,
+                f"{processed}/{total_findings} Findings auf Beziehungen geprueft.",
             )
     return links
 

@@ -7,6 +7,8 @@ from fin_ai_auditor.domain.models import (
     AuditFinding,
     AuditFindingLink,
     AuditLocation,
+    ReviewCard,
+    ReviewCardCoverageSummary,
     SemanticEntity,
     SemanticRelation,
     SchemaTruthEntry,
@@ -69,6 +71,7 @@ class PipelineAnalysisResult:
     source_snapshots: list[AuditSourceSnapshot]
     findings: list[AuditFinding]
     finding_links: list[AuditFindingLink]
+    review_cards: list[ReviewCard]
     claims: list[object]
     truths: list[TruthLedgerEntry]
     schema_truths: list[SchemaTruthEntry]
@@ -78,4 +81,6 @@ class PipelineAnalysisResult:
     retrieval_claim_links: list[RetrievalSegmentClaimLink]
     analysis_log_messages: list[str]
     summary: str
+    budget_limited: bool = False
+    coverage_summary: ReviewCardCoverageSummary | None = None
     llm_usage: dict = field(default_factory=dict)

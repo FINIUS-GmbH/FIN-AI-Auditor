@@ -6,12 +6,14 @@ import hashlib
 import json
 import re
 from typing import Final
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
+    AnalysisMode,
     AtomicFactEntry,
     AuditAnalysisLogEntry,
     AuditClaimEntry,
@@ -32,6 +34,8 @@ from fin_ai_auditor.domain.models import (
     DecisionPackage,
     DecisionProblemElement,
     DecisionRecord,
+    ReviewCard,
+    ReviewCardCoverageSummary,
     RetrievalSegment,
     RetrievalSegmentClaimLink,
     SchemaTruthEntry,
@@ -80,6 +84,14 @@ AUDIT_PIPELINE_STEPS: Final[tuple[tuple[str, str], ...]] = (
     ("finding_generation", "Finding-Generierung"),
     ("llm_recommendations", "LLM-Empfehlungen"),
     ("decision_packages", "Entscheidungspakete"),
+)
+
+FAST_AUDIT_PIPELINE_STEPS: Final[tuple[tuple[str, str], ...]] = (
+    ("source_collection", "Quellen laden"),
+    ("section_profiling", "Sektionen profilieren"),
+    ("candidate_comparison", "Kandidaten vergleichen"),
+    ("review_cards", "Review-Karten bereitstellen"),
+    ("follow_up_preparation", "Folgeaktionen vorbereiten"),
 )
 
 STEP_LOG_BLUEPRINTS: Final[dict[str, dict[str, list[str] | str]]] = {
@@ -165,6 +177,51 @@ STEP_LOG_BLUEPRINTS: Final[dict[str, dict[str, list[str] | str]]] = {
             "Der User muss nicht ueber rohe Findings entscheiden, sondern ueber fachlich zusammenhaengende Pakete.",
         ],
     },
+    "source_collection": {
+        "title": "Analysequellen werden gesammelt",
+        "derived_changes": [
+            "Read-only-Quellen werden in einen gemeinsamen Fast-Audit-Arbeitsstand uebernommen.",
+        ],
+        "impact_summary": [
+            "Nur priorisierte Inhalte gehen anschliessend in den schnellen Vergleichspfad.",
+        ],
+    },
+    "section_profiling": {
+        "title": "Sektionen werden profiliert",
+        "derived_changes": [
+            "Dokumente werden in vergleichbare, entscheidungsrelevante Abschnitte zerlegt.",
+        ],
+        "impact_summary": [
+            "Der spaetere KI-Vergleich arbeitet nur auf priorisierten Abschnittskandidaten.",
+        ],
+    },
+    "candidate_comparison": {
+        "title": "Priorisierte Kandidaten werden verglichen",
+        "derived_changes": [
+            "Passende Abschnitte aus Doku, Code und Metamodell werden direkt gegeneinander gespiegelt.",
+        ],
+        "impact_summary": [
+            "Der schnelle Vergleich ersetzt teure Vollgraph- und Retrieval-Pfade.",
+        ],
+    },
+    "review_cards": {
+        "title": "Review-Karten werden vorbereitet",
+        "derived_changes": [
+            "Abweichungen werden als wenige, entscheidbare Review-Karten bereitgestellt.",
+        ],
+        "impact_summary": [
+            "Der User arbeitet direkt auf Review-Karten statt auf tiefen Forensik-Artefakten.",
+        ],
+    },
+    "follow_up_preparation": {
+        "title": "Folgeaktionen werden vorbereitet",
+        "derived_changes": [
+            "Akzeptierbare Folgeaktionen werden pro Review-Karte vorbereitet, aber noch nicht ausgefuehrt.",
+        ],
+        "impact_summary": [
+            "Jira- und Confluence-Folgepfade koennen nach einer User-Entscheidung direkt anschliessen.",
+        ],
+    },
 }
 
 DECISION_SCOPE_HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
@@ -203,20 +260,44 @@ class AuditService:
 
     def create_run(self, *, payload: CreateAuditRunRequest) -> AuditRun:
         normalized_target = self._normalize_target(target=payload.target)
+        analysis_mode: AnalysisMode = payload.analysis_mode
         run = AuditRun(
+            analysis_mode=analysis_mode,
             target=normalized_target,
-            progress=self._build_initial_progress(target=normalized_target),
+            progress=self._build_initial_progress(target=normalized_target, analysis_mode=analysis_mode),
             analysis_log=[
                 AuditAnalysisLogEntry(
                     source_type="system",
                     title="Run angelegt",
-                    message="Audit-Run wurde angelegt. Externe Systeme bleiben read-only; Ergebnisse werden lokal gesammelt.",
-                    derived_changes=["Lokale Auditor-DB wurde als einzige schreibende SSOT fuer diesen Lauf vorbereitet."],
+                    message=(
+                        "Audit-Run wurde angelegt. Externe Systeme bleiben read-only; Ergebnisse werden lokal gesammelt. "
+                        + (
+                            "Fast Audit ist als schneller Vergleichspfad aktiv."
+                            if analysis_mode == "fast"
+                            else "Deep Audit ist als forensischer Analysepfad aktiv."
+                        )
+                    ),
+                    derived_changes=[
+                        "Lokale Auditor-DB wurde als einzige schreibende SSOT fuer diesen Lauf vorbereitet.",
+                        (
+                            "Der schnelle Review-Karten-Pfad wurde fuer diesen Lauf aktiviert."
+                            if analysis_mode == "fast"
+                            else "Der tiefe Claim-/Graph-/Retrieval-Pfad wurde fuer diesen Lauf aktiviert."
+                        ),
+                    ],
                     impact_summary=["Der Worker kann den Lauf nun schrittweise analysieren und protokollieren."],
                 )
             ],
         )
         return self._repository.upsert_run(run=run)
+
+    def create_user_run(self, *, payload: CreateAuditRunRequest) -> AuditRun:
+        if payload.analysis_mode == "deep" and not self._settings.enable_deep_audit_api_runs:
+            raise ValueError(
+                "Deep Audit ist serverseitig nicht fuer den normalen UI/API-Pfad freigeschaltet. "
+                "Der produktive Standardpfad ist Fast Audit."
+            )
+        return self.create_run(payload=payload)
 
     def list_runs(self) -> list[AuditRun]:
         return self._repository.list_runs()
@@ -354,6 +435,7 @@ class AuditService:
                 "progress": self._progress_for_step(
                     progress=run.progress,
                     target=run.target,
+                    analysis_mode=run.analysis_mode,
                     step_key=step_key,
                     progress_pct=progress_pct,
                     current_activity=current_activity,
@@ -437,6 +519,7 @@ class AuditService:
         source_snapshots: list[AuditSourceSnapshot],
         findings: list[AuditFinding],
         finding_links: list[AuditFindingLink],
+        review_cards: list[ReviewCard] | None = None,
         claims: list[AuditClaimEntry],
         truths: list[TruthLedgerEntry],
         schema_truths: list[SchemaTruthEntry],
@@ -444,24 +527,32 @@ class AuditService:
         semantic_relations: list[SemanticRelation],
         summary: str,
         analysis_notes: list[str],
+        budget_limited: bool = False,
+        coverage_summary: ReviewCardCoverageSummary | None = None,
         llm_usage: dict | None = None,
         worker_id: str | None = None,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
         now_iso = utc_now_iso()
-        packages = self._build_decision_packages(
-            findings=findings,
-            claims=claims,
-            truths=truths,
-            semantic_entities=semantic_entities,
-            semantic_relations=semantic_relations,
-        )
-        atomic_facts = self._build_atomic_facts(packages=packages)
-        atomic_facts, packages, atomic_fact_notes = self._apply_atomic_fact_history(
-            run=run,
-            atomic_facts=atomic_facts,
-            packages=packages,
-        )
+        review_cards = list(review_cards or [])
+        if run.analysis_mode == "fast":
+            packages = []
+            atomic_facts = []
+            atomic_fact_notes = []
+        else:
+            packages = self._build_decision_packages(
+                findings=findings,
+                claims=claims,
+                truths=truths,
+                semantic_entities=semantic_entities,
+                semantic_relations=semantic_relations,
+            )
+            atomic_facts = self._build_atomic_facts(packages=packages)
+            atomic_facts, packages, atomic_fact_notes = self._apply_atomic_fact_history(
+                run=run,
+                atomic_facts=atomic_facts,
+                packages=packages,
+            )
         completed = run.model_copy(
             update={
                 "status": "completed",
@@ -471,7 +562,9 @@ class AuditService:
                 "progress": self._build_completed_progress(progress=run.progress),
                 "analysis_log": self._append_pipeline_completion_notes(
                     analysis_log=run.analysis_log,
+                    analysis_mode=run.analysis_mode,
                     findings=findings,
+                    review_cards=review_cards,
                     claims=claims,
                     packages=packages,
                     notes=[*analysis_notes, *atomic_fact_notes],
@@ -479,6 +572,9 @@ class AuditService:
                 "source_snapshots": source_snapshots,
                 "semantic_entities": semantic_entities,
                 "semantic_relations": semantic_relations,
+                "review_cards": review_cards,
+                "budget_limited": budget_limited,
+                "coverage_summary": coverage_summary,
                 "findings": findings,
                 "finding_links": finding_links,
                 "claims": claims,
@@ -658,6 +754,79 @@ class AuditService:
                 "analysis_log": next_log,
                 "decision_packages": updated_packages,
                 "decision_records": [*run.decision_records, decision_record],
+            }
+        )
+        return self._repository.upsert_run(run=updated)
+
+    def apply_review_card_decision(
+        self,
+        *,
+        run_id: str,
+        card_id: str,
+        action: str,
+        comment_text: str | None,
+    ) -> AuditRun:
+        run = self._require_run(run_id=run_id)
+        if run.analysis_mode != "fast":
+            raise ValueError("Review-Karten-Entscheidungen sind nur fuer Fast-Audit-Laeufe verfuegbar.")
+        next_state = {
+            "accept": "accepted",
+            "reject": "rejected",
+            "clarify": "clarification_needed",
+        }.get(str(action or "").strip())
+        if next_state is None:
+            raise ValueError(f"Unbekannte Review-Karten-Aktion: {action}")
+
+        target_card: ReviewCard | None = None
+        updated_cards: list[ReviewCard] = []
+        related_finding_ids: list[str] = []
+        for card in run.review_cards:
+            if card.card_id != card_id:
+                updated_cards.append(card)
+                continue
+            target_card = card.model_copy(
+                update={
+                    "decision_state": next_state,
+                    "decided_at": utc_now_iso(),
+                    "decision_comment": str(comment_text or "").strip() or None,
+                }
+            )
+            related_finding_ids = list(target_card.related_finding_ids)
+            updated_cards.append(target_card)
+        if target_card is None:
+            raise ValueError(f"Review-Karte nicht gefunden: {card_id}")
+
+        finding_state = {
+            "accepted": "accepted",
+            "rejected": "dismissed",
+            "clarification_needed": "open",
+        }[next_state]
+        related_finding_ids_set = set(related_finding_ids)
+        updated_findings = [
+            finding.model_copy(update={"resolution_state": finding_state})
+            if finding.finding_id in related_finding_ids_set
+            else finding
+            for finding in run.findings
+        ]
+        updated = run.model_copy(
+            update={
+                "updated_at": utc_now_iso(),
+                "review_cards": updated_cards,
+                "findings": updated_findings,
+                "analysis_log": self._append_log(
+                    analysis_log=run.analysis_log,
+                    entry=AuditAnalysisLogEntry(
+                        source_type="impact_analysis",
+                        title=f"Review-Karte {target_card.title} bewertet",
+                        message=f"Review-Karte wurde mit Aktion '{action}' bewertet.",
+                        related_finding_ids=related_finding_ids,
+                        derived_changes=[f"Review-Karten-Status wurde auf {next_state} gesetzt."],
+                        impact_summary=[
+                            "Akzeptierte Review-Karten koennen jetzt fuer Folgeaktionen Richtung Jira oder Confluence verwendet werden."
+                        ],
+                        metadata={"review_card_id": target_card.card_id, "action": action, "comment_text": comment_text},
+                    ),
+                ),
             }
         )
         return self._repository.upsert_run(run=updated)
@@ -924,13 +1093,19 @@ class AuditService:
         title: str,
         summary: str,
         target_url: str | None,
-        related_package_ids: list[str],
-        related_finding_ids: list[str],
-        payload_preview: list[str],
+        related_review_card_ids: list[str] | None = None,
+        related_package_ids: list[str] | None = None,
+        related_finding_ids: list[str] | None = None,
+        payload_preview: list[str] | None = None,
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
+        related_review_card_ids = list(related_review_card_ids or [])
+        related_package_ids = list(related_package_ids or [])
+        related_finding_ids = list(related_finding_ids or [])
+        payload_preview = list(payload_preview or [])
         related_findings = self._select_related_findings_for_approval(
             run=run,
+            related_review_card_ids=related_review_card_ids,
             related_finding_ids=related_finding_ids,
             related_package_ids=related_package_ids,
         )
@@ -966,6 +1141,14 @@ class AuditService:
                 existing_preview=payload_preview,
                 brief=brief,
             )
+        target_guard = self._build_writeback_target_guard(
+            target_type=target_type,
+            target_url=effective_target_url,
+            extra_metadata=approval_metadata,
+        )
+        if list(target_guard.get("blockers") or []):
+            raise ValueError("; ".join(str(item).strip() for item in list(target_guard.get("blockers") or []) if str(item).strip()))
+        approval_metadata["target_guard"] = target_guard
         approval_metadata["writeback_verification"] = self._build_writeback_verification_metadata(
             target_type=target_type,
             target_url=effective_target_url,
@@ -1020,10 +1203,10 @@ class AuditService:
             title=title,
             summary=summary,
             target_url=effective_target_url,
-            related_package_ids=list(related_package_ids),
+            related_package_ids=related_package_ids,
             related_finding_ids=[finding.finding_id for finding in related_findings],
             payload_preview=effective_payload_preview,
-            metadata=approval_metadata,
+            metadata={**approval_metadata, "related_review_card_ids": related_review_card_ids},
         )
         updated = run.model_copy(
             update={
@@ -1035,7 +1218,7 @@ class AuditService:
                         source_type="impact_analysis",
                         title="Writeback-Freigabe angefordert",
                         message=summary,
-                        related_finding_ids=list(related_finding_ids),
+                        related_finding_ids=[finding.finding_id for finding in related_findings],
                         derived_changes=[
                             f"Lokale Freigabeanfrage fuer {target_type} wurde angelegt.",
                         ],
@@ -1262,6 +1445,20 @@ class AuditService:
             extra_metadata=approval.metadata,
         )
         try:
+            self._assert_writeback_target_allowed(
+                target_type="jira_ticket_create",
+                verification_metadata=verification_metadata,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="jira_ticket_create",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
+        try:
             access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
                 required_scopes={"write:jira-work"}
             )
@@ -1409,6 +1606,20 @@ class AuditService:
             target_url=approval.target_url,
             extra_metadata=approval.metadata,
         )
+        try:
+            self._assert_writeback_target_allowed(
+                target_type="confluence_page_update",
+                verification_metadata=verification_metadata,
+            )
+        except Exception as exc:
+            self._persist_writeback_failure(
+                run=run,
+                approval_request_id=approval.approval_request_id,
+                target_type="confluence_page_update",
+                exc=exc,
+                verification_metadata=verification_metadata,
+            )
+            raise
         try:
             access_token = self._atlassian_oauth_service.get_valid_access_token_or_raise(
                 required_scopes={"write:page:confluence"}
@@ -1575,6 +1786,11 @@ class AuditService:
                 verification["page_id"] = str(preview.get("page_id") or "").strip() or None
                 verification["patch_execution_ready"] = bool(preview.get("execution_ready"))
                 verification["patch_blockers"] = list(preview.get("blockers") or [])
+        verification["target_guard"] = self._build_writeback_target_guard(
+            target_type=target_type,
+            target_url=target_url,
+            extra_metadata=extra_metadata,
+        )
         return verification
 
     @staticmethod
@@ -1599,6 +1815,18 @@ class AuditService:
                 text = str(blocker).strip()
                 if text:
                     blockers.append(text)
+        target_guard = verification_metadata.get("target_guard")
+        if isinstance(target_guard, dict):
+            blockers.extend(
+                str(item).strip()
+                for item in list(target_guard.get("blockers") or [])
+                if str(item).strip()
+            )
+            warnings.extend(
+                str(item).strip()
+                for item in list(target_guard.get("warnings") or [])
+                if str(item).strip()
+            )
         if verification_metadata.get("target_url") in {None, ""}:
             warnings.append("Ziel-URL ist noch nicht explizit gesetzt.")
         if verification_metadata.get("redirect_uri_matches_local_api") is False:
@@ -1608,6 +1836,91 @@ class AuditService:
             "blockers": _dedupe_preserve_order(blockers),
             "warnings": _dedupe_preserve_order(warnings),
         }
+
+    def _build_writeback_target_guard(
+        self,
+        *,
+        target_type: str,
+        target_url: str | None,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_target_url = str(target_url or "").strip() or None
+        blockers: list[str] = []
+        warnings: list[str] = []
+        guard: dict[str, object] = {
+            "mode": self._settings.writeback_target_mode,
+            "target_type": target_type,
+            "target_url": normalized_target_url,
+            "allowed_confluence_space_keys": self._settings.get_allowed_writeback_confluence_space_keys(),
+            "allowed_jira_project_keys": self._settings.get_allowed_writeback_jira_project_keys(),
+        }
+        if self._settings.writeback_target_mode == "disabled":
+            blockers.append("Externer Writeback ist im aktuellen Betriebsmodus deaktiviert.")
+        if target_type == "jira_ticket_create":
+            issue_payload = (extra_metadata or {}).get("jira_issue_payload")
+            project_key = ""
+            if isinstance(issue_payload, dict):
+                fields = issue_payload.get("fields")
+                if isinstance(fields, dict):
+                    project = fields.get("project")
+                    if isinstance(project, dict):
+                        project_key = _normalize_policy_key(project.get("key"))
+            project_key = project_key or _normalize_policy_key(self._settings.fixed_jira_project_key)
+            guard["project_key"] = project_key or None
+            if not project_key:
+                blockers.append("Jira-Writeback hat keinen gueltigen Projekt-Key.")
+            elif project_key not in self._settings.get_allowed_writeback_jira_project_keys():
+                blockers.append(
+                    f"Jira-Writeback auf Projekt {project_key} ist nicht freigegeben."
+                )
+            expected_host = _normalized_host(self._settings.jira_board_url)
+            actual_host = _normalized_host(normalized_target_url)
+            guard["expected_host"] = expected_host
+            guard["actual_host"] = actual_host
+            if expected_host and actual_host and actual_host != expected_host:
+                blockers.append(
+                    f"Jira-Writeback zeigt auf Host {actual_host} statt auf den freigegebenen Host {expected_host}."
+                )
+        elif target_type == "confluence_page_update":
+            preview = (extra_metadata or {}).get("confluence_patch_preview")
+            space_key = ""
+            if isinstance(preview, dict):
+                space_key = _normalize_policy_key(preview.get("space_key"))
+            space_key = space_key or _normalize_policy_key(self._settings.fixed_confluence_space_key)
+            guard["space_key"] = space_key or None
+            if not space_key:
+                blockers.append("Confluence-Writeback hat keinen gueltigen Space-Key.")
+            elif space_key not in self._settings.get_allowed_writeback_confluence_space_keys():
+                blockers.append(
+                    f"Confluence-Writeback auf Space {space_key} ist nicht freigegeben."
+                )
+            expected_host = _normalized_host(self._settings.confluence_home_url)
+            actual_host = _normalized_host(normalized_target_url)
+            guard["expected_host"] = expected_host
+            guard["actual_host"] = actual_host
+            if expected_host and actual_host and actual_host != expected_host:
+                blockers.append(
+                    f"Confluence-Writeback zeigt auf Host {actual_host} statt auf den freigegebenen Host {expected_host}."
+                )
+            if not normalized_target_url:
+                warnings.append("Confluence-Zielseite ist noch nicht als konkrete URL aufgeloest.")
+        guard["blockers"] = _dedupe_preserve_order(blockers)
+        guard["warnings"] = _dedupe_preserve_order(warnings)
+        guard["allowed"] = not bool(guard["blockers"])
+        return guard
+
+    @staticmethod
+    def _assert_writeback_target_allowed(
+        *,
+        target_type: str,
+        verification_metadata: dict[str, object],
+    ) -> None:
+        target_guard = verification_metadata.get("target_guard")
+        if not isinstance(target_guard, dict):
+            raise ValueError(f"{target_type} kann ohne Target-Guard nicht ausgefuehrt werden.")
+        blockers = [str(item).strip() for item in list(target_guard.get("blockers") or []) if str(item).strip()]
+        if blockers:
+            raise ValueError("; ".join(blockers))
 
     @staticmethod
     def _build_writeback_execution_token(
@@ -1972,7 +2285,12 @@ class AuditService:
             for finding in findings
             if finding.category != "architecture_observation"
         ]
-        for finding in prioritize_findings(findings=actionable_findings):
+        prioritized_actionable_findings = prioritize_findings(findings=actionable_findings)
+        finding_priority_ranks = {
+            finding.finding_id: index
+            for index, finding in enumerate(prioritized_actionable_findings)
+        }
+        for finding in prioritized_actionable_findings:
             findings_by_cluster[_package_cluster_key(finding=finding)].append(finding)
         packages: list[DecisionPackage] = []
         for cluster_key, cluster_findings in sorted(findings_by_cluster.items(), key=lambda item: item[0]):
@@ -2031,6 +2349,11 @@ class AuditService:
                 dominant_category = primary_finding.category if primary_finding is not None else _dominant_category(findings=ordered_bucket_findings)
                 severity_summary = _highest_severity(findings=ordered_bucket_findings)
                 primary_finding_id = primary_finding.finding_id if primary_finding is not None else None
+                primary_finding_rank = (
+                    int(finding_priority_ranks.get(primary_finding_id, 999_999))
+                    if primary_finding_id is not None
+                    else 999_999
+                )
                 package_scope_keys = _package_scope_keys_for_findings(findings=ordered_bucket_findings) or set(cluster_scope_keys)
                 primary_scope_key = _primary_scope_key_for_findings(
                     findings=ordered_bucket_findings,
@@ -2437,6 +2760,7 @@ class AuditService:
                             "root_cause_label": root_cause_label(bucket=root_bucket),
                             "root_cause_priority": root_cause_priority(bucket=root_bucket),
                             "primary_finding_id": primary_finding_id,
+                            "primary_finding_rank": primary_finding_rank,
                             "supporting_problem_count": max(len(problems) - 1, 0),
                             "action_lanes": _dedupe_preserve_order(
                                 [
@@ -2464,13 +2788,105 @@ class AuditService:
                                 (primary_finding.metadata.get("causal_group_key") if primary_finding is not None else "")
                                 or cluster_key
                             ),
+                            "grouped_boundary_paths": any(
+                                bool(finding.metadata.get("grouped_boundary_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "boundary_path_type": next(
+                                (
+                                    str(finding.metadata.get("boundary_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("boundary_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "boundary_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "boundary_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("boundary_function_names") or [])
+                                    if str(function_name).strip()
+                                ]
+                            ),
+                            "grouped_eventual_paths": any(
+                                bool(finding.metadata.get("grouped_eventual_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "eventual_path_type": next(
+                                (
+                                    str(finding.metadata.get("eventual_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("eventual_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "eventual_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if bool(finding.metadata.get("grouped_eventual_paths"))
+                                    and finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "eventual_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    if bool(finding.metadata.get("grouped_eventual_paths")) and str(function_name).strip()
+                                ]
+                            ),
+                            "grouped_chain_paths": any(
+                                bool(finding.metadata.get("grouped_chain_paths")) for finding in ordered_bucket_findings
+                            ),
+                            "chain_path_type": next(
+                                (
+                                    str(finding.metadata.get("chain_path_type") or "").strip()
+                                    for finding in ordered_bucket_findings
+                                    if str(finding.metadata.get("chain_path_type") or "").strip()
+                                ),
+                                "",
+                            ),
+                            "chain_path_count": max(
+                                (
+                                    int(finding.metadata.get("path_count") or 0)
+                                    for finding in ordered_bucket_findings
+                                    if bool(finding.metadata.get("grouped_chain_paths"))
+                                    and finding.metadata.get("path_count") is not None
+                                ),
+                                default=0,
+                            ),
+                            "chain_function_names": _dedupe_preserve_order(
+                                [
+                                    str(function_name).strip()
+                                    for finding in ordered_bucket_findings
+                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    if bool(finding.metadata.get("grouped_chain_paths")) and str(function_name).strip()
+                                ]
+                            ),
+                            "chain_line_windows": _dedupe_preserve_order(
+                                [
+                                    str(line_window).strip()
+                                    for finding in ordered_bucket_findings
+                                    for line_window in (finding.metadata.get("sequence_line_windows") or [])
+                                    if bool(finding.metadata.get("grouped_chain_paths")) and str(line_window).strip()
+                                ]
+                            ),
                         },
                     )
                 )
         return sorted(
             packages,
             key=lambda package: (
-                int(package.metadata.get("package_sort_rank") or 999),
+                int(package.metadata.get("package_sort_rank")) if package.metadata.get("package_sort_rank") is not None else 999,
+                int(package.metadata.get("primary_finding_rank")) if package.metadata.get("primary_finding_rank") is not None else 999_999,
                 severity_rank(severity=package.severity_summary),
                 package.title,
             ),
@@ -2818,7 +3234,9 @@ class AuditService:
         self,
         *,
         analysis_log: list[AuditAnalysisLogEntry],
+        analysis_mode: AnalysisMode,
         findings: list[AuditFinding],
+        review_cards: list[ReviewCard],
         claims: list[AuditClaimEntry],
         packages: list[DecisionPackage],
         notes: list[str],
@@ -2828,15 +3246,35 @@ class AuditService:
             entry=AuditAnalysisLogEntry(
                 source_type="impact_analysis",
                 title="Analyse abgeschlossen",
-                message="Die produktive Read-only-Pipeline hat Claims, Findings und Entscheidungspakete erzeugt.",
+                message=(
+                    "Der Fast-Audit-Pfad hat Review-Karten und Folgeaktionshinweise erzeugt."
+                    if analysis_mode == "fast"
+                    else "Die produktive Read-only-Pipeline hat Claims, Findings und Entscheidungspakete erzeugt."
+                ),
                 related_finding_ids=[finding.finding_id for finding in findings],
                 derived_changes=[
-                    f"{len(claims)} Claims wurden aus den gelesenen Quellen extrahiert.",
-                    f"{len(findings)} Findings wurden aus den Claims abgeleitet.",
-                    f"{len(packages)} Entscheidungspakete wurden neu aufgebaut.",
+                    (
+                        f"{len(review_cards)} Review-Karten wurden aus priorisierten Vergleichskandidaten abgeleitet."
+                        if analysis_mode == "fast"
+                        else f"{len(claims)} Claims wurden aus den gelesenen Quellen extrahiert."
+                    ),
+                    (
+                        f"{len(findings)} kompatible Findings wurden fuer Folgeaktionen vorbereitet."
+                        if analysis_mode == "fast"
+                        else f"{len(findings)} Findings wurden aus den Claims abgeleitet."
+                    ),
+                    (
+                        "Entscheidungspakete bleiben im Fast-Audit-Modus bewusst leer."
+                        if analysis_mode == "fast"
+                        else f"{len(packages)} Entscheidungspakete wurden neu aufgebaut."
+                    ),
                 ],
                 impact_summary=[
-                    "Nachfolgende User-Entscheidungen arbeiten gegen echte Collector-Evidenz statt gegen Demo-Daten."
+                    (
+                        "Nachfolgende User-Entscheidungen arbeiten direkt auf Review-Karten mit Collector-Evidenz."
+                        if analysis_mode == "fast"
+                        else "Nachfolgende User-Entscheidungen arbeiten gegen echte Collector-Evidenz statt gegen Demo-Daten."
+                    )
                 ],
                 metadata={"phase": "pipeline_complete"},
             ),
@@ -3112,9 +3550,28 @@ class AuditService:
         self,
         *,
         run: AuditRun,
+        related_review_card_ids: list[str],
         related_finding_ids: list[str],
         related_package_ids: list[str],
     ) -> list[AuditFinding]:
+        if related_review_card_ids:
+            selected_review_cards = [
+                card for card in run.review_cards if card.card_id in set(related_review_card_ids)
+            ]
+            if not selected_review_cards:
+                raise ValueError("Keine der angeforderten Review-Karten wurde gefunden.")
+            non_accepted = [card.title for card in selected_review_cards if card.decision_state != "accepted"]
+            if non_accepted:
+                raise ValueError(
+                    "Folgeaktionen sind nur fuer akzeptierte Review-Karten erlaubt: " + ", ".join(non_accepted[:3])
+                )
+            selected_ids = {
+                finding_id
+                for card in selected_review_cards
+                for finding_id in card.related_finding_ids
+            }
+            if selected_ids:
+                return self._select_related_findings(run=run, related_finding_ids=list(selected_ids))
         if related_finding_ids:
             selected = self._select_related_findings(run=run, related_finding_ids=related_finding_ids)
             if selected:
@@ -3209,9 +3666,10 @@ class AuditService:
         )
 
     @staticmethod
-    def _build_steps(*, include_local_docs: bool) -> list[AuditProgressStep]:
+    def _build_steps(*, include_local_docs: bool, analysis_mode: AnalysisMode) -> list[AuditProgressStep]:
         steps: list[AuditProgressStep] = []
-        for step_key, label in AUDIT_PIPELINE_STEPS:
+        step_blueprint = FAST_AUDIT_PIPELINE_STEPS if analysis_mode == "fast" else AUDIT_PIPELINE_STEPS
+        for step_key, label in step_blueprint:
             if step_key == "local_docs_check" and not include_local_docs:
                 steps.append(
                     AuditProgressStep(
@@ -3225,13 +3683,17 @@ class AuditService:
             steps.append(AuditProgressStep(step_key=step_key, label=label))
         return steps
 
-    def _build_initial_progress(self, *, target: AuditTarget) -> AuditRunProgress:
+    def _build_initial_progress(self, *, target: AuditTarget, analysis_mode: AnalysisMode) -> AuditRunProgress:
         return AuditRunProgress(
             progress_pct=0,
             phase_key="queued",
             phase_label="Wartet auf Worker",
-            current_activity="Run wurde angelegt und wartet auf die Analyse-Pipeline.",
-            steps=self._build_steps(include_local_docs=bool(target.include_local_docs)),
+            current_activity=(
+                "Run wurde angelegt und wartet auf den schnellen Vergleichspfad."
+                if analysis_mode == "fast"
+                else "Run wurde angelegt und wartet auf die Analyse-Pipeline."
+            ),
+            steps=self._build_steps(include_local_docs=bool(target.include_local_docs), analysis_mode=analysis_mode),
         )
 
     @staticmethod
@@ -3251,6 +3713,7 @@ class AuditService:
         *,
         progress: AuditRunProgress,
         target: AuditTarget,
+        analysis_mode: AnalysisMode,
         step_key: str,
         progress_pct: int,
         current_activity: str,
@@ -3258,7 +3721,10 @@ class AuditService:
         detail: str | None,
     ) -> AuditRunProgress:
         now = utc_now_iso()
-        effective_steps = progress.steps or self._build_steps(include_local_docs=bool(target.include_local_docs))
+        effective_steps = progress.steps or self._build_steps(
+            include_local_docs=bool(target.include_local_docs),
+            analysis_mode=analysis_mode,
+        )
         current_index = next(
             (index for index, step in enumerate(effective_steps) if step.step_key == step_key),
             None,
@@ -3418,7 +3884,7 @@ class AuditService:
                 content_hash="sha256:demo-confluence-page",
                 sync_token="confluence:demo-page-1:v1",
                 metadata={
-                    "space_key": run.target.confluence_space_keys[:1],
+                    "space_key": run.target.confluence_space_keys[0] if run.target.confluence_space_keys else None,
                     "confluence_url": self._settings.confluence_home_url,
                 },
             ),
@@ -3609,6 +4075,46 @@ def _severity_rank(severity: str) -> int:
 
 
 def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[AuditFinding]) -> str:
+    grouped_boundary_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        path_count = int(grouped_boundary_finding.metadata.get("path_count") or 0)
+        if path_count > 0:
+            return f"Manuelle Antwortpfade angleichen ({path_count} Entry-Points)"
+        return "Manuelle Antwortpfade angleichen"
+    grouped_eventual_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        title_prefix = str(grouped_eventual_finding.metadata.get("grouped_eventual_package_title") or "").strip()
+        path_count = int(grouped_eventual_finding.metadata.get("path_count") or 0)
+        if title_prefix:
+            if path_count > 0:
+                return f"{title_prefix} ({path_count} Pfade)"
+            return title_prefix
+    grouped_chain_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        path_count = int(grouped_chain_finding.metadata.get("path_count") or 0)
+        if path_count > 0:
+            return f"Reaggregation atomisch schliessen ({path_count} Pfade)"
+        return "Reaggregation atomisch schliessen"
     root_label = root_cause_label(bucket=root_cause_bucket)
     # Use the primary finding's actual human-readable title
     primary_title = ""
@@ -3632,6 +4138,58 @@ def _package_scope_summary(
     semantic_entities: list[SemanticEntity],
     semantic_relations: list[SemanticRelation],
 ) -> str:
+    grouped_boundary_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_boundary_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        return f"Manuelle bsmAnswer-Entry-Points · {path_count} Pfade betroffen{function_suffix}"
+    grouped_eventual_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        scope_label = str(grouped_eventual_finding.metadata.get("grouped_eventual_scope_label") or "").strip()
+        function_names = [
+            str(item).strip()
+            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_eventual_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        if scope_label:
+            return f"{scope_label} · {path_count} Pfade betroffen{function_suffix}"
+    grouped_chain_finding = next(
+        (
+            finding for finding in findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        path_count = int(grouped_chain_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_suffix = f" · {', '.join(function_names)}" if function_names else ""
+        return f"Reaggregation-/Rebuild-Pfade · {path_count} Pfade betroffen{function_suffix}"
     categories = _dedupe_preserve_order([finding.category for finding in findings])
     root_label = root_cause_label(bucket=root_cause_bucket)
     semantic_suffix = ""
@@ -3669,6 +4227,65 @@ def _package_recommendation_summary(
     causal_schema_validation_statuses: list[str],
 ) -> str:
     ordered_findings = order_package_findings(findings=findings, package_bucket=root_cause_bucket)
+    grouped_boundary_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_boundary_paths"))
+            and str(finding.metadata.get("boundary_path_type") or "").strip() == "manual_answer_entrypoint"
+        ),
+        None,
+    )
+    if grouped_boundary_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
+            if str(item).strip()
+        ]
+        base = (
+            "Die manuellen Antwort-Entry-Points auf einen kanonischen Pfad zusammenziehen und "
+            "phase_run_id/run_id bis zur bsmAnswer-Persistenz konsistent durchreichen."
+        )
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
+    grouped_eventual_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_eventual_paths"))
+        ),
+        None,
+    )
+    if grouped_eventual_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        base = str(grouped_eventual_finding.recommendation or "").strip()
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
+    grouped_chain_finding = next(
+        (
+            finding for finding in ordered_findings
+            if bool(finding.metadata.get("grouped_chain_paths"))
+            and str(finding.metadata.get("chain_path_type") or "").strip() == "reaggregation_rebuild_path"
+        ),
+        None,
+    )
+    if grouped_chain_finding is not None:
+        function_names = [
+            str(item).strip()
+            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
+            if str(item).strip()
+        ]
+        base = (
+            "Supersede-, Rebuild- und Materialisierungsschritte ueber die Reaggregationspfade in denselben "
+            "transaktionalen Schutzraum ziehen oder eine Ersatzkette aufbauen, bevor die alte Kette deaktiviert wird."
+        )
+        if function_names:
+            return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
+        return base
     recommendations = _dedupe_preserve_order([finding.recommendation for finding in ordered_findings if finding.recommendation])
 
     # Build a concise "affected sources" hint
@@ -3784,6 +4401,29 @@ def _claims_for_finding_scope(*, finding: AuditFinding, claims: list[AuditClaimE
         or any(package_scope_key(claim.subject_key) == package_scope_key(target_key) for target_key in target_keys)
     ]
     return matching or list(claims)
+
+
+def _normalized_host(url: str | None) -> str | None:
+    text = str(url or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    host = str(parsed.netloc or parsed.path or "").strip().lower()
+    return host or None
+
+
+def _normalize_policy_key(value: object) -> str:
+    if isinstance(value, (list, tuple, set)):
+        first = next((item for item in value if str(item).strip()), "")
+        return _normalize_policy_key(first)
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return ""
+        first = inner.split(",", 1)[0].strip().strip("'\"")
+        return first.upper()
+    return text.strip("'\"").upper()
 
 
 def _atomic_fact_key(*, finding: AuditFinding) -> str:

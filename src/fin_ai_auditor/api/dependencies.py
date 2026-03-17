@@ -8,12 +8,25 @@ from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
 from fin_ai_auditor.services.connectors.confluence_connector import ConfluencePageWriteConnector
 from fin_ai_auditor.services.connectors.jira_connector import JiraTicketingConnector
+from fin_ai_auditor.services.secret_store import SecretStore, build_secret_store
+
+
+@lru_cache(maxsize=1)
+def get_secret_store() -> SecretStore:
+    settings = get_settings()
+    return build_secret_store(
+        mode=settings.secret_storage_mode,
+        service_name=settings.secret_storage_service_name,
+    )
 
 
 @lru_cache(maxsize=1)
 def get_repository() -> SQLiteAuditRepository:
     settings = get_settings()
-    return SQLiteAuditRepository(db_path=settings.database_path)
+    return SQLiteAuditRepository(
+        db_path=settings.database_path,
+        secret_store=get_secret_store(),
+    )
 
 
 @lru_cache(maxsize=1)

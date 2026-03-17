@@ -9,6 +9,8 @@ export type AuditTarget = {
   include_local_docs: boolean;
 };
 
+export type AnalysisMode = "fast" | "deep";
+
 export type SourceProfile = {
   confluence_url: string;
   jira_url: string;
@@ -53,6 +55,33 @@ export type OperationalReadinessItem = {
   granted_scopes: string[];
   configured_scopes?: string[];
   notes: string[];
+};
+
+export type OperationalAlertSummary = {
+  status: "ok" | "warning" | "critical";
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  notes: string[];
+  observability_signals: {
+    trace_count: number;
+    metric_sample_count: number;
+    recent_error_span_count: number;
+  };
+  recovery_signals: {
+    reclaimable_run_count: number;
+  };
+};
+
+export type GoLiveGateSummary = {
+  ready: boolean;
+  blocking_gates: string[];
+  checks: Array<{
+    gate: string;
+    label: string;
+    passed: boolean;
+    notes: string[];
+  }>;
 };
 
 export type AtomicFactRegistrySummary = {
@@ -147,15 +176,36 @@ export type BootstrapData = {
   resource_access_policy: ResourceAccessPolicy;
   capabilities: BootstrapCapabilities;
   operational_readiness: {
+    deployment_profile?: {
+      operational_mode: string;
+      portable_defaults: boolean;
+      notes: string[];
+    };
+    secret_storage?: Record<string, unknown>;
+    persistence_profile?: Record<string, unknown>;
+    runtime_guard?: Record<string, unknown>;
     atlassian_oauth: OperationalReadinessItem;
     confluence_live_read: OperationalReadinessItem;
     jira_writeback: OperationalReadinessItem;
+    writeback_target_policy?: Record<string, unknown>;
+    operational_alerts?: OperationalAlertSummary;
+    go_live_gate?: GoLiveGateSummary;
   };
   atomic_fact_registry: AtomicFactRegistrySummary;
   quality_gate: {
     gold_set: GoldSetQualityGate;
     delta_recompute: GoldSetQualityGate;
   };
+  observability?: {
+    trace_count: number;
+    metric_sample_count: number;
+    recent_error_span_count: number;
+  };
+  worker_recovery?: {
+    reclaimable_run_count: number;
+  };
+  go_live_gate?: GoLiveGateSummary;
+  operational_alerts?: OperationalAlertSummary;
   atlassian_auth: AtlassianAuthStatus;
 };
 
@@ -222,6 +272,44 @@ export type AuditRunProgress = {
   steps: AuditProgressStep[];
 };
 
+export type ReviewCardCoverageSummary = {
+  total_documents: number;
+  total_sections: number;
+  prioritized_sections: number;
+  compared_pairs: number;
+  skipped_sections_due_to_prioritization: number;
+  skipped_pairs_due_to_budget: number;
+  source_type_counts: Record<string, number>;
+  prioritized_scope_labels: string[];
+  compared_scope_labels: string[];
+  deferred_scope_labels: string[];
+  notes: string[];
+};
+
+export type ReviewCard = {
+  card_id: string;
+  title: string;
+  deviation_type: "error" | "gap" | "misunderstanding" | "obsolete" | "unclear";
+  summary: string;
+  source_a: string;
+  source_b: string;
+  source_a_evidence: string[];
+  source_b_evidence: string[];
+  source_a_locations: AuditLocation[];
+  source_b_locations: AuditLocation[];
+  why_it_matters: string;
+  recommended_decision: string;
+  confidence: number;
+  needs_human_decision: boolean;
+  priority: "high" | "medium" | "low";
+  follow_up_capabilities: string[];
+  related_finding_ids: string[];
+  decision_state: "open" | "accepted" | "rejected" | "clarification_needed";
+  decided_at?: string | null;
+  decision_comment?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
 export type AuditAnalysisLogEntry = {
   log_id: string;
   created_at: string;
@@ -232,7 +320,8 @@ export type AuditAnalysisLogEntry = {
     | "decision_comment"
     | "truth_update"
     | "impact_analysis"
-    | "recommendation_regeneration";
+    | "recommendation_regeneration"
+    | "clarification_dialog";
   title: string;
   message: string;
   related_finding_ids: string[];
@@ -444,6 +533,7 @@ export type WritebackApprovalRequest = {
   title: string;
   summary: string;
   target_url?: string | null;
+  related_review_card_ids?: string[];
   related_package_ids: string[];
   related_finding_ids: string[];
   payload_preview: string[];
@@ -457,6 +547,7 @@ export type AuditFinding = {
   severity: "critical" | "high" | "medium" | "low";
   category:
     | "contradiction"
+    | "architecture_observation"
     | "clarification_needed"
     | "missing_definition"
     | "missing_documentation"
@@ -465,6 +556,7 @@ export type AuditFinding = {
     | "read_write_gap"
     | "traceability_gap"
     | "ownership_gap"
+    | "legacy_path_gap"
     | "policy_conflict"
     | "terminology_collision"
     | "low_confidence_review"
@@ -556,6 +648,7 @@ export type ClarificationThread = {
 export type AuditRun = {
   run_id: string;
   status: "planned" | "running" | "completed" | "failed";
+  analysis_mode: AnalysisMode;
   target: AuditTarget;
   created_at: string;
   updated_at: string;
@@ -573,6 +666,9 @@ export type AuditRun = {
   approval_requests: WritebackApprovalRequest[];
   implemented_changes: AuditImplementedChange[];
   source_snapshots: AuditSourceSnapshot[];
+  review_cards: ReviewCard[];
+  budget_limited?: boolean;
+  coverage_summary?: ReviewCardCoverageSummary | null;
   findings: AuditFinding[];
   finding_links: AuditFindingLink[];
   clarification_threads: ClarificationThread[];
