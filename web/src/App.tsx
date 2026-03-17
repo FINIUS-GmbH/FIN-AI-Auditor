@@ -182,6 +182,12 @@ function packageNextActions(pkg: DecisionPackage): string[] {
 }
 
 function reviewCardNextActions(card: ReviewCard): string[] {
+  if (card.deviation_type === "gap" && reviewCardIsBudgetGap(card)) {
+    return [
+      "Scope und moegliche Gegenquelle fuer diesen Abschnitt explizit pruefen",
+      "Bei Bedarf den Fast Audit mit erweiterter Priorisierung oder zusaetzlicher Soll-Quelle erneut laufen lassen",
+    ];
+  }
   const actions: string[] = [];
   if (card.follow_up_capabilities.includes("confluence_page_update")) {
     actions.push("Confluence- oder Doku-Korrektur nach User-Entscheidung vorbereiten");
@@ -254,6 +260,17 @@ function reviewCardRationale(card: ReviewCard): string {
   return reviewCardMetaString(card, "rationale_summary") || card.why_it_matters;
 }
 
+function reviewCardIsBudgetGap(card: ReviewCard): boolean {
+  return card.metadata?.is_budget_gap === true;
+}
+
+function reviewCardCategoryLabel(card: ReviewCard): string {
+  if (card.deviation_type === "gap" && reviewCardIsBudgetGap(card)) {
+    return "Abdeckungsluecke";
+  }
+  return de(card.deviation_type);
+}
+
 function reviewCardSourceGroups(card: ReviewCard): {
   slotLabel: string;
   sourceLabel: string;
@@ -322,7 +339,7 @@ const EMPTY_AUTH: AtlassianAuthStatus = {
    ============================================================ */
 
 export default function App(): ReactNode {
-  const [view, setView] = useState<"work" | "structure" | "history">("work");
+  const [view, setView] = useState<"work" | "coverage" | "structure" | "history">("work");
   const [runs, setRuns] = useState<AuditRun[]>([]);
   const [selId, setSelId] = useState("");
   const [boot, setBoot] = useState<BootstrapData | null>(null);
@@ -351,6 +368,9 @@ export default function App(): ReactNode {
 
   // Drafts
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [clarifyCard, setClarifyCard] = useState<ReviewCard | null>(null);
+  const [clarifyDraft, setClarifyDraft] = useState("");
+  const [waitingClarifications, setWaitingClarifications] = useState<Set<string>>(new Set());
 
   // Derived
   const run = useMemo(() => runs.find((r) => r.run_id === selId) ?? runs[0] ?? null, [runs, selId]);
@@ -393,6 +413,24 @@ export default function App(): ReactNode {
   const [elapsed, setElapsed] = useState("");
   // Reset card index when run changes
   useEffect(() => { setCardIdx(0); }, [run?.run_id]);
+  useEffect(() => {
+    if (!run) {
+      setWaitingClarifications(new Set());
+      return;
+    }
+    const activeIds = new Set<string>();
+    if (run.analysis_mode === "fast") {
+      openReviewCards.forEach((card) => activeIds.add(card.card_id));
+    } else {
+      openPkgs.forEach((pkg) => activeIds.add(pkg.package_id));
+      soloFindings.forEach((finding) => activeIds.add(finding.finding_id));
+    }
+    setWaitingClarifications((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => { if (activeIds.has(id)) next.add(id); });
+      return next;
+    });
+  }, [run?.run_id, run?.analysis_mode, openReviewCards, openPkgs, soloFindings]);
   // Elapsed timer for running runs
   useEffect(() => {
     const startStr = run?.started_at ?? run?.created_at;
@@ -613,6 +651,10 @@ export default function App(): ReactNode {
             <span className="nav-text">Befund-Auditierung</span>
             {(openCount + pendCount) > 0 && <span className="nav-badge">{openCount + pendCount}</span>}
           </button>
+          <button className={`nav-item${view === "coverage" ? " active" : ""}`} onClick={() => setView("coverage")}>
+            <span className="nav-icon">🧭</span>
+            <span className="nav-text">Scope & Abdeckung</span>
+          </button>
           <button className={`nav-item${view === "structure" ? " active" : ""}`} onClick={() => setView("structure")}>
             <span className="nav-icon">📐</span>
             <span className="nav-text">Doku-Strukturierung</span>
@@ -646,13 +688,24 @@ export default function App(): ReactNode {
         {/* Header */}
         <header className="header">
           <div className="header-left">
-            <h1>{view === "work" ? "Befund-Auditierung" : view === "structure" ? "Doku-Strukturierung" : "Verlauf"}</h1>
+            <h1>{
+              view === "work"
+                ? "Befund-Auditierung"
+                : view === "coverage"
+                  ? "Scope & Abdeckung"
+                  : view === "structure"
+                    ? "Doku-Strukturierung"
+                    : "Verlauf"
+            }</h1>
             {view === "work" && run && (
               <p className="header-sub">
                 {isFastRun
                   ? `${openCount} Review-Karten offen · ${pendCount} Folgeaktionen zur Freigabe · ${run.coverage_summary?.compared_pairs ?? 0} Vergleichspaare`
                   : `${openCount} Probleme zu bewerten · ${activeFacts.length} bestätigte Fakten · ${pendCount} Änderungen zur Freigabe`}
               </p>
+            )}
+            {view === "coverage" && (
+              <p className="header-sub">Fast-Audit-Scope, Priorisierung und bewusst zurueckgestellte Vergleiche transparent einsehen</p>
             )}
             {view === "structure" && (
               <p className="header-sub">Confluence-Dokumentation analysieren · Struktur bewerten · Fachlich / Technisch trennen</p>
@@ -733,20 +786,6 @@ export default function App(): ReactNode {
                           : `${run.implemented_changes.length} umgesetzt · ${run.decision_records.length} Bewertungen`
                         : "–"}
                     </span>
-                  </div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
-                  <div className="metric-body">
-                    <span className="metric-label">{isFastRun ? "Abweichungstypen" : "Widersprüche"}</span>
-                    <span className="metric-value">
-                      {run
-                        ? isFastRun
-                          ? run.review_cards.filter((card) => card.deviation_type === "error").length
-                          : run.findings.filter(f => ["contradiction","policy_conflict","terminology_collision"].includes(f.category)).length
-                        : 0}
-                    </span>
-                    <span className="metric-sub">{isFastRun ? "Fehlerhafte oder konfliktive Vergleiche" : "Konflikte zwischen Quellen"}</span>
                   </div>
                 </div>
                 <div className="metric-card">
@@ -877,86 +916,6 @@ export default function App(): ReactNode {
               {appErr && <div className="error-box">{appErr}</div>}
               {exErr && <div className="error-box">{exErr}</div>}
 
-              {isFastRun && run?.coverage_summary && (
-                <section className="coverage-panel">
-                  <div className="section-head">
-                    <h2>Scope & Abdeckung</h2>
-                    <span className="section-count">
-                      {run.coverage_summary.total_documents} Quellen · {run.coverage_summary.total_sections} Sektionen
-                    </span>
-                  </div>
-                  <p className="coverage-summary-text">
-                    Der Fast Audit vergleicht nicht den gesamten Scope vollstaendig, sondern priorisiert. Diese Ansicht zeigt
-                    explizit, was gesammelt, was wirklich gespiegelt und was in diesem Lauf zurueckgestellt wurde.
-                  </p>
-                  <div className="coverage-grid">
-                    <section className="coverage-block">
-                      <h3>Eingesammelt</h3>
-                      <ul className="coverage-list">
-                        <li>{run.coverage_summary.total_documents} Quellen wurden geladen.</li>
-                        <li>{run.coverage_summary.total_sections} Sektionen wurden aus dem Scope zugeschnitten.</li>
-                      </ul>
-                      {coverageSourceTypeEntries(run).length > 0 && (
-                        <>
-                          <div className="coverage-label">Quellarten im Lauf</div>
-                          <ul className="coverage-chip-list">
-                            {coverageSourceTypeEntries(run).map(([sourceType, count]) => (
-                              <li key={sourceType}>{sourceTypeLabel(sourceType)}: {count}</li>
-                            ))}
-                          </ul>
-                        </>
-                      )}
-                    </section>
-                    <section className="coverage-block">
-                      <h3>Priorisiert geprueft</h3>
-                      <ul className="coverage-list">
-                        <li>{run.coverage_summary.prioritized_sections} Sektionen kamen in die schnelle Vergleichsmenge.</li>
-                        <li>{run.coverage_summary.compared_pairs} Vergleichspaare wurden tatsaechlich gespiegelt.</li>
-                      </ul>
-                      {coverageScopeLabels(run.coverage_summary.compared_scope_labels).length > 0 && (
-                        <>
-                          <div className="coverage-label">Tatsaechlich verglichene Bereiche</div>
-                          <ul className="coverage-list">
-                            {coverageScopeLabels(run.coverage_summary.compared_scope_labels).map((label) => <li key={label}>{label}</li>)}
-                          </ul>
-                        </>
-                      )}
-                    </section>
-                    <section className="coverage-block">
-                      <h3>Bewusst zurueckgestellt</h3>
-                      <ul className="coverage-list">
-                        <li>{run.coverage_summary.skipped_sections_due_to_prioritization} Sektionen blieben ausserhalb der priorisierten Menge.</li>
-                        <li>{run.coverage_summary.skipped_pairs_due_to_budget} potenzielle Vergleiche wurden aus Budgetgruenden nicht mehr gespiegelt.</li>
-                      </ul>
-                      {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).length > 0 && (
-                        <>
-                          <div className="coverage-label">Beispiele fuer zurueckgestellte Bereiche</div>
-                          <ul className="coverage-list">
-                            {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).map((label) => <li key={label}>{label}</li>)}
-                          </ul>
-                        </>
-                      )}
-                    </section>
-                  </div>
-                  {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).length > 0 && (
-                    <div className="coverage-notes">
-                      <div className="coverage-label">Priorisierte Bereiche im Lauf</div>
-                      <ul className="coverage-list">
-                        {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).map((label) => <li key={label}>{label}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                  {run.coverage_summary.notes.length > 0 && (
-                    <div className="coverage-notes">
-                      <div className="coverage-label">Audit-Hinweise</div>
-                      <ul className="coverage-list">
-                        {run.coverage_summary.notes.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                </section>
-              )}
-
               {/* ── Issue Card Stack ── */}
               {isFastRun ? (
                 openReviewCards.length > 0 && (
@@ -996,39 +955,28 @@ export default function App(): ReactNode {
                             <p className="lane-note">{reviewCardIndependenceNote(cards[0])}</p>
                             <div className="card-list">
                               {cards.map((card, index) => {
-                                const labels = reviewCardDecisionLabels(card);
-                                const consequences = reviewCardDecisionConsequences(card);
+                                if (index > 0) return null;
                                 return (
-                                  <WorkCard
+                                  <div
                                     key={card.card_id}
-                                    id={card.card_id}
-                                    rank={index + 1}
-                                    severity={card.priority}
-                                    category={card.deviation_type}
-                                    title={card.title}
-                                    scope={card.summary}
-                                    recommendation={card.recommended_decision}
-                                    decisionQuestion={reviewCardDecisionQuestion(card)}
-                                    decisionQuestionLabel="Frage zur Entscheidung"
-                                    acceptLabel={labels.accept}
-                                    rejectLabel={labels.reject}
-                                    clarifyLabel={labels.clarify}
-                                    acceptConsequences={consequences.accept}
-                                    rejectConsequences={consequences.reject}
-                                    clarifyConsequences={consequences.clarify}
-                                    analysisContext={[
-                                      reviewCardRationale(card),
-                                      `Vertrauen: ${Math.round(card.confidence * 100)}%`,
-                                      `Vergleichsfokus: ${reviewCardMetaString(card, "comparison_focus") || card.title}`,
-                                    ]}
-                                    independenceNote={reviewCardIndependenceNote(card)}
-                                    nextActions={reviewCardNextActions(card)}
-                                    sourceGroups={reviewCardSourceGroups(card)}
-                                    busy={pkgBusy === card.card_id}
-                                    onAccept={() => void doReviewCard(card.card_id, "accept")}
-                                    onReject={() => void doReviewCard(card.card_id, "reject")}
-                                    onClarify={() => void doReviewCard(card.card_id, "clarify")}
-                                  />
+                                    className="card-list-item card-list-item-overlay"
+                                    style={{
+                                      zIndex: cards.length - index,
+                                      marginTop: index === 0 ? 0 : -48,
+                                      marginLeft: index * 10,
+                                      marginRight: index * 10,
+                                      transform: `scale(${Math.max(0.94, 1 - index * 0.02)})`,
+                                    }}
+                                  >
+                                    <ReviewCardView
+                                      card={card}
+                                      rank={index + 1}
+                                      busy={pkgBusy === card.card_id}
+                                      onAccept={() => void doReviewCard(card.card_id, "accept")}
+                                      onReject={() => void doReviewCard(card.card_id, "reject")}
+                                      onClarify={() => { setClarifyCard(card); setClarifyDraft(""); }}
+                                    />
+                                  </div>
                                 );
                               })}
                             </div>
@@ -1084,9 +1032,22 @@ export default function App(): ReactNode {
                       </div>
                       <div className="card-list">
                         {finalCards.map((group, cardRank) => {
+                          if (cardRank > 0) return null;
                           const item = group.root;
+                          const cardId = item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id;
+                          const isWaiting = waitingClarifications.has(cardId);
                           return (
-                            <div key={item.kind === "pkg" ? item.pkg.package_id : item.f.finding_id} className="card-list-item">
+                            <div
+                              key={cardId}
+                              className="card-list-item card-list-item-overlay"
+                              style={{
+                                zIndex: finalCards.length - cardRank,
+                                marginTop: cardRank === 0 ? 0 : -48,
+                                marginLeft: cardRank * 10,
+                                marginRight: cardRank * 10,
+                                transform: `scale(${Math.max(0.94, 1 - cardRank * 0.02)})`,
+                              }}
+                            >
                               {group.related > 0 && <div className="wc-related-hint" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 12px", borderBottom: "1px solid var(--border-subtle)" }}>+ {group.related} verwandte Probleme (werden nach Bewertung neu priorisiert)</div>}
                               {item.kind === "pkg" ? (
                                 <WorkCard id={item.pkg.package_id}
@@ -1094,6 +1055,12 @@ export default function App(): ReactNode {
                                   severity={item.pkg.severity_summary} category={item.pkg.category}
                                   title={item.pkg.title} scope={item.pkg.scope_summary}
                                   recommendation={item.pkg.recommendation_summary}
+                                  waiting={isWaiting}
+                                  onClearWaiting={() => setWaitingClarifications((prev) => {
+                                    const next = new Set(prev);
+                                    next.delete(item.pkg.package_id);
+                                    return next;
+                                  })}
                                   positiveConsequences={strs(item.pkg.metadata?.positive_consequences)}
                                   negativeConsequences={strs(item.pkg.metadata?.negative_consequences)}
                                   deltaHints={strs(item.pkg.metadata?.delta_summary)}
@@ -1116,6 +1083,12 @@ export default function App(): ReactNode {
                                   severity={item.f.severity} category={item.f.category}
                                   title={item.f.title} scope={item.f.summary}
                                   recommendation={item.f.recommendation}
+                                  waiting={isWaiting}
+                                  onClearWaiting={() => setWaitingClarifications((prev) => {
+                                    const next = new Set(prev);
+                                    next.delete(item.f.finding_id);
+                                    return next;
+                                  })}
                                   positiveConsequences={strs(item.f.metadata?.positive_consequences)}
                                   negativeConsequences={strs(item.f.metadata?.negative_consequences)}
                                   analysisContext={[
@@ -1148,21 +1121,48 @@ export default function App(): ReactNode {
                     <h2>Akzeptierte Review-Karten</h2>
                     <span className="section-count">{acceptedReviewCards.length} fuer Folgeaktionen freigegeben</span>
                   </div>
-                  {acceptedReviewCards.map((card) => (
-                    <article className="wc" key={`accepted:${card.card_id}`}>
-                      <div className="wc-badges">
+                  {acceptedReviewCards.map((card) => {
+                    const groups = reviewCardSourceGroups(card);
+                    const confidencePct = Math.round(card.confidence * 100);
+                    return (
+                    <article className="rc rc-decided" key={`accepted:${card.card_id}`}>
+                      <div className="rc-badges">
                         <span className="badge badge-approved">akzeptiert</span>
-                        <span className="badge badge-cat">{de(card.deviation_type)}</span>
+                        <span className="badge badge-cat">{reviewCardCategoryLabel(card)}</span>
                         <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
                       </div>
-                      <h3 className="wc-title">{card.title}</h3>
-                      <p className="wc-scope">{card.summary}</p>
-                      <div className="wc-context">
-                        <div className="wc-label">Entscheidung</div>
-                        <ul>
+                      <h3 className="rc-title">{card.title}</h3>
+                      <p className="rc-subtitle">{card.summary}</p>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Quellenvergleich</div>
+                        <div className="rc-sources">
+                          {groups.map((g, i) => {
+                            const srcType = i === 0 ? card.source_a_locations[0]?.source_type : card.source_b_locations[0]?.source_type;
+                            const srcCfg = srcType ? (SRC_CFG[srcType] ?? null) : null;
+                            return (
+                              <div className="rc-source-row" key={`${g.slotLabel}:${i}`}>
+                                <div className="rc-source-icon">{srcCfg ? srcCfg.icon : <span>•</span>}</div>
+                                <div className="rc-source-body">
+                                  <strong>{g.sourceLabel}</strong>
+                                  <div className="rc-source-quote">"{g.statement}"</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Bewertung</div>
+                        <div className="rc-assessment">
+                          <div className="rc-assessment-bar"><div className="rc-assessment-fill" style={{ width: `${confidencePct}%` }} /></div>
+                          <div className="rc-assessment-text">Confidence: {confidencePct}%</div>
+                        </div>
+                      </div>
+                      <div className="rc-section">
+                        <div className="rc-section-label">Entscheidung</div>
+                        <ul className="rc-impact-list">
                           <li>{card.why_it_matters}</li>
                           {card.decision_comment && <li>Kommentar: {card.decision_comment}</li>}
-                          <li>Confidence: {Math.round(card.confidence * 100)}%</li>
                         </ul>
                       </div>
                       <div className="wc-actions">
@@ -1207,7 +1207,8 @@ export default function App(): ReactNode {
                         </div>
                       </div>
                     </article>
-                  ))}
+                    );
+                  })}
                 </section>
               )}
 
@@ -1383,6 +1384,100 @@ export default function App(): ReactNode {
               )}
 
             </>
+          ) : view === "coverage" ? (
+            run ? (
+              isFastRun && run.coverage_summary ? (
+                <section className="coverage-panel">
+                  <div className="section-head">
+                    <h2>Scope & Abdeckung</h2>
+                    <span className="section-count">
+                      {run.coverage_summary.total_documents} Quellen · {run.coverage_summary.total_sections} Sektionen
+                    </span>
+                  </div>
+                  <p className="coverage-summary-text">
+                    Der Fast Audit vergleicht nicht den gesamten Scope vollstaendig, sondern priorisiert. Diese Ansicht zeigt
+                    explizit, was gesammelt, was wirklich gespiegelt und was in diesem Lauf zurueckgestellt wurde.
+                  </p>
+                  <div className="coverage-grid">
+                    <section className="coverage-block">
+                      <h3>Eingesammelt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.total_documents} Quellen wurden geladen.</li>
+                        <li>{run.coverage_summary.total_sections} Sektionen wurden aus dem Scope zugeschnitten.</li>
+                      </ul>
+                      {coverageSourceTypeEntries(run).length > 0 && (
+                        <>
+                          <div className="coverage-label">Quellarten im Lauf</div>
+                          <ul className="coverage-chip-list">
+                            {coverageSourceTypeEntries(run).map(([sourceType, count]) => (
+                              <li key={sourceType}>{sourceTypeLabel(sourceType)}: {count}</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Priorisiert geprueft</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.prioritized_sections} Sektionen kamen in die schnelle Vergleichsmenge.</li>
+                        <li>{run.coverage_summary.compared_pairs} Vergleichspaare wurden tatsaechlich gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.compared_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Tatsaechlich verglichene Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.compared_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                    <section className="coverage-block">
+                      <h3>Bewusst zurueckgestellt</h3>
+                      <ul className="coverage-list">
+                        <li>{run.coverage_summary.skipped_sections_due_to_prioritization} Sektionen blieben ausserhalb der priorisierten Menge.</li>
+                        <li>{run.coverage_summary.skipped_pairs_due_to_budget} potenzielle Vergleiche wurden aus Budgetgruenden nicht mehr gespiegelt.</li>
+                      </ul>
+                      {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).length > 0 && (
+                        <>
+                          <div className="coverage-label">Beispiele fuer zurueckgestellte Bereiche</div>
+                          <ul className="coverage-list">
+                            {coverageScopeLabels(run.coverage_summary.deferred_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                  </div>
+                  {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Priorisierte Bereiche im Lauf</div>
+                      <ul className="coverage-list">
+                        {coverageScopeLabels(run.coverage_summary.prioritized_scope_labels).map((label) => <li key={label}>{label}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {run.coverage_summary.notes.length > 0 && (
+                    <div className="coverage-notes">
+                      <div className="coverage-label">Audit-Hinweise</div>
+                      <ul className="coverage-list">
+                        {run.coverage_summary.notes.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </section>
+              ) : (
+                <div className="empty">
+                  <div className="empty-icon">🧭</div>
+                  <strong>Keine Scope-Ansicht fuer diesen Lauf</strong>
+                  <p>Scope & Abdeckung ist aktuell nur fuer Fast-Audit-Laeufe mit Coverage-Daten verfuegbar.</p>
+                </div>
+              )
+            ) : (
+              <div className="empty">
+                <div className="empty-icon">🧭</div>
+                <strong>Kein Audit-Run ausgewaehlt</strong>
+                <p>Waehle oder starte einen Fast-Audit-Run, um Scope & Abdeckung zu sehen.</p>
+              </div>
+            )
           ) : view === "structure" ? (
             /* ═══════════════ DOKU-STRUKTURIERUNG ═══════════════ */
             <DocStructureView run={run} boot={boot} sp={sp} />
@@ -1392,6 +1487,56 @@ export default function App(): ReactNode {
           )}
         </div>
       </main>
+
+      {clarifyCard && (
+        <div className="modal-overlay" onClick={() => setClarifyCard(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Zustaendigkeit klaeren</h2>
+            <p>Kurze Einordnung oder Rueckfrage fuer diese Entscheidungskarte erfassen.</p>
+            <div className="clar-body">
+              <div className="clar-messages">
+                <div className="clar-msg clar-msg-system">
+                  <div className="clar-msg-head">
+                    <span className="clar-msg-role">System</span>
+                    <span className="clar-msg-time">jetzt</span>
+                  </div>
+                  <div className="clar-msg-body">
+                    Beschreibe kurz, wer zustaendig ist oder welche Info fehlt, damit die Karte spaeter sauber entschieden werden kann.
+                  </div>
+                </div>
+              </div>
+              <div className="clar-input-area">
+                <textarea
+                  className="clar-input"
+                  value={clarifyDraft}
+                  onChange={(e) => setClarifyDraft(e.target.value)}
+                  placeholder="Zustaendigkeit, fehlende Quelle, Rueckfrage…"
+                />
+                <div className="clar-input-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => setClarifyCard(null)}>Abbrechen</button>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={async () => {
+                      if (!clarifyCard) return;
+                      const payload = clarifyDraft.trim();
+                      if (payload) {
+                        await doComment(`[KLAERUNG] ReviewCard ${clarifyCard.card_id}: ${payload}`);
+                      } else {
+                        await doComment(`[KLAERUNG] ReviewCard ${clarifyCard.card_id}`);
+                      }
+                      setWaitingClarifications((prev) => new Set(prev).add(clarifyCard.card_id));
+                      setClarifyCard(null);
+                      setClarifyDraft("");
+                    }}
+                  >
+                    Klaerung senden
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════ NEW RUN MODAL ═══════════════ */}
       {showModal && <RunModal
@@ -1410,9 +1555,191 @@ export default function App(): ReactNode {
    WORK CARD (inline component)
    ============================================================ */
 
+/* ============================================================
+   REVIEW CARD VIEW — structured for Fast-Audit Review cards
+   Layout: Badge → Title → Description → Sources → Assessment →
+           Rationale → Impact → Recommendation → Decision
+   ============================================================ */
+function ReviewCardView(props: {
+  card: ReviewCard;
+  rank?: number;
+  busy: boolean;
+  onAccept: () => void;
+  onReject: () => void;
+  onClarify?: () => void;
+}): ReactNode {
+  const { card, rank, busy } = props;
+  const labels = reviewCardDecisionLabels(card);
+  const consequences = reviewCardDecisionConsequences(card);
+  const groups = reviewCardSourceGroups(card);
+  const rationale = reviewCardRationale(card);
+  const nextActions = reviewCardNextActions(card);
+  const confidencePct = Math.round(card.confidence * 100);
+  const comparisonFocus = reviewCardMetaString(card, "comparison_focus") || card.title;
+
+  // Determine which source carries the current truth (the "correct" one)
+  const truthSourceType = card.source_a_locations[0]?.source_type
+    || card.source_b_locations[0]?.source_type
+    || "";
+  const truthCfg = truthSourceType ? (SRC_CFG[truthSourceType] ?? null) : null;
+
+  // Assessment sentence
+  const assessmentText = confidencePct >= 80
+    ? `Nach Auswertung aller Quellen ist die o.g. Aussage zu ${confidencePct}% korrekt.`
+    : confidencePct >= 50
+      ? `Nach Auswertung aller Quellen ist die o.g. Aussage zu ${confidencePct}% belastbar.`
+      : `Die Aussage konnte nur zu ${confidencePct}% quellenseitig abgesichert werden.`;
+
+  // Impact lines
+  const impactLines: string[] = [];
+  if (card.why_it_matters) impactLines.push(card.why_it_matters);
+  for (const action of nextActions) impactLines.push(action);
+
+  return (
+    <article className="rc" data-severity={card.priority}>
+      {/* ── 1. Badge-Row: Deviation Type + Priority + Truth-Source Icon ── */}
+      {rank != null && <div className="rc-rank" title={`Prioritaet ${rank}`}>#{rank}</div>}
+      <div className="rc-badges">
+        <span className="badge badge-cat">{reviewCardCategoryLabel(card)}</span>
+        <span className={`badge badge-${card.priority}`}>{de(card.priority)}</span>
+        {truthCfg && (
+          <span className={`rc-truth-source ${truthCfg.cls}`} title={`Wahrheitsquelle: ${truthCfg.label}`}>
+            {truthCfg.icon} <span className="rc-truth-label">{truthCfg.label}</span>
+          </span>
+        )}
+      </div>
+
+      {/* ── 2. Ueberschrift: Kurzbeschreibung ── */}
+      <h3 className="rc-title">{card.title}</h3>
+
+      {/* ── 3. Untertitel: Ausfuehrliche Beschreibung ── */}
+      <p className="rc-subtitle">{card.summary}</p>
+
+      {/* ── 4. Quellen-Karte ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Quellenvergleich</div>
+        <div className="rc-sources">
+          {groups.map((g, i) => {
+            const srcType = i === 0 ? card.source_a_locations[0]?.source_type : card.source_b_locations[0]?.source_type;
+            const srcCfg = srcType ? (SRC_CFG[srcType] ?? null) : null;
+            return (
+              <div className="rc-source-row" key={`${g.slotLabel}:${i}`}>
+                <div className="rc-source-icon">
+                  {srcCfg ? srcCfg.icon : <span>•</span>}
+                </div>
+                <div className="rc-source-body">
+                  <strong>{g.sourceLabel}</strong>
+                  {g.heading && <span className="rc-source-heading"> — {g.heading}</span>}
+                  <div className="rc-source-quote">"{g.statement}"</div>
+                  {g.evidence.length > 0 && (
+                    <ul className="rc-source-evidence">
+                      {g.evidence.map((ev, ei) => <li key={ei}>{ev}</li>)}
+                    </ul>
+                  )}
+                  {g.fullText && g.fullText.trim() !== g.statement.trim() && (
+                    <details className="rc-source-full">
+                      <summary>Volltext anzeigen</summary>
+                      <div className="rc-source-fulltext">{g.fullText}</div>
+                    </details>
+                  )}
+                  {g.locations.length > 0 && (
+                    <div className="ev-locs">
+                      {g.locations.map((loc) => (
+                        <div className="ev-loc" key={loc.location_id || `${loc.source_id}-${loc.title}`}>
+                          <SrcBadge t={loc.source_type} />
+                          {loc.url ? <a href={loc.url} target="_blank" rel="noreferrer">{locStr(loc)}</a> : <span>{locStr(loc)}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── 5. Bewertung ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Bewertung</div>
+        <div className="rc-assessment">
+          <div className="rc-assessment-bar">
+            <div className="rc-assessment-fill" style={{ width: `${confidencePct}%` }} />
+          </div>
+          <div className="rc-assessment-text">{assessmentText}</div>
+        </div>
+      </div>
+
+      {/* ── 6. Begruendung ── */}
+      <div className="rc-section">
+        <div className="rc-section-label">Begruendung</div>
+        <div className="rc-rationale">{rationale}</div>
+        {comparisonFocus !== card.title && (
+          <div className="rc-comparison-focus">Vergleichsfokus: {comparisonFocus}</div>
+        )}
+      </div>
+
+      {/* ── 7. Auswirkung ── */}
+      {impactLines.length > 0 && (
+        <div className="rc-section">
+          <div className="rc-section-label">Auswirkung</div>
+          <ul className="rc-impact-list">
+            {impactLines.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* ── 8. Empfehlung ── */}
+      {card.recommended_decision && (
+        <div className="rc-section">
+          <div className="rc-section-label">Empfehlung</div>
+          <div className="rc-recommendation">{card.recommended_decision}</div>
+        </div>
+      )}
+
+      {/* ── Kontext (Lane, Independence) ── */}
+      <div className="rc-meta-row">
+        <span className="rc-meta-chip">{reviewCardLaneLabel(card)}</span>
+        <span className="rc-meta-note">{reviewCardIndependenceNote(card)}</span>
+      </div>
+
+      {/* ── Entscheidung ── */}
+      <div className="wc-actions">
+        <div className="wc-decision-label">Ihre Entscheidung</div>
+        <div className="wc-question-block wc-question-block-end">
+          <div className="wc-label">Frage zur Entscheidung</div>
+          <div className="wc-question-text">{reviewCardDecisionQuestion(card)}</div>
+        </div>
+        <div className="wc-action-outcomes">
+          <div className="wc-action-card wc-action-card-accept">
+            <div className="wc-action-card-head">{labels.accept}</div>
+            <ul>{consequences.accept.map((item, i) => <li key={i}>{item}</li>)}</ul>
+          </div>
+          <div className="wc-action-card wc-action-card-reject">
+            <div className="wc-action-card-head">{labels.reject}</div>
+            <ul>{consequences.reject.map((item, i) => <li key={i}>{item}</li>)}</ul>
+          </div>
+          {props.onClarify && (
+            <div className="wc-action-card wc-action-card-clarify">
+              <div className="wc-action-card-head">{labels.clarify}</div>
+              <ul>{consequences.clarify.map((item, i) => <li key={i}>{item}</li>)}</ul>
+            </div>
+          )}
+        </div>
+        <div className="wc-btns wc-btns-primary">
+          <button className="btn btn-accept" disabled={busy} onClick={props.onAccept}>✓ {labels.accept}</button>
+          <button className="btn btn-reject" disabled={busy} onClick={props.onReject}>✗ {labels.reject}</button>
+          {props.onClarify && <button className="btn btn-specify" disabled={busy} onClick={props.onClarify}>{labels.clarify}</button>}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function WorkCard(props: {
   id: string; severity: string; category: string; title: string; scope: string;
   recommendation: string; deltaHints?: string[];
+  waiting?: boolean; onClearWaiting?: () => void;
   proposedPageMd?: string; proposedPageTitle?: string;
   elements?: { severity: string; confidence: number; explanation: string; locations: AuditLocation[] }[];
   sourceGroups?: {
@@ -1461,6 +1788,15 @@ function WorkCard(props: {
     <article className="wc" data-severity={props.severity}>
       {/* Rang-Badge */}
       {props.rank != null && <div className="wc-rank" title={`Priorität ${props.rank}`}>#{props.rank}</div>}
+      {props.waiting && (
+        <div className="wc-waiting">
+          <span className="wc-waiting-dot" />
+          <span>Wartet auf Klaerung</span>
+          {props.onClearWaiting && (
+            <button className="btn btn-outline btn-sm" onClick={props.onClearWaiting}>Warten beenden</button>
+          )}
+        </div>
+      )}
       {/* 1. Typ-Badge + Schweregrad + Primary Source */}
       <div className="wc-badges">
         <span className="badge badge-cat">{de(props.category)}</span>
@@ -1635,8 +1971,8 @@ function WorkCard(props: {
           </div>
         )}
         <div className="wc-btns wc-btns-primary">
-          <button className="btn btn-accept" disabled={props.busy} onClick={props.onAccept}>✓ {acceptLabel}</button>
-          <button className="btn btn-reject" disabled={props.busy} onClick={props.onReject}>✗ {rejectLabel}</button>
+          <button className="btn btn-accept" disabled={props.busy || props.waiting} onClick={props.onAccept}>✓ {acceptLabel}</button>
+          <button className="btn btn-reject" disabled={props.busy || props.waiting} onClick={props.onReject}>✗ {rejectLabel}</button>
           {props.onClarify && <button className="btn btn-specify" disabled={props.busy} onClick={props.onClarify}>{clarifyLabel}</button>}
         </div>
         {(props.onConfluence || props.onJira) && (
