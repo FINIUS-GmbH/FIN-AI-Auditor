@@ -19,6 +19,15 @@ import logging
 import re
 from typing import Final, Sequence, TypedDict
 
+from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
+    AuditLocation,
+    AuditPosition,
+    ClaimAssertionStatus,
+    ClaimSourceAuthority,
+)
+from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimEvidence, ExtractedClaimRecord
+
 
 class _CypherFragment(TypedDict):
     text: str
@@ -30,9 +39,6 @@ class _CypherRelationship(TypedDict):
     rel_type: str
     start_label: str
     end_label: str
-
-from fin_ai_auditor.domain.models import AuditClaimEntry, AuditLocation, AuditPosition
-from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimEvidence, ExtractedClaimRecord
 
 # ── Domain entity names we track ────────────────────────────────────
 
@@ -2037,7 +2043,7 @@ def _extract_from_table_row(
     return records
 
 
-def _assertion_status(line_text: str) -> str:
+def _assertion_status(line_text: str) -> ClaimAssertionStatus:
     if _DEPRECATED_PATTERN.search(line_text):
         return "deprecated"
     if _NOT_SSOT_PATTERN.search(line_text):
@@ -2047,7 +2053,7 @@ def _assertion_status(line_text: str) -> str:
     return "asserted"
 
 
-def _source_authority(*, document: CollectedDocument) -> str:
+def _source_authority(*, document: CollectedDocument) -> ClaimSourceAuthority:
     descriptor = " ".join([str(document.title or ""), str(document.path_hint or ""), str(document.source_id or "")]).casefold()
     if document.source_type == "metamodel":
         return "ssot"

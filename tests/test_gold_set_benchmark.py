@@ -15,6 +15,7 @@ from fin_ai_auditor.services.gold_set_benchmark import (
     GoldSetFindingExpectation,
     evaluate_gold_set_cases,
     evaluate_delta_gold_set_cases,
+    _detect_case_findings as detect_gold_set_case_findings,
 )
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
 
@@ -198,6 +199,43 @@ def test_reference_gold_set_gate_is_green() -> None:
     assert gate.evaluation.recall == 1.0
     assert gate.evaluation.precision >= 0.9
     assert gate.evaluation.false_positives == 0
+
+
+def test_reference_gold_set_covers_process_phase_count_doc_to_metamodel_conflict() -> None:
+    documents_by_case = {
+        case.case_id: documents
+        for case, documents in build_reference_gold_set_documents()
+    }
+
+    positive_findings = detect_gold_set_case_findings(*documents_by_case["process_phase_count_metamodel_conflict"])
+    negative_findings = detect_gold_set_case_findings(*documents_by_case["process_phase_count_negative_case"])
+
+    expectation = GoldSetFindingExpectation(
+        category="contradiction",
+        canonical_key="BSM.process",
+        title_contains="Metamodell",
+    )
+
+    assert any(
+        finding.category == expectation.category
+        and str(finding.canonical_key or "") == expectation.canonical_key
+        and expectation.title_contains.casefold() in finding.title.casefold()
+        for finding in positive_findings
+    )
+    assert not any(
+        finding.category == expectation.category
+        and str(finding.canonical_key or "") == expectation.canonical_key
+        and expectation.title_contains.casefold() in finding.title.casefold()
+        for finding in negative_findings
+    )
+    assert not any(
+        str(finding.canonical_key or "").startswith("consensus_deviation:BSM.process:phase_count")
+        for finding in negative_findings
+    )
+    assert not any(
+        str(finding.canonical_key or "") == "coverage_gap:doc_only:BSM.process:phase_count"
+        for finding in negative_findings
+    )
 
 
 def test_reference_gold_set_synthetic_findings_cover_policy_and_doc_gap() -> None:

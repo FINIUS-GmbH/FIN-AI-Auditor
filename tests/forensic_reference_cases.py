@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from uuid import uuid4
 
 from fin_ai_auditor.domain.models import AuditClaimEntry, AuditLocation, AuditPosition, AuditSourceSnapshot

@@ -1,6 +1,9 @@
 import asyncio
 import json
 from pathlib import Path
+import subprocess
+
+import pytest
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
@@ -50,6 +53,47 @@ def test_github_connector_collects_code_and_local_docs(tmp_path: Path) -> None:
     assert len(bundle.documents) == 2
     assert {document.source_type for document in bundle.documents} == {"github_file", "local_doc"}
     assert all(snapshot.content_hash for snapshot in bundle.snapshots)
+
+
+def test_github_connector_rejects_repo_url_without_local_checkout(tmp_path: Path) -> None:
+    connector = GitHubSnapshotConnector()
+
+    with pytest.raises(ValueError, match="local_repo_path"):
+        connector.collect_snapshot(
+            request=GitHubSnapshotRequest(
+                repo_url="https://github.com/example/repo.git",
+                git_ref="main",
+            )
+        )
+
+
+def test_github_connector_reads_exact_git_ref_instead_of_worktree_head(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "auditor@example.com"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Auditor"], cwd=repo_path, check=True, capture_output=True)
+    (repo_path / "file.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "first"], cwd=repo_path, check=True, capture_output=True)
+    first_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo_path / "file.py").write_text("value = 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "second"], cwd=repo_path, check=True, capture_output=True)
+
+    connector = GitHubSnapshotConnector()
+    bundle = connector.collect_snapshot(
+        request=GitHubSnapshotRequest(local_repo_path=str(repo_path), git_ref=first_revision)
+    )
+
+    assert bundle.snapshots[0].revision_id == first_revision
+    assert bundle.documents[0].body.strip() == "value = 1"
+    assert "exakt aus dem Git-Ref" in " ".join(bundle.analysis_notes)
 
 
 def test_metamodel_connector_uses_local_dump_fallback(monkeypatch, tmp_path: Path) -> None:

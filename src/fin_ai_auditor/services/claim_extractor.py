@@ -5,9 +5,15 @@ from dataclasses import dataclass, field
 import json
 import logging
 import re
-from typing import Callable, Final
+from typing import Callable, Final, cast
 
-from fin_ai_auditor.domain.models import AuditClaimEntry, AuditLocation, AuditPosition
+from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
+    AuditLocation,
+    AuditPosition,
+    ClaimAssertionStatus,
+    ClaimSourceAuthority,
+)
 from fin_ai_auditor.services.claim_semantics import package_scope_key
 from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimEvidence, ExtractedClaimRecord
 
@@ -23,11 +29,11 @@ WRITE_LINE_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 LIFECYCLE_LINE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(status|lifecycle|promotion|review|histori|freigabe)\b",
+    r"\b(lifecycle|promotion|histori)\b",
     re.IGNORECASE,
 )
 PROCESS_LINE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(bsm|phase|prozess|process|metamodel|metamodell)\b",
+    r"\b(bsm|phase|prozess|process)\b",
     re.IGNORECASE,
 )
 POLICY_LINE_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -62,7 +68,12 @@ QUESTION_COUNT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\b(?P<count>\d{1,3})\s*(?:questions|fragen)\b|\b(?:question count|fragenzahl)\s*[:=]?\s*(?P<count_named>\d{1,3})\b",
     re.IGNORECASE,
 )
+PHASE_COUNT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\b(?P<count>\d{1,3})\s*(?:phases|phase|phasen)\b|\b(?:phase count|phasenzahl)\s*[:=]?\s*(?P<count_named>\d{1,3})\b",
+    re.IGNORECASE,
+)
 SUBJECT_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\b")
+BACKTICK_SUBJECT_PATTERN: Final[re.Pattern[str]] = re.compile(r"`(?P<token>[A-Za-z][A-Za-z0-9_.-]{2,})`")
 HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\s{0,3}(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
 TYPESCRIPT_SYMBOL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:(?:async\s+)?function|const|let|class|interface|type)\s+"
@@ -84,10 +95,41 @@ OBJECT_HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
     (("preprocessingrun", "run"), "FINAI_Run"),
     (("chunk", "minedchunk"), "Chunk"),
     (("document",), "Document"),
-    (("inputsource", "source"), "InputSource"),
+    (("inputsource", "input source"), "InputSource"),
     (("prompt",), "Prompt"),
     (("metaclass",), "MetaClass"),
     (("confluence", "page"), "ConfluencePage"),
+)
+GENERIC_DOCUMENT_SUBJECT_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "architektur",
+        "architekturrichtlinien",
+        "roadmap",
+        "zielbild",
+        "ziel",
+        "vision",
+        "produkt",
+        "produktauftrag",
+        "produktgrenzen",
+        "datenmodell",
+        "forensische",
+        "entscheidungs",
+        "retrieval",
+        "readiness",
+        "reifephasen",
+        "empfohlene",
+        "kategorien",
+        "aufbau",
+        "wirkung",
+        "quellen",
+        "quelllandschaft",
+        "rollen",
+        "zielkomponenten",
+        "hauptdomänen",
+        "hauptdomaenen",
+        "startstand",
+        "warum",
+    }
 )
 
 READ_VERBS: Final[tuple[str, ...]] = ("get", "list", "load", "read", "fetch", "query", "find", "collect", "resolve")
@@ -98,6 +140,62 @@ PRIMARY_PATH_HINTS: Final[tuple[str, ...]] = ("primary", "main path", "canonical
 SECONDARY_PATH_HINTS: Final[tuple[str, ...]] = ("secondary", "side path", "nebenpfad", "alternate", "alternative path")
 FALLBACK_PATH_HINTS: Final[tuple[str, ...]] = ("fallback", "degrade")
 COMPAT_PATH_HINTS: Final[tuple[str, ...]] = ("compat", "compatibility", "v1 path", "legacy api")
+META_ANALYSIS_PATH_HINTS: Final[tuple[str, ...]] = (
+    "claim_extractor.py",
+    "claim_semantics.py",
+    "consensus_detector.py",
+    "finding_engine.py",
+    "documentation_gap_detector.py",
+    "gold_set_benchmark.py",
+    "semantic_graph_service.py",
+    "pipeline_service.py",
+    "audit_service.py",
+)
+META_DOCUMENT_PATH_HINTS: Final[tuple[str, ...]] = (
+    "architecture.md",
+    "data-model.md",
+    "delta-sync-and-resolution.md",
+    "decision-packages-and-retrieval.md",
+    "forensic-readiness-plan.md",
+    "forensic-finding-classes.md",
+    "product-scope.md",
+    "roadmap.md",
+    "target-picture.md",
+)
+META_ANALYSIS_TEXT_HINTS: Final[tuple[str, ...]] = (
+    "subject_key=",
+    "predicate=",
+    "canonical_key=",
+    "fingerprint=",
+    "anchor_value=",
+    "matched_text=",
+    "specs.append(",
+    "generated_by",
+    "claim",
+    "claims",
+    "finding",
+    "findings",
+    "consensus",
+    "semantic",
+    "detector",
+    "gold set",
+    "reference case",
+    "package_scope_key",
+    "documented_process",
+    "implemented_process",
+    "phase_source",
+    "phase_scope",
+    "bsmphase",
+    "bsmquestion",
+    "metamodell",
+    "claim-schicht",
+    "semantik-scope",
+    "progress",
+    "analysis_log",
+    "current_activity",
+    "detail=",
+    "demo_",
+)
 REFERENCE_STOP_MARKERS: Final[tuple[str, ...]] = (
     " is ",
     " sind ",
@@ -754,9 +852,9 @@ def _extract_python_class_relationships(
             for child in node.body:
                 visit(child, class_stack=next_stack)
             return
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                visit(child, class_stack=class_stack)
+        for descendant in ast.iter_child_nodes(node):
+            if isinstance(descendant, ast.ClassDef):
+                visit(descendant, class_stack=class_stack)
 
     for child in getattr(tree, "body", []):
         visit(child, class_stack=[])
@@ -829,29 +927,29 @@ def _collect_repo_python_function_descriptors(
             string_literals: list[str] = []
             with_context_calls: list[str] = []
             loop_contexts: list[str] = []
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    call_chain = _call_chain_from_expr(expr=child.func)
+            for descendant in ast.walk(node):
+                if isinstance(descendant, ast.Call):
+                    call_chain = _call_chain_from_expr(expr=descendant.func)
                     if call_chain:
                         direct_call_chains.append(call_chain)
-                elif isinstance(child, (ast.With, ast.AsyncWith)):
-                    for item in child.items:
+                elif isinstance(descendant, (ast.With, ast.AsyncWith)):
+                    for item in descendant.items:
                         context_chain = _call_chain_from_context_expr(expr=item.context_expr)
                         if context_chain:
                             with_context_calls.append(context_chain)
-                elif isinstance(child, (ast.For, ast.AsyncFor)):
-                    loop_contexts.append(_loop_context_text(node=child))
-                elif isinstance(child, ast.Constant) and isinstance(child.value, str):
-                    string_literals.append(child.value)
+                elif isinstance(descendant, (ast.For, ast.AsyncFor)):
+                    loop_contexts.append(_loop_context_text(node=descendant))
+                elif isinstance(descendant, ast.Constant) and isinstance(descendant.value, str):
+                    string_literals.append(descendant.value)
             descriptor.direct_call_chains = _dedupe_preserve_order(direct_call_chains)
             descriptor.string_literals = _dedupe_preserve_order(string_literals)
             descriptor.with_context_calls = _dedupe_preserve_order(with_context_calls)
             descriptor.loop_contexts = _dedupe_preserve_order(loop_contexts)
             descriptors[descriptor.descriptor_key] = descriptor
             return
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                visit(child, class_stack=class_stack)
+        for descendant in ast.iter_child_nodes(node):
+            if isinstance(descendant, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(descendant, class_stack=class_stack)
 
     for child in getattr(module_context.tree, "body", []):
         visit(child, class_stack=[])
@@ -1979,9 +2077,9 @@ def _collect_python_function_descriptors(
             function_paths_by_name.setdefault(node.name, []).append(section_path)
             if class_stack:
                 method_paths_by_class[(tuple(class_stack), node.name)] = section_path
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                visit(child, class_stack=class_stack)
+        for descendant in ast.iter_child_nodes(node):
+            if isinstance(descendant, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(descendant, class_stack=class_stack)
 
     for child in getattr(tree, "body", []):
         visit(child, class_stack=[])
@@ -2482,7 +2580,10 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
     base_context = _document_base_context(document=document)
     heading_stack: list[str] = []
     current_heading = _document_section_path(base_context=base_context, heading_stack=heading_stack)
-    current_phase_key: str | None = _extract_phase_key(text_fragments=[current_heading])
+    current_phase_key: str | None = _extract_phase_key(
+        text_fragments=[current_heading],
+        require_process_context=True,
+    )
     for line_no, raw_line in enumerate(document.body.splitlines(), start=1):
         stripped = raw_line.strip()
         if not stripped:
@@ -2495,13 +2596,23 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                 title=heading_match.group("title").strip(),
             )
             current_heading = _document_section_path(base_context=base_context, heading_stack=heading_stack)
-            current_phase_key = _extract_phase_key(text_fragments=[current_heading])
+            current_phase_key = _extract_phase_key(
+                text_fragments=[current_heading],
+                require_process_context=True,
+            )
             continue
-        subject = _derive_subject_label(line=f"{current_heading} {stripped}", document=document)
-        line_phase_key = _extract_phase_key(text_fragments=[current_heading, stripped])
+        subject = _derive_document_subject_label(
+            line_text=stripped,
+            section_path=current_heading,
+            document=document,
+        )
+        line_phase_key = _extract_phase_key(
+            text_fragments=[current_heading, stripped],
+            require_process_context=True,
+        )
         if line_phase_key is not None:
             current_phase_key = line_phase_key
-        if READ_LINE_PATTERN.search(stripped):
+        if subject and READ_LINE_PATTERN.search(stripped):
             records.append(
                 _build_claim_record(
                     document=document,
@@ -2512,7 +2623,7 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                     section_path=current_heading,
                 )
             )
-        if WRITE_LINE_PATTERN.search(stripped):
+        if subject and WRITE_LINE_PATTERN.search(stripped):
             records.append(
                 _build_claim_record(
                     document=document,
@@ -2523,7 +2634,7 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                     section_path=current_heading,
                 )
             )
-        if LIFECYCLE_LINE_PATTERN.search(stripped):
+        if subject and LIFECYCLE_LINE_PATTERN.search(stripped):
             records.append(
                 _build_claim_record(
                     document=document,
@@ -2534,7 +2645,7 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                     section_path=current_heading,
                 )
             )
-        if PROCESS_LINE_PATTERN.search(stripped):
+        if _has_structural_process_signal(line_text=stripped, context_fragments=[current_heading]):
             records.append(
                 _build_claim_record(
                     document=document,
@@ -2545,7 +2656,7 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                     section_path=current_heading,
                 )
             )
-        if POLICY_LINE_PATTERN.search(stripped):
+        if subject and POLICY_LINE_PATTERN.search(stripped):
             records.append(
                 _build_claim_record(
                     document=document,
@@ -2556,17 +2667,18 @@ def _extract_document_claims(*, document: CollectedDocument) -> list[ExtractedCl
                     section_path=current_heading,
                 )
             )
-        records.extend(
-            _semantic_subclaim_records_for_line(
-                document=document,
-                line_no=line_no,
-                line_text=stripped,
-                section_path=current_heading,
-                subject=subject,
-                predicate_prefix="documented",
-                default_phase_key=current_phase_key,
+        if subject or _has_structural_process_signal(line_text=stripped, context_fragments=[current_heading]):
+            records.extend(
+                _semantic_subclaim_records_for_line(
+                    document=document,
+                    line_no=line_no,
+                    line_text=stripped,
+                    section_path=current_heading,
+                    subject=subject,
+                    predicate_prefix="documented",
+                    default_phase_key=current_phase_key,
+                )
             )
-        )
     return records
 
 
@@ -3000,18 +3112,102 @@ def _derive_subject_label(*, line: str, document: CollectedDocument) -> str:
     return _derive_subject_label_from_hints(hint_texts=hint_texts)
 
 
-def _derive_subject_label_from_hints(*, hint_texts: list[str]) -> str:
-    for keywords, subject in OBJECT_HINTS:
-        if any(keyword in text.casefold() for text in hint_texts for keyword in keywords):
-            return subject
+def _derive_document_subject_label(
+    *,
+    line_text: str,
+    section_path: str,
+    document: CollectedDocument,
+) -> str:
+    explicit_subject = _derive_explicit_document_subject_label(
+        line_text=line_text,
+        blocked_tokens=GENERIC_DOCUMENT_SUBJECT_TOKENS,
+    )
+    if explicit_subject:
+        return explicit_subject
+    hint_texts = [
+        line_text,
+        section_path,
+        *_document_context_fragments(document=document),
+    ]
+    object_hint_subject = _derive_document_object_hint_subject(hint_texts=hint_texts)
+    if object_hint_subject:
+        return object_hint_subject
+    return _derive_subject_label_from_hints(
+        hint_texts=hint_texts,
+        allow_object_hint_match=False,
+        allow_path_fallback=False,
+        blocked_tokens=GENERIC_DOCUMENT_SUBJECT_TOKENS,
+        allow_generic_token_fallback=False,
+    )
+
+
+def _derive_subject_label_from_hints(
+    *,
+    hint_texts: list[str],
+    allow_object_hint_match: bool = True,
+    allow_path_fallback: bool = True,
+    blocked_tokens: frozenset[str] | None = None,
+    allow_generic_token_fallback: bool = True,
+) -> str:
+    blocked = blocked_tokens or frozenset()
+    if allow_object_hint_match:
+        for keywords, subject in OBJECT_HINTS:
+            if any(keyword in text.casefold() for text in hint_texts for keyword in keywords):
+                return subject
+    if not allow_generic_token_fallback:
+        return "" if not allow_path_fallback else _path_subject_fallback(hint_texts=hint_texts)
     joined = " ".join(hint_texts)
     for token in SUBJECT_TOKEN_PATTERN.findall(joined):
+        if token in {"HTTP", "JSON", "UUID", "POST", "GET", "PUT", "DELETE"}:
+            continue
+        if token.casefold() in blocked:
+            continue
         if token not in {"HTTP", "JSON", "UUID", "POST", "GET", "PUT", "DELETE"}:
             return token
-    title_tokens = SUBJECT_TOKEN_PATTERN.findall(joined)
-    if title_tokens:
-        return title_tokens[0]
-    path_hint = joined
+    if not allow_path_fallback:
+        return ""
+    return _path_subject_fallback(hint_texts=hint_texts)
+
+
+def _derive_explicit_document_subject_label(*, line_text: str, blocked_tokens: frozenset[str]) -> str:
+    for match in BACKTICK_SUBJECT_PATTERN.finditer(line_text):
+        candidate = str(match.group("token") or "").strip().split(".", 1)[0]
+        if not candidate:
+            continue
+        normalized_candidate = candidate.casefold()
+        if normalized_candidate in blocked_tokens:
+            continue
+        for keywords, subject in OBJECT_HINTS:
+            if any(keyword in normalized_candidate for keyword in keywords):
+                return subject
+        if SUBJECT_TOKEN_PATTERN.fullmatch(candidate) is not None:
+            return candidate
+    return ""
+
+
+def _derive_document_object_hint_subject(*, hint_texts: list[str]) -> str:
+    for keywords, subject in OBJECT_HINTS:
+        if not any(_document_text_contains_keyword(text=text, keyword=keyword) for text in hint_texts for keyword in keywords):
+            continue
+        if subject in {"BSM_Phase", "BSM_Question"} and not _has_process_phase_context(text_fragments=hint_texts):
+            continue
+        return subject
+    return ""
+
+
+def _document_text_contains_keyword(*, text: str, keyword: str) -> bool:
+    lowered_text = str(text or "").casefold()
+    lowered_keyword = str(keyword or "").casefold().strip()
+    if not lowered_text or not lowered_keyword:
+        return False
+    if " " in lowered_keyword:
+        return lowered_keyword in lowered_text
+    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(lowered_keyword)}(?![a-z0-9])")
+    return pattern.search(lowered_text) is not None
+
+
+def _path_subject_fallback(*, hint_texts: list[str]) -> str:
+    path_hint = " ".join(hint_texts)
     stem = path_hint.rsplit("/", 1)[-1].split(".", 1)[0]
     normalized = stem.replace("_", " ").replace("-", " ").strip().title().replace(" ", "")
     return normalized or "RepositoryArtifact"
@@ -3325,8 +3521,8 @@ def _build_structured_claim_record(
         operator=str(structured_metadata.get("claim_operator") or "").strip() or None,
         constraint=str(structured_metadata.get("claim_constraint") or "").strip() or None,
         focus_value=str(structured_metadata.get("claim_focus_value") or "").strip() or None,
-        assertion_status=str(structured_metadata.get("assertion_status") or "asserted"),
-        source_authority=str(structured_metadata.get("source_authority") or "heuristic"),
+        assertion_status=_coerce_claim_assertion_status(structured_metadata.get("assertion_status")),
+        source_authority=_coerce_claim_source_authority(structured_metadata.get("source_authority")),
         metadata={
             **metadata,
             "matched_text": matched_text,
@@ -3343,6 +3539,30 @@ def _build_structured_claim_record(
         claim=claim,
         evidence=ExtractedClaimEvidence(location=location, matched_text=matched_text),
     )
+
+
+def _coerce_claim_assertion_status(value: object) -> ClaimAssertionStatus:
+    normalized = str(value or "asserted").strip()
+    if normalized in {"asserted", "excluded", "deprecated", "not_ssot", "secondary_only"}:
+        return cast(ClaimAssertionStatus, normalized)
+    return "asserted"
+
+
+def _coerce_claim_source_authority(value: object) -> ClaimSourceAuthority:
+    normalized = str(value or "heuristic").strip()
+    if normalized in {
+        "explicit_truth",
+        "confirmed_decision",
+        "ssot",
+        "governed",
+        "working_doc",
+        "historical",
+        "runtime_observation",
+        "implementation",
+        "heuristic",
+    }:
+        return cast(ClaimSourceAuthority, normalized)
+    return "heuristic"
 
 
 def _path_variant_claim_records_from_structured_record(
@@ -3672,6 +3892,14 @@ def _claim_structure_metadata(
     governance_level = _source_governance_level(document=document, predicate=predicate)
     temporal_status = _source_temporal_status(document=document)
     assertion_status = _claim_assertion_status(matched_text=matched_text, document=document)
+    if _is_secondary_analysis_claim(
+        document=document,
+        subject_key=subject_key,
+        predicate=predicate,
+        matched_text=matched_text,
+        extra_metadata=extra_metadata,
+    ):
+        assertion_status = "secondary_only"
     path_variant_role = _path_variant_role(
         document=document,
         matched_text=matched_text,
@@ -3804,6 +4032,40 @@ def _claim_assertion_status(*, matched_text: str, document: CollectedDocument) -
     return "asserted"
 
 
+def _is_secondary_analysis_claim(
+    *,
+    document: CollectedDocument,
+    subject_key: str,
+    predicate: str,
+    matched_text: str,
+    extra_metadata: dict[str, object] | None,
+) -> bool:
+    path_hint = str(document.path_hint or document.source_id or "").replace("\\", "/").casefold()
+    subject_root = str(subject_key or "").split(".", 1)[0]
+    normalized_text = " ".join(
+        [
+            str(matched_text or ""),
+            str(subject_key or ""),
+            str(predicate or ""),
+            *_metadata_text_fragments(metadata=extra_metadata),
+        ]
+    ).casefold()
+    if (
+        document.source_type == "github_file"
+        and any(path_hint.endswith(hint) for hint in META_ANALYSIS_PATH_HINTS)
+        and any(token in normalized_text for token in META_ANALYSIS_TEXT_HINTS)
+    ):
+        return True
+    if (
+        document.source_type == "local_doc"
+        and (subject_key == "BSM.process" or subject_root in {"BSM_Phase", "BSM_Question"})
+        and any(path_hint.endswith(hint) for hint in META_DOCUMENT_PATH_HINTS)
+        and any(token in normalized_text for token in META_ANALYSIS_TEXT_HINTS)
+    ):
+        return True
+    return False
+
+
 def _path_variant_role(
     *,
     document: CollectedDocument,
@@ -3912,16 +4174,19 @@ def _semantic_subclaim_specs(
     default_phase_key: str | None = None,
 ) -> list[tuple[str, str]]:
     combined = " ".join(fragment for fragment in text_fragments if fragment)
+    primary_text = str(text_fragments[-1] if text_fragments else "").strip()
     specs: list[tuple[str, str]] = []
-    if REVIEW_STATUS_PATTERN.search(combined):
+    if subject and REVIEW_STATUS_PATTERN.search(combined):
         specs.append((f"{subject}.review_status", f"{predicate_prefix}_review_status"))
-    if APPROVAL_POLICY_PATTERN.search(combined):
+    if subject and APPROVAL_POLICY_PATTERN.search(combined):
         specs.append((f"{subject}.approval_policy", f"{predicate_prefix}_approval_policy"))
-    if SCOPE_POLICY_PATTERN.search(combined):
+    if subject and SCOPE_POLICY_PATTERN.search(combined):
         specs.append((f"{subject}.scope_policy", f"{predicate_prefix}_scope_policy"))
-    if PROCESS_LINE_PATTERN.search(combined):
+    if _has_structural_process_signal(line_text=primary_text, context_fragments=text_fragments[:-1]):
         specs.append(("BSM.process", f"{predicate_prefix}_process"))
-        phase_key = _extract_phase_key(text_fragments=text_fragments) or default_phase_key
+        if _extract_phase_count(text_fragments=text_fragments) is not None:
+            specs.append(("BSM.process", "phase_count"))
+        phase_key = _extract_phase_key(text_fragments=text_fragments, require_process_context=True) or default_phase_key
         if phase_key:
             specs.append((f"BSM.phase.{phase_key}", f"{predicate_prefix}_phase_reference"))
             if _extract_phase_order(text_fragments=text_fragments) is not None:
@@ -3945,7 +4210,9 @@ def _semantic_subclaim_specs(
     return deduped
 
 
-def _extract_phase_key(*, text_fragments: list[str]) -> str | None:
+def _extract_phase_key(*, text_fragments: list[str], require_process_context: bool = False) -> str | None:
+    if require_process_context and not _has_process_phase_context(text_fragments=text_fragments):
+        return None
     for fragment in text_fragments:
         match = PHASE_REFERENCE_PATTERN.search(fragment)
         if match is None:
@@ -3987,6 +4254,62 @@ def _extract_question_count(*, text_fragments: list[str]) -> str | None:
         if value:
             return value
     return None
+
+
+def _extract_phase_count(*, text_fragments: list[str]) -> str | None:
+    for fragment in text_fragments:
+        match = PHASE_COUNT_PATTERN.search(fragment)
+        if match is None:
+            continue
+        value = str(match.group("count") or match.group("count_named") or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _has_process_phase_context(*, text_fragments: list[str]) -> bool:
+    normalized = " ".join(fragment for fragment in text_fragments if fragment).casefold()
+    return any(token in normalized for token in ("bsm", "prozess", "process", "question", "frage"))
+
+
+def _has_structural_process_signal(*, line_text: str, context_fragments: list[str]) -> bool:
+    primary = str(line_text or "").strip()
+    if not primary:
+        return False
+    normalized_primary = primary.casefold()
+    normalized_context = " ".join([*context_fragments, primary]).casefold()
+    if not any(token in normalized_context for token in ("bsm", "phase", "phasen", "question", "frage", "process", "prozess")):
+        return False
+    if any(
+        pattern.search(primary) is not None
+        for pattern in (PHASE_REFERENCE_PATTERN, QUESTION_REFERENCE_PATTERN, PHASE_ORDER_PATTERN, QUESTION_COUNT_PATTERN, PHASE_COUNT_PATTERN)
+    ):
+        return True
+    if "bsm" in normalized_primary and any(token in normalized_primary for token in ("process", "prozess", "phase", "question", "frage")):
+        return True
+    if any(token in normalized_primary for token in ("process", "prozess")) and any(
+        token in normalized_primary for token in ("phase", "phasen", "question", "frage")
+    ):
+        return True
+    has_explicit_phase_or_question_context = any(
+        PHASE_REFERENCE_PATTERN.search(fragment) is not None or QUESTION_REFERENCE_PATTERN.search(fragment) is not None
+        for fragment in context_fragments
+    )
+    has_contract_signal = any(
+        pattern.search(primary) is not None
+        for pattern in (
+            REVIEW_STATUS_PATTERN,
+            APPROVAL_POLICY_PATTERN,
+            SCOPE_POLICY_PATTERN,
+            READ_LINE_PATTERN,
+            WRITE_LINE_PATTERN,
+            LIFECYCLE_LINE_PATTERN,
+            POLICY_LINE_PATTERN,
+        )
+    )
+    if has_explicit_phase_or_question_context and has_contract_signal:
+        return True
+    return False
 
 
 def _phase_subject_key(*, phase_id: str, phase_name: str) -> str:

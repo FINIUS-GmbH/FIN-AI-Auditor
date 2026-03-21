@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import re
-from typing import Final
+from typing import Final, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -15,6 +15,7 @@ from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
     AnalysisMode,
     AtomicFactEntry,
+    AtomicFactActionLane,
     AuditAnalysisLogEntry,
     AuditClaimEntry,
     AuditFinding,
@@ -29,11 +30,15 @@ from fin_ai_auditor.domain.models import (
     AuditRunProgress,
     AuditSourceSnapshot,
     AuditTarget,
+    ApprovalTargetType,
     CreateAuditRunRequest,
     DecisionCommentAnalysis,
+    DecisionAction,
     DecisionPackage,
     DecisionProblemElement,
     DecisionRecord,
+    FindingCategory,
+    FindingSeverity,
     ReviewCard,
     ReviewCardCoverageSummary,
     RetrievalSegment,
@@ -538,7 +543,7 @@ class AuditService:
         if run.analysis_mode == "fast":
             packages = []
             atomic_facts = []
-            atomic_fact_notes = []
+            atomic_fact_notes: list[str] = []
         else:
             packages = self._build_decision_packages(
                 findings=findings,
@@ -685,7 +690,7 @@ class AuditService:
     ) -> AuditRun:
         run = self._require_run(run_id=run_id)
         package = self._require_package(run=run, package_id=package_id)
-        decision_action = str(action)
+        decision_action = _decision_action_or_raise(action)
         if decision_action == "specify" and not str(comment_text or "").strip():
             raise ValueError("Fuer 'specify' ist ein Kommentar erforderlich.")
 
@@ -971,11 +976,15 @@ class AuditService:
         async def _call_llm() -> str:
             msg = ChatMessage(role="user", content=prompt)
             cfg = GenerationConfig(temperature=0.2, max_tokens=1000)
-            return await client.generate(messages=[msg], config=cfg)
+            response = await client.chat(messages=[msg], config=cfg)
+            return response.content
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     result = pool.submit(asyncio.run, _call_llm()).result(timeout=45)
                     return result.strip()
@@ -1109,10 +1118,11 @@ class AuditService:
             related_finding_ids=related_finding_ids,
             related_package_ids=related_package_ids,
         )
+        normalized_target_type = _approval_target_type_or_raise(target_type)
         approval_metadata: dict[str, object] = {}
         effective_payload_preview = list(payload_preview)
         effective_target_url = target_url
-        if target_type == "confluence_page_update":
+        if normalized_target_type == "confluence_page_update":
             patch_preview = build_confluence_patch_preview(
                 run=run,
                 findings=related_findings,
@@ -1127,7 +1137,7 @@ class AuditService:
                 patch_preview=patch_preview,
             )
             effective_target_url = patch_preview.page_url
-        elif target_type == "jira_ticket_create":
+        elif normalized_target_type == "jira_ticket_create":
             brief = build_jira_ticket_brief(run=run, findings=related_findings)
             issue_payload = build_jira_issue_payload(
                 brief=brief,
@@ -1142,29 +1152,32 @@ class AuditService:
                 brief=brief,
             )
         target_guard = self._build_writeback_target_guard(
-            target_type=target_type,
+            target_type=normalized_target_type,
             target_url=effective_target_url,
             extra_metadata=approval_metadata,
         )
-        if list(target_guard.get("blockers") or []):
-            raise ValueError("; ".join(str(item).strip() for item in list(target_guard.get("blockers") or []) if str(item).strip()))
+        target_guard_blockers = _string_list_from_metadata(target_guard.get("blockers"))
+        if target_guard_blockers:
+            raise ValueError("; ".join(target_guard_blockers))
         approval_metadata["target_guard"] = target_guard
-        approval_metadata["writeback_verification"] = self._build_writeback_verification_metadata(
-            target_type=target_type,
+        verification_metadata = self._build_writeback_verification_metadata(
+            target_type=normalized_target_type,
             target_url=effective_target_url,
             extra_metadata=approval_metadata,
         )
-        approval_metadata["writeback_preflight"] = self._build_writeback_preflight(
-            target_type=target_type,
-            verification_metadata=approval_metadata["writeback_verification"],
+        approval_metadata["writeback_verification"] = verification_metadata
+        writeback_preflight = self._build_writeback_preflight(
+            target_type=normalized_target_type,
+            verification_metadata=verification_metadata,
         )
+        approval_metadata["writeback_preflight"] = writeback_preflight
         approval_metadata["execution_token"] = self._build_writeback_execution_token(
             run=run,
-            target_type=target_type,
+            target_type=normalized_target_type,
             target_url=effective_target_url,
             related_findings=related_findings,
         )
-        approval_metadata["atomic_facts"] = [
+        approval_atomic_facts: list[dict[str, str]] = [
             {
                 "fact_key": _atomic_fact_key(finding=finding),
                 "summary": _atomic_fact_summary(
@@ -1175,31 +1188,32 @@ class AuditService:
             }
             for finding in related_findings[:6]
         ]
+        approval_metadata["atomic_facts"] = approval_atomic_facts
         effective_payload_preview = _dedupe_preserve_order(
             [
                 *effective_payload_preview,
                 *[
                     f"Fakt: {fact['summary']}"
-                    for fact in approval_metadata["atomic_facts"]
+                    for fact in approval_atomic_facts
                     if str(fact.get("summary") or "").strip()
                 ][:3],
                 *[
                     f"Aktionsspur: {fact['action_lane']}"
-                    for fact in approval_metadata["atomic_facts"]
+                    for fact in approval_atomic_facts
                     if str(fact.get("action_lane") or "").strip()
                 ][:2],
                 *[
                     f"Preflight: {risk}"
-                    for risk in list((approval_metadata.get("writeback_preflight") or {}).get("warnings") or [])[:2]
+                    for risk in _string_list_from_metadata(writeback_preflight.get("warnings"))[:2]
                 ],
                 *[
                     f"Blocker: {risk}"
-                    for risk in list((approval_metadata.get("writeback_preflight") or {}).get("blockers") or [])[:2]
+                    for risk in _string_list_from_metadata(writeback_preflight.get("blockers"))[:2]
                 ],
             ]
         )
         approval = WritebackApprovalRequest(
-            target_type=target_type,
+            target_type=normalized_target_type,
             title=title,
             summary=summary,
             target_url=effective_target_url,
@@ -1643,17 +1657,17 @@ class AuditService:
             findings=findings,
         )
         if not patch_preview.page_id:
-            exc = ValueError(
+            page_anchor_error = ValueError(
                 "Der Confluence-Patch hat noch keinen konkreten Seitenanker und kann deshalb nicht extern ausgefuehrt werden."
             )
             self._persist_writeback_failure(
                 run=run,
                 approval_request_id=approval.approval_request_id,
                 target_type="confluence_page_update",
-                exc=exc,
+                exc=page_anchor_error,
                 verification_metadata=verification_metadata,
             )
-            raise exc
+            raise page_anchor_error
         try:
             updated_page = self._confluence_page_write_connector.update_page(
                 target=ConfluencePageTarget(
@@ -1805,13 +1819,13 @@ class AuditService:
             blockers.append("OAuth-Kontext ist noch nicht betriebsbereit.")
         if not bool(verification_metadata.get("token_valid", True)):
             blockers.append("Kein gueltiger Atlassian-Token vorhanden.")
-        missing_scopes = [str(item).strip() for item in list(verification_metadata.get("missing_scopes") or []) if str(item).strip()]
+        missing_scopes = _string_list_from_metadata(verification_metadata.get("missing_scopes"))
         if missing_scopes:
             blockers.append(f"Fehlende Scopes: {', '.join(missing_scopes)}")
         if target_type == "confluence_page_update":
             if not bool(verification_metadata.get("patch_execution_ready", True)):
                 blockers.append("Confluence-Patch ist noch nicht ausfuehrbar.")
-            for blocker in list(verification_metadata.get("patch_blockers") or []):
+            for blocker in _string_list_from_metadata(verification_metadata.get("patch_blockers")):
                 text = str(blocker).strip()
                 if text:
                     blockers.append(text)
@@ -1819,12 +1833,12 @@ class AuditService:
         if isinstance(target_guard, dict):
             blockers.extend(
                 str(item).strip()
-                for item in list(target_guard.get("blockers") or [])
+                for item in _string_list_from_metadata(target_guard.get("blockers"))
                 if str(item).strip()
             )
             warnings.extend(
                 str(item).strip()
-                for item in list(target_guard.get("warnings") or [])
+                for item in _string_list_from_metadata(target_guard.get("warnings"))
                 if str(item).strip()
             )
         if verification_metadata.get("target_url") in {None, ""}:
@@ -2775,8 +2789,12 @@ class AuditService:
                                     "summary": str(problem.metadata.get("atomic_fact_summary") or "").strip(),
                                     "action_lane": str(problem.metadata.get("action_lane") or "").strip(),
                                     "status": str(problem.metadata.get("atomic_fact_status") or "open"),
-                                    "source_types": list(problem.metadata.get("atomic_fact_source_types") or []),
-                                    "source_ids": list(problem.metadata.get("atomic_fact_source_ids") or []),
+                                    "source_types": _string_list_from_metadata(
+                                        problem.metadata.get("atomic_fact_source_types")
+                                    ),
+                                    "source_ids": _string_list_from_metadata(
+                                        problem.metadata.get("atomic_fact_source_ids")
+                                    ),
                                 }
                                 for problem in problems
                             ],
@@ -2801,7 +2819,7 @@ class AuditService:
                             ),
                             "boundary_path_count": max(
                                 (
-                                    int(finding.metadata.get("path_count") or 0)
+                                    _coerce_int(finding.metadata.get("path_count"))
                                     for finding in ordered_bucket_findings
                                     if finding.metadata.get("path_count") is not None
                                 ),
@@ -2811,7 +2829,9 @@ class AuditService:
                                 [
                                     str(function_name).strip()
                                     for finding in ordered_bucket_findings
-                                    for function_name in (finding.metadata.get("boundary_function_names") or [])
+                                    for function_name in _string_list_from_metadata(
+                                        finding.metadata.get("boundary_function_names")
+                                    )
                                     if str(function_name).strip()
                                 ]
                             ),
@@ -2828,7 +2848,7 @@ class AuditService:
                             ),
                             "eventual_path_count": max(
                                 (
-                                    int(finding.metadata.get("path_count") or 0)
+                                    _coerce_int(finding.metadata.get("path_count"))
                                     for finding in ordered_bucket_findings
                                     if bool(finding.metadata.get("grouped_eventual_paths"))
                                     and finding.metadata.get("path_count") is not None
@@ -2839,7 +2859,9 @@ class AuditService:
                                 [
                                     str(function_name).strip()
                                     for finding in ordered_bucket_findings
-                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    for function_name in _string_list_from_metadata(
+                                        finding.metadata.get("sequence_functions")
+                                    )
                                     if bool(finding.metadata.get("grouped_eventual_paths")) and str(function_name).strip()
                                 ]
                             ),
@@ -2856,7 +2878,7 @@ class AuditService:
                             ),
                             "chain_path_count": max(
                                 (
-                                    int(finding.metadata.get("path_count") or 0)
+                                    _coerce_int(finding.metadata.get("path_count"))
                                     for finding in ordered_bucket_findings
                                     if bool(finding.metadata.get("grouped_chain_paths"))
                                     and finding.metadata.get("path_count") is not None
@@ -2867,7 +2889,9 @@ class AuditService:
                                 [
                                     str(function_name).strip()
                                     for finding in ordered_bucket_findings
-                                    for function_name in (finding.metadata.get("sequence_functions") or [])
+                                    for function_name in _string_list_from_metadata(
+                                        finding.metadata.get("sequence_functions")
+                                    )
                                     if bool(finding.metadata.get("grouped_chain_paths")) and str(function_name).strip()
                                 ]
                             ),
@@ -2875,7 +2899,9 @@ class AuditService:
                                 [
                                     str(line_window).strip()
                                     for finding in ordered_bucket_findings
-                                    for line_window in (finding.metadata.get("sequence_line_windows") or [])
+                                    for line_window in _string_list_from_metadata(
+                                        finding.metadata.get("sequence_line_windows")
+                                    )
                                     if bool(finding.metadata.get("grouped_chain_paths")) and str(line_window).strip()
                                 ]
                             ),
@@ -2885,8 +2911,8 @@ class AuditService:
         return sorted(
             packages,
             key=lambda package: (
-                int(package.metadata.get("package_sort_rank")) if package.metadata.get("package_sort_rank") is not None else 999,
-                int(package.metadata.get("primary_finding_rank")) if package.metadata.get("primary_finding_rank") is not None else 999_999,
+                _coerce_int(package.metadata.get("package_sort_rank"), default=999),
+                _coerce_int(package.metadata.get("primary_finding_rank"), default=999_999),
                 severity_rank(severity=package.severity_summary),
                 package.title,
             ),
@@ -2915,8 +2941,8 @@ class AuditService:
                 metadata = dict(problem.metadata or {})
                 fact_key = str(metadata.get("atomic_fact_key") or "").strip()
                 summary = str(metadata.get("atomic_fact_summary") or "").strip()
-                action_lane = str(metadata.get("action_lane") or "").strip()
-                if not fact_key or not summary or not action_lane:
+                action_lane = _atomic_fact_action_lane(metadata.get("action_lane"))
+                if not fact_key or not summary or action_lane is None:
                     continue
                 current = facts_by_key.get(fact_key)
                 if current is None:
@@ -2929,10 +2955,10 @@ class AuditService:
                         related_package_ids=[package.package_id],
                         related_problem_ids=[problem.problem_id],
                         related_finding_ids=[problem.finding_id] if problem.finding_id else [],
-                        source_types=list(metadata.get("atomic_fact_source_types") or []),
-                        source_ids=list(metadata.get("atomic_fact_source_ids") or []),
-                        subject_keys=list(metadata.get("atomic_fact_subject_keys") or []),
-                        predicates=list(metadata.get("atomic_fact_predicates") or []),
+                        source_types=_string_list_from_metadata(metadata.get("atomic_fact_source_types")),
+                        source_ids=_string_list_from_metadata(metadata.get("atomic_fact_source_ids")),
+                        subject_keys=_string_list_from_metadata(metadata.get("atomic_fact_subject_keys")),
+                        predicates=_string_list_from_metadata(metadata.get("atomic_fact_predicates")),
                         claim_ids=list(problem.affected_claim_ids),
                         truth_ids=list(problem.affected_truth_ids),
                         metadata={
@@ -2947,10 +2973,18 @@ class AuditService:
                 current.related_finding_ids = _dedupe_preserve_order(
                     [*current.related_finding_ids, *([problem.finding_id] if problem.finding_id else [])]
                 )
-                current.source_types = _dedupe_preserve_order([*current.source_types, *list(metadata.get("atomic_fact_source_types") or [])])
-                current.source_ids = _dedupe_preserve_order([*current.source_ids, *list(metadata.get("atomic_fact_source_ids") or [])])
-                current.subject_keys = _dedupe_preserve_order([*current.subject_keys, *list(metadata.get("atomic_fact_subject_keys") or [])])
-                current.predicates = _dedupe_preserve_order([*current.predicates, *list(metadata.get("atomic_fact_predicates") or [])])
+                current.source_types = _dedupe_preserve_order(
+                    [*current.source_types, *_string_list_from_metadata(metadata.get("atomic_fact_source_types"))]
+                )
+                current.source_ids = _dedupe_preserve_order(
+                    [*current.source_ids, *_string_list_from_metadata(metadata.get("atomic_fact_source_ids"))]
+                )
+                current.subject_keys = _dedupe_preserve_order(
+                    [*current.subject_keys, *_string_list_from_metadata(metadata.get("atomic_fact_subject_keys"))]
+                )
+                current.predicates = _dedupe_preserve_order(
+                    [*current.predicates, *_string_list_from_metadata(metadata.get("atomic_fact_predicates"))]
+                )
                 current.claim_ids = _dedupe_preserve_order([*current.claim_ids, *problem.affected_claim_ids])
                 current.truth_ids = _dedupe_preserve_order([*current.truth_ids, *problem.affected_truth_ids])
         return sorted(facts_by_key.values(), key=lambda fact: (fact.fact_key, fact.atomic_fact_id))
@@ -2978,11 +3012,7 @@ class AuditService:
             if previous_entry is not None:
                 previous_run_id, previous_fact = previous_entry
                 previous_metadata = dict(previous_fact.metadata or {})
-                previous_seen_run_ids = [
-                    str(item).strip()
-                    for item in list(previous_metadata.get("seen_run_ids") or [])
-                    if str(item).strip()
-                ]
+                previous_seen_run_ids = _string_list_from_metadata(previous_metadata.get("seen_run_ids"))
                 seen_run_ids = _dedupe_preserve_order([*previous_seen_run_ids, run.run_id])
                 metadata["first_seen_run_id"] = (
                     str(previous_metadata.get("first_seen_run_id") or previous_run_id).strip()
@@ -2994,7 +3024,7 @@ class AuditService:
                 metadata["seen_run_ids"] = seen_run_ids
                 metadata["occurrence_count"] = max(
                     len(seen_run_ids),
-                    int(previous_metadata.get("occurrence_count") or 1) + 1,
+                    _coerce_int(previous_metadata.get("occurrence_count"), default=1) + 1,
                 )
                 if previous_fact.status in {"open", "confirmed"}:
                     next_status = previous_fact.status
@@ -3090,8 +3120,8 @@ class AuditService:
             return list(atomic_facts)
         package_fact_keys = {
             str(item.get("fact_key") or "").strip()
-            for item in package.metadata.get("atomic_facts", [])
-            if isinstance(item, dict) and str(item.get("fact_key") or "").strip()
+            for item in _dict_list_from_metadata(package.metadata.get("atomic_facts"))
+            if str(item.get("fact_key") or "").strip()
         }
         if not package_fact_keys:
             return list(atomic_facts)
@@ -3128,9 +3158,7 @@ class AuditService:
                 package_changed = True
             next_metadata = dict(package.metadata or {})
             atomic_facts_payload: list[dict[str, object]] = []
-            for item in next_metadata.get("atomic_facts", []):
-                if not isinstance(item, dict):
-                    continue
+            for item in _dict_list_from_metadata(next_metadata.get("atomic_facts")):
                 entry = dict(item)
                 if str(entry.get("fact_key") or "").strip() == target_fact.fact_key:
                     entry["status"] = target_fact.status
@@ -3440,7 +3468,7 @@ class AuditService:
         current_group_key = str(package.metadata.get("group_key") or package.metadata.get("causal_group_key") or "").strip()
         current_scope_keys = {
             str(scope_key).strip()
-            for scope_key in package.metadata.get("scope_keys", [])
+            for scope_key in _string_list_from_metadata(package.metadata.get("scope_keys"))
             if str(scope_key).strip()
         }
         impacted: list[str] = []
@@ -3456,7 +3484,7 @@ class AuditService:
             candidate_group_key = str(candidate.metadata.get("group_key") or candidate.metadata.get("causal_group_key") or "").strip()
             candidate_scope_keys = {
                 str(scope_key).strip()
-                for scope_key in candidate.metadata.get("scope_keys", [])
+                for scope_key in _string_list_from_metadata(candidate.metadata.get("scope_keys"))
                 if str(scope_key).strip()
             }
             if (
@@ -3594,7 +3622,7 @@ class AuditService:
         approval: WritebackApprovalRequest,
         findings: list[AuditFinding],
         ticket_key: str,
-        ticket_url: str,
+        ticket_url: str | None,
     ) -> JiraTicketAICodingBrief:
         stored_brief = approval.metadata.get("jira_ticket_brief")
         if isinstance(stored_brief, dict):
@@ -3923,6 +3951,57 @@ def _string_list_from_metadata(value: object) -> list[str]:
     return result
 
 
+def _dict_list_from_metadata(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            result.append(dict(item))
+    return result
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return default
+        try:
+            return int(normalized)
+        except ValueError:
+            return default
+    return default
+
+
+def _decision_action_or_raise(value: object) -> DecisionAction:
+    normalized = str(value or "").strip()
+    if normalized not in {"accept", "reject", "specify"}:
+        raise ValueError(f"Unbekannte Entscheidungsaktion: {normalized or '<leer>'}")
+    return cast(DecisionAction, normalized)
+
+
+def _approval_target_type_or_raise(value: object) -> ApprovalTargetType:
+    normalized = str(value or "").strip()
+    if normalized not in {"confluence_page_update", "jira_ticket_create"}:
+        raise ValueError(f"Unbekannter Writeback-Zieltyp: {normalized or '<leer>'}")
+    return cast(ApprovalTargetType, normalized)
+
+
+def _atomic_fact_action_lane(value: object) -> AtomicFactActionLane | None:
+    normalized = str(value or "").strip()
+    if normalized not in {"confluence_doc", "jira_code", "jira_artifact", "confluence_and_jira"}:
+        return None
+    return cast(AtomicFactActionLane, normalized)
+
+
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -3939,6 +4018,8 @@ def _prioritize_pipeline_notes(*, notes: list[str]) -> list[str]:
     priority_prefixes = (
         "Delta-Abgleich:",
         "Claim-Delta:",
+        "Claim-Reuse:",
+        "Confluence-Collector wurde uebersprungen",
         "Neubewertung fokussiert auf",
     )
     prioritized: list[str] = []
@@ -3972,11 +4053,7 @@ def _canonical_package_scope_key(
     primary_scope_key = str(package.metadata.get("primary_scope_key") or "").strip()
     if primary_scope_key:
         return primary_scope_key
-    scope_keys = [
-        str(scope_key).strip()
-        for scope_key in package.metadata.get("scope_keys", [])
-        if str(scope_key).strip()
-    ]
+    scope_keys = _string_list_from_metadata(package.metadata.get("scope_keys"))
     if scope_keys:
         return scope_keys[0]
     cluster_key = str(package.metadata.get("cluster_key") or "").strip()
@@ -4058,15 +4135,19 @@ def _claim_matches_any_truth_scope(*, truth: TruthLedgerEntry, package_scope_key
     return any(_claim_belongs_to_cluster(claim_key=truth.subject_key, cluster_key=scope_key) for scope_key in package_scope_keys)
 
 
-def _dominant_category(*, findings: list[AuditFinding]) -> str:
-    category_counts: dict[str, tuple[int, int]] = {}
+def _dominant_category(*, findings: list[AuditFinding]) -> FindingCategory:
+    if not findings:
+        return "clarification_needed"
+    category_counts: dict[FindingCategory, tuple[int, int]] = {}
     for finding in findings:
         count, current_rank = category_counts.get(finding.category, (0, 99))
         category_counts[finding.category] = (count + 1, min(current_rank, severity_rank(severity=finding.severity)))
     return min(category_counts.items(), key=lambda item: (item[1][1], -item[1][0], item[0]))[0]
 
 
-def _highest_severity(*, findings: list[AuditFinding]) -> str:
+def _highest_severity(*, findings: list[AuditFinding]) -> FindingSeverity:
+    if not findings:
+        return "low"
     return min((finding.severity for finding in findings), key=lambda severity: severity_rank(severity=severity))
 
 
@@ -4084,7 +4165,7 @@ def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[A
         None,
     )
     if grouped_boundary_finding is not None:
-        path_count = int(grouped_boundary_finding.metadata.get("path_count") or 0)
+        path_count = _coerce_int(grouped_boundary_finding.metadata.get("path_count"))
         if path_count > 0:
             return f"Manuelle Antwortpfade angleichen ({path_count} Entry-Points)"
         return "Manuelle Antwortpfade angleichen"
@@ -4097,7 +4178,7 @@ def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[A
     )
     if grouped_eventual_finding is not None:
         title_prefix = str(grouped_eventual_finding.metadata.get("grouped_eventual_package_title") or "").strip()
-        path_count = int(grouped_eventual_finding.metadata.get("path_count") or 0)
+        path_count = _coerce_int(grouped_eventual_finding.metadata.get("path_count"))
         if title_prefix:
             if path_count > 0:
                 return f"{title_prefix} ({path_count} Pfade)"
@@ -4111,7 +4192,7 @@ def _package_title(*, cluster_key: str, root_cause_bucket: str, findings: list[A
         None,
     )
     if grouped_chain_finding is not None:
-        path_count = int(grouped_chain_finding.metadata.get("path_count") or 0)
+        path_count = _coerce_int(grouped_chain_finding.metadata.get("path_count"))
         if path_count > 0:
             return f"Reaggregation atomisch schliessen ({path_count} Pfade)"
         return "Reaggregation atomisch schliessen"
@@ -4147,12 +4228,8 @@ def _package_scope_summary(
         None,
     )
     if grouped_boundary_finding is not None:
-        function_names = [
-            str(item).strip()
-            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
-            if str(item).strip()
-        ]
-        path_count = int(grouped_boundary_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_names = _string_list_from_metadata(grouped_boundary_finding.metadata.get("boundary_function_names"))
+        path_count = _coerce_int(grouped_boundary_finding.metadata.get("path_count"), default=len(function_names))
         function_suffix = f" · {', '.join(function_names)}" if function_names else ""
         return f"Manuelle bsmAnswer-Entry-Points · {path_count} Pfade betroffen{function_suffix}"
     grouped_eventual_finding = next(
@@ -4164,12 +4241,8 @@ def _package_scope_summary(
     )
     if grouped_eventual_finding is not None:
         scope_label = str(grouped_eventual_finding.metadata.get("grouped_eventual_scope_label") or "").strip()
-        function_names = [
-            str(item).strip()
-            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
-            if str(item).strip()
-        ]
-        path_count = int(grouped_eventual_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_names = _string_list_from_metadata(grouped_eventual_finding.metadata.get("sequence_functions"))
+        path_count = _coerce_int(grouped_eventual_finding.metadata.get("path_count"), default=len(function_names))
         function_suffix = f" · {', '.join(function_names)}" if function_names else ""
         if scope_label:
             return f"{scope_label} · {path_count} Pfade betroffen{function_suffix}"
@@ -4182,12 +4255,8 @@ def _package_scope_summary(
         None,
     )
     if grouped_chain_finding is not None:
-        function_names = [
-            str(item).strip()
-            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
-            if str(item).strip()
-        ]
-        path_count = int(grouped_chain_finding.metadata.get("path_count") or len(function_names) or 0)
+        function_names = _string_list_from_metadata(grouped_chain_finding.metadata.get("sequence_functions"))
+        path_count = _coerce_int(grouped_chain_finding.metadata.get("path_count"), default=len(function_names))
         function_suffix = f" · {', '.join(function_names)}" if function_names else ""
         return f"Reaggregation-/Rebuild-Pfade · {path_count} Pfade betroffen{function_suffix}"
     categories = _dedupe_preserve_order([finding.category for finding in findings])
@@ -4236,11 +4305,7 @@ def _package_recommendation_summary(
         None,
     )
     if grouped_boundary_finding is not None:
-        function_names = [
-            str(item).strip()
-            for item in (grouped_boundary_finding.metadata.get("boundary_function_names") or [])
-            if str(item).strip()
-        ]
+        function_names = _string_list_from_metadata(grouped_boundary_finding.metadata.get("boundary_function_names"))
         base = (
             "Die manuellen Antwort-Entry-Points auf einen kanonischen Pfad zusammenziehen und "
             "phase_run_id/run_id bis zur bsmAnswer-Persistenz konsistent durchreichen."
@@ -4256,11 +4321,7 @@ def _package_recommendation_summary(
         None,
     )
     if grouped_eventual_finding is not None:
-        function_names = [
-            str(item).strip()
-            for item in (grouped_eventual_finding.metadata.get("sequence_functions") or [])
-            if str(item).strip()
-        ]
+        function_names = _string_list_from_metadata(grouped_eventual_finding.metadata.get("sequence_functions"))
         base = str(grouped_eventual_finding.recommendation or "").strip()
         if function_names:
             return f"{base}\n\nBetroffene Funktionen: {', '.join(function_names)}"
@@ -4274,11 +4335,7 @@ def _package_recommendation_summary(
         None,
     )
     if grouped_chain_finding is not None:
-        function_names = [
-            str(item).strip()
-            for item in (grouped_chain_finding.metadata.get("sequence_functions") or [])
-            if str(item).strip()
-        ]
+        function_names = _string_list_from_metadata(grouped_chain_finding.metadata.get("sequence_functions"))
         base = (
             "Supersede-, Rebuild- und Materialisierungsschritte ueber die Reaggregationspfade in denselben "
             "transaktionalen Schutzraum ziehen oder eine Ersatzkette aufbauen, bevor die alte Kette deaktiviert wird."
@@ -4337,8 +4394,10 @@ def _semantic_relation_summary(
     relation: SemanticRelation,
     entities_by_id: dict[str, SemanticEntity],
 ) -> str:
-    source_label = entities_by_id.get(relation.source_entity_id).label if relation.source_entity_id in entities_by_id else relation.source_entity_id
-    target_label = entities_by_id.get(relation.target_entity_id).label if relation.target_entity_id in entities_by_id else relation.target_entity_id
+    source_entity = entities_by_id.get(relation.source_entity_id)
+    target_entity = entities_by_id.get(relation.target_entity_id)
+    source_label = source_entity.label if source_entity is not None else relation.source_entity_id
+    target_label = target_entity.label if target_entity is not None else relation.target_entity_id
     return f"{source_label} -> {relation.relation_type} -> {target_label}"
 
 
@@ -4454,7 +4513,7 @@ def _atomic_fact_summary(*, finding: AuditFinding, claims: list[AuditClaimEntry]
     return f"{fact_key}: {comparison} widersprechen sich oder lassen denselben Sachverhalt unvollstaendig."
 
 
-def _preferred_action_lane_for_finding(*, finding: AuditFinding) -> str:
+def _preferred_action_lane_for_finding(*, finding: AuditFinding) -> AtomicFactActionLane:
     has_doc = any(location.source_type in {"confluence_page", "local_doc"} for location in finding.locations)
     has_code = any(location.source_type == "github_file" for location in finding.locations)
     has_model_artifact = any(

@@ -5,8 +5,6 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
-logger = logging.getLogger(__name__)
-
 from fin_ai_auditor.api.dependencies import get_atlassian_oauth_service
 from fin_ai_auditor.domain.models import (
     AtlassianAuthStatus,
@@ -14,6 +12,8 @@ from fin_ai_auditor.domain.models import (
     ConfluenceVerificationResponse,
 )
 from fin_ai_auditor.services.atlassian_oauth_service import AtlassianOAuthService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ingestion/atlassian", tags=["atlassian"])
 

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
+import os
 import re
 from collections import Counter, defaultdict
-import logging
+from pathlib import Path
 from typing import Sequence
 
 from fin_ai_auditor.services.pipeline_models import CollectedDocument
@@ -194,9 +196,6 @@ class AuditContextBuilder:
         Sucht das lokale FIN-AI-Repo anhand der gesammelten github_file-Pfade
         und liest dann die relevantesten Architektur-Dokumente direkt ein.
         """
-        import os
-        from pathlib import Path
-
         # Try to find the local FIN-AI repo path from collected documents
         repo_root = self._find_local_repo_root(documents)
         if not repo_root:
@@ -256,12 +255,8 @@ class AuditContextBuilder:
     @staticmethod
     def _find_local_repo_root(
         documents: Sequence[CollectedDocument],
-    ) -> "Path | None":
+    ) -> Path | None:
         """Find the local FIN-AI repo root from collected document paths."""
-        from pathlib import Path
-
-        # Check environment first
-        import os
         env_path = os.environ.get("FIN_AI_AUDITOR_DEFAULT_FINAI_LOCAL_REPO_PATH", "")
         if env_path:
             p = Path(env_path)

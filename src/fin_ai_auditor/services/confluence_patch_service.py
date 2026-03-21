@@ -188,17 +188,17 @@ def _resolve_primary_page_context(*, run: AuditRun, findings: list[AuditFinding]
     page_locations: dict[str, AuditLocation] = {}
 
     for finding in findings:
-        for location in finding.locations:
-            if location.source_type != "confluence_page":
+        for finding_location in finding.locations:
+            if finding_location.source_type != "confluence_page":
                 continue
-            page_id = str(location.source_id or "").strip()
+            page_id = str(finding_location.source_id or "").strip()
             if not page_id:
                 continue
             page_votes[page_id] += 1
-            page_locations.setdefault(page_id, location)
+            page_locations.setdefault(page_id, finding_location)
 
     selected_page_id = page_votes.most_common(1)[0][0] if page_votes else None
-    location = page_locations.get(selected_page_id or "")
+    location: AuditLocation | None = page_locations.get(selected_page_id or "")
     snapshot = next(
         (
             item

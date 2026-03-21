@@ -59,6 +59,10 @@ def detect_documentation_gaps(
             documented_subjects.add(subject)
             documented_roots.add(subject.split(".", 1)[0] if "." in subject else subject)
         elif record.claim.source_type in _CODE_SOURCE_TYPES:
+            authority = str(getattr(record.claim, "source_authority", "") or "").strip()
+            assertion_status = str(getattr(record.claim, "assertion_status", "asserted") or "asserted").strip()
+            if authority == "historical" or assertion_status == "secondary_only":
+                continue
             code_subjects[subject].append(record)
 
     # 2. Find undocumented scopes. If the root object is documented, keep missing
@@ -89,15 +93,16 @@ def detect_documentation_gaps(
             continue
 
         gap_type = _classify_gap(records=records)
-        title_de = _german_title(scope_root=scope_root, gap_type=gap_type)
+        preferred_scope = _preferred_gap_scope(scope_root=scope_root, records=records, gap_type=gap_type)
+        title_de = _german_title(scope_root=preferred_scope, gap_type=gap_type)
         md_proposal = _generate_md_proposal(
-            scope_root=scope_root,
+            scope_root=preferred_scope,
             records=records,
             gap_type=gap_type,
             doc_style=doc_style,
         )
         code_locations = _build_locations(records=records)
-        summary = _build_summary(scope_root=scope_root, records=records, gap_type=gap_type)
+        summary = _build_summary(scope_root=preferred_scope, records=records, gap_type=gap_type)
 
         findings.append(
             AuditFinding(
@@ -106,15 +111,15 @@ def detect_documentation_gaps(
                 title=title_de,
                 summary=summary,
                 recommendation=(
-                    f"Erstellen Sie eine Confluence-Seite '{_page_title(scope_root)}' "
+                    f"Erstellen Sie eine Confluence-Seite '{_page_title(preferred_scope)}' "
                     f"mit der vorgeschlagenen Struktur. Der Markdown-Entwurf steht als Vorlage bereit."
                 ),
-                canonical_key=f"doc_gap:{scope_root}",
+                canonical_key=f"doc_gap:{preferred_scope}",
                 locations=code_locations,
-                proposed_confluence_action=f"Neue Seite: {_page_title(scope_root)}",
+                proposed_confluence_action=f"Neue Seite: {_page_title(preferred_scope)}",
                 metadata={
                     "gap_type": gap_type,
-                    "proposed_page_title": _page_title(scope_root),
+                    "proposed_page_title": _page_title(preferred_scope),
                     "proposed_page_md": md_proposal,
                     "undocumented_claims_count": len(records),
                     "root_documented": root in documented_roots,
@@ -199,6 +204,18 @@ def _classify_gap(*, records: list[ExtractedClaimRecord]) -> str:
     return "entity"
 
 
+def _preferred_gap_scope(*, scope_root: str, records: list[ExtractedClaimRecord], gap_type: str) -> str:
+    if "." in scope_root:
+        return scope_root
+    root = scope_root
+    subjects = {record.claim.subject_key for record in records}
+    if gap_type == "policy" and any(subject.startswith(f"{root}.") for subject in subjects):
+        return f"{root}.policy"
+    if gap_type == "lifecycle" and any(subject.startswith(f"{root}.") for subject in subjects):
+        return f"{root}.lifecycle"
+    return scope_root
+
+
 # ── Markdown generation ─────────────────────────────────────────────
 
 def _page_title(scope_root: str) -> str:
@@ -232,12 +249,12 @@ def _generate_md_proposal(
     sections.append(f"# {title}\n")
 
     # Overview section
-    overview_lines = [f"## Übersicht\n"]
+    overview_lines = ["## Übersicht\n"]
     overview_lines.append(
         f"Dieses Dokument beschreibt **{title}** und definiert die relevanten "
         f"Eigenschaften, Verantwortlichkeiten und Schnittstellen.\n"
     )
-    overview_lines.append(f"> **Status:** Entwurf — generiert aus Code-Analyse\n")
+    overview_lines.append("> **Status:** Entwurf — generiert aus Code-Analyse\n")
     sections.append("\n".join(overview_lines))
 
     # Group claims by predicate

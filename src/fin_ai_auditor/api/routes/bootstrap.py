@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter, Depends
 
 from fin_ai_auditor.api.dependencies import get_atlassian_oauth_service, get_repository
@@ -32,9 +34,9 @@ def bootstrap(
     default_repo_path = settings.default_finai_local_repo_path
     defaults_are_portable = not default_repo_path.is_absolute()
     runtime_access = atlassian_service.get_runtime_access_status()
-    atlassian_status = runtime_access["auth_status"]
-    granted_scopes = set(runtime_access["granted_scopes"])
-    configured_scopes = set(runtime_access["configured_scopes"])
+    atlassian_status = atlassian_service.get_auth_status()
+    granted_scopes = set(cast(list[str], runtime_access["granted_scopes"]))
+    configured_scopes = set(cast(list[str], runtime_access["configured_scopes"]))
     confluence_read_scopes = {
         "read:confluence-content.summary",
         "read:confluence-content.all",
@@ -42,9 +44,7 @@ def bootstrap(
         "read:content-details:confluence",
     }
     jira_write_scopes = {"write:jira-work"}
-    atlassian_oauth_ready = bool(
-        runtime_access["oauth_ready"]
-    )
+    atlassian_oauth_ready = bool(cast(bool, runtime_access["oauth_ready"]))
     confluence_live_read_ready = bool(
         runtime_access["token_available"] and granted_scopes.intersection(confluence_read_scopes)
     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fin_ai_auditor.domain.models import AuditFinding
 
 
@@ -153,7 +155,12 @@ def prioritize_findings(*, findings: list[AuditFinding]) -> list[AuditFinding]:
 
 def retrieval_priority_score(*, finding: AuditFinding) -> tuple[int, int, int, int, float, str, str]:
     bucket = finding_root_cause_bucket(finding=finding)
-    causal_confidence = float(finding.metadata.get("causal_root_cause_confidence") or 0.0)
+    raw_confidence = finding.metadata.get("causal_root_cause_confidence")
+    causal_confidence = (
+        float(cast(int | float | str, raw_confidence))
+        if isinstance(raw_confidence, (int, float, str)) and str(raw_confidence).strip()
+        else 0.0
+    )
     return (
         0 if bool(finding.metadata.get("truth_enforcement")) else 1,
         root_cause_priority(bucket=bucket),
@@ -255,7 +262,7 @@ def order_package_findings(
     )
 
 
-def _global_finding_sort_key(finding: AuditFinding) -> tuple[int, int, int, int, str, str]:
+def _global_finding_sort_key(finding: AuditFinding) -> tuple[int, int, int, int, int, str, str]:
     bucket = finding_root_cause_bucket(finding=finding)
     return (
         root_cause_priority(bucket=bucket),
@@ -268,7 +275,7 @@ def _global_finding_sort_key(finding: AuditFinding) -> tuple[int, int, int, int,
     )
 
 
-def _package_finding_sort_key(*, finding: AuditFinding, package_bucket: str) -> tuple[int, int, int, int, str]:
+def _package_finding_sort_key(*, finding: AuditFinding, package_bucket: str) -> tuple[int, int, int, int, int, str]:
     return (
         0 if finding_root_cause_bucket(finding=finding) == package_bucket else 1,
         0 if bool(finding.metadata.get("truth_enforcement")) else 1,

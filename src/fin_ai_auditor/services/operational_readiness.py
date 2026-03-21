@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 
@@ -84,9 +86,10 @@ def ensure_runtime_ready(
     context: str,
 ) -> dict[str, object]:
     guard = build_runtime_guard(settings=settings, repository=repository, context=context)
-    if settings.startup_enforce_runtime_guard and guard["blockers"]:
+    blockers = _string_list(guard.get("blockers"))
+    if settings.startup_enforce_runtime_guard and blockers:
         raise RuntimeError(
-            "Operative Startblockade: " + "; ".join(str(item).strip() for item in guard["blockers"] if str(item).strip())
+            "Operative Startblockade: " + "; ".join(blockers)
         )
     return guard
 
@@ -100,10 +103,10 @@ def build_operational_alert_summary(
     warnings: list[str] = []
     notes: list[str] = []
 
-    trace_count = int(observability.get("trace_count") or 0)
-    metric_sample_count = int(observability.get("metric_sample_count") or 0)
-    recent_error_span_count = int(observability.get("recent_error_span_count") or 0)
-    reclaimable_run_count = int(worker_recovery.get("reclaimable_run_count") or 0)
+    trace_count = _coerce_int(observability.get("trace_count"))
+    metric_sample_count = _coerce_int(observability.get("metric_sample_count"))
+    recent_error_span_count = _coerce_int(observability.get("recent_error_span_count"))
+    reclaimable_run_count = _coerce_int(worker_recovery.get("reclaimable_run_count"))
 
     if trace_count <= 0:
         warnings.append(
@@ -157,30 +160,30 @@ def build_go_live_gate_summary(
     confluence_live_read_ready: bool | None = None,
     jira_writeback_ready: bool | None = None,
 ) -> dict[str, object]:
-    checks = [
+    checks: list[dict[str, object]] = [
         {
             "gate": "runtime_guard",
             "label": "Runtime Guard",
             "passed": bool(runtime_guard.get("ready")),
-            "notes": list(runtime_guard.get("blockers") or []) or list(runtime_guard.get("warnings") or []),
+            "notes": _string_list(runtime_guard.get("blockers")) or _string_list(runtime_guard.get("warnings")),
         },
         {
             "gate": "gold_set",
             "label": "Referenz-Gold-Set",
             "passed": bool(gold_set_gate.get("passed")),
-            "notes": list(gold_set_gate.get("failure_reasons") or []),
+            "notes": _string_list(gold_set_gate.get("failure_reasons")),
         },
         {
             "gate": "delta_recompute",
             "label": "Delta-Neuberechnung",
             "passed": bool(delta_gate.get("passed")),
-            "notes": list(delta_gate.get("failure_reasons") or []),
+            "notes": _string_list(delta_gate.get("failure_reasons")),
         },
         {
             "gate": "operational_alerts",
             "label": "Operative Signale",
             "passed": not bool(alert_summary.get("blockers")) and not bool(alert_summary.get("warnings")),
-            "notes": list(alert_summary.get("blockers") or []) + list(alert_summary.get("warnings") or []),
+            "notes": _string_list(alert_summary.get("blockers")) + _string_list(alert_summary.get("warnings")),
         },
     ]
     if confluence_live_read_ready is not None:
@@ -203,18 +206,31 @@ def build_go_live_gate_summary(
         )
 
     blockers = [
-        f"{check['label']}: {check['notes'][0]}"
+        f"{str(check.get('label') or '')}: {notes[0]}"
         for check in checks
-        if not bool(check["passed"]) and list(check.get("notes") or [])
+        if not bool(check.get("passed")) and (notes := _string_list(check.get("notes")))
     ]
     if not blockers:
         blockers = [
-            check["label"]
+            str(check.get("label") or "")
             for check in checks
-            if not bool(check["passed"])
+            if not bool(check.get("passed"))
         ]
     return {
         "ready": all(bool(check["passed"]) for check in checks),
         "checks": checks,
         "blocking_gates": blockers,
     }
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in cast(list[object], value) if str(item).strip()]

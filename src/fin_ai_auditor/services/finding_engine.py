@@ -3,9 +3,15 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from itertools import combinations
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Literal, Sequence
 
-from fin_ai_auditor.domain.models import AuditFinding, AuditFindingLink, TruthLedgerEntry
+from fin_ai_auditor.domain.models import (
+    AuditFinding,
+    AuditFindingLink,
+    FindingCategory,
+    FindingSeverity,
+    TruthLedgerEntry,
+)
 from fin_ai_auditor.services.claim_semantics import (
     normalize_claim_value,
     package_scope_key,
@@ -24,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 FindingGenerationProgressCallback = Callable[[str, int, int, str], None]
+FindingLinkRelation = Literal["contradicts", "supports", "duplicates", "depends_on", "gap_hint", "resolved_by"]
 
 
 def derive_truths(
@@ -83,13 +90,24 @@ def generate_findings(
 
     total_groups = len(groups)
     for index, (subject_key, records) in enumerate(groups.items(), start=1):
-        code_records = [record for record in records if record.claim.source_type == "github_file"]
+        active_records = [record for record in records if _is_primary_evidence_record(record=record)]
+        code_records = [record for record in active_records if record.claim.source_type == "github_file"]
         doc_records = [
-            record for record in records if record.claim.source_type in {"confluence_page", "local_doc"}
+            record for record in active_records if record.claim.source_type in {"confluence_page", "local_doc"}
         ]
-        confluence_records = [record for record in records if record.claim.source_type == "confluence_page"]
-        local_doc_records = [record for record in records if record.claim.source_type == "local_doc"]
-        metamodel_records = [record for record in records if record.claim.source_type == "metamodel"]
+        legacy_comparable_code_records = [
+            record
+            for record in records
+            if record.claim.source_type == "github_file" and _is_legacy_comparable_record(record=record)
+        ]
+        legacy_comparable_doc_records = [
+            record
+            for record in records
+            if record.claim.source_type in {"confluence_page", "local_doc"} and _is_legacy_comparable_record(record=record)
+        ]
+        confluence_records = [record for record in active_records if record.claim.source_type == "confluence_page"]
+        local_doc_records = [record for record in active_records if record.claim.source_type == "local_doc"]
+        metamodel_records = [record for record in active_records if record.claim.source_type == "metamodel"]
         delta_scope_affected = _is_subject_impacted(subject_key=subject_key, impacted_scope_keys=effective_impacted_scope_keys)
 
         # ── PHASE 1: Doc ↔ Doc contradictions (PRIMARY findings) ──────────
@@ -231,8 +249,8 @@ def generate_findings(
 
         legacy_path_finding = _find_legacy_path_gap(
             subject_key=subject_key,
-            doc_records=doc_records,
-            code_records=code_records,
+            doc_records=legacy_comparable_doc_records,
+            code_records=legacy_comparable_code_records,
             delta_scope_affected=delta_scope_affected,
         )
         if legacy_path_finding is not None:
@@ -305,7 +323,7 @@ def generate_findings(
         if _is_process_scope(subject_key=subject_key):
             # Metamodel vs docs already handled in Phase 2 above.
             # Only add: doc-internal process contradictions
-            runtime_doc_records = [r for r in records if r.claim.source_type in {"confluence_page", "local_doc"}]
+            runtime_doc_records = [r for r in active_records if r.claim.source_type in {"confluence_page", "local_doc"}]
             if len(runtime_doc_records) > 1 and _values_internal_conflict(runtime_doc_records, subject_key=subject_key):
                 findings.append(
                     _build_finding(
@@ -484,7 +502,7 @@ def _find_truth_conflicts(
         relevant_records: list[ExtractedClaimRecord] = []
         for key, records in grouped.items():
             if key == truth.subject_key or key.startswith(f"{truth.subject_key}."):
-                relevant_records.extend(records)
+                relevant_records.extend(record for record in records if _is_primary_evidence_record(record=record))
 
         if not relevant_records:
             continue
@@ -582,7 +600,7 @@ def _find_legacy_path_gap(
             primary_records=[],
             code_records=substantive_code_records,
         )
-        variant_records = list(inferred_roles["variant_records"])
+        variant_records = _record_list(inferred_roles.get("variant_records"))
     else:
         inferred_roles = {
             "primary_records": [],
@@ -595,8 +613,9 @@ def _find_legacy_path_gap(
     primary_records = [record for record in substantive_records if _is_primary_path_record(record=record)]
     if not primary_records and substantive_doc_records:
         primary_records = [record for record in substantive_doc_records if not _is_variant_path_record(record=record)]
-    if inferred_roles["primary_records"]:
-        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
+    inferred_primary_records = _record_list(inferred_roles.get("primary_records"))
+    if inferred_primary_records:
+        primary_records = _merge_record_lists(primary_records, inferred_primary_records)
     if not variant_records:
         return None
     if not primary_records:
@@ -605,18 +624,18 @@ def _find_legacy_path_gap(
             primary_records=[],
             code_records=substantive_code_records,
         )
-        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
-        variant_records = _merge_record_lists(variant_records, list(inferred_roles["variant_records"]))
+        primary_records = _merge_record_lists(primary_records, _record_list(inferred_roles.get("primary_records")))
+        variant_records = _merge_record_lists(variant_records, _record_list(inferred_roles.get("variant_records")))
     if not primary_records:
         return None
-    if not inferred_roles["inference_applied"]:
+    if not bool(inferred_roles.get("inference_applied")):
         inferred_roles = _infer_unmarked_path_roles(
             subject_key=subject_key,
             primary_records=primary_records,
             code_records=substantive_code_records,
         )
-        primary_records = _merge_record_lists(primary_records, list(inferred_roles["primary_records"]))
-        variant_records = _merge_record_lists(variant_records, list(inferred_roles["variant_records"]))
+        primary_records = _merge_record_lists(primary_records, _record_list(inferred_roles.get("primary_records")))
+        variant_records = _merge_record_lists(variant_records, _record_list(inferred_roles.get("variant_records")))
     if not _values_conflict(primary_records, variant_records, subject_key=subject_key):
         return None
 
@@ -705,9 +724,9 @@ def _find_legacy_path_gap(
             "legacy_record_count": len(variant_records),
             "primary_record_count": len(primary_records),
             "variant_roles": variant_roles,
-            "inferred_path_role_inference": bool(inferred_roles["inference_applied"]),
-            "inferred_primary_group_keys": list(inferred_roles["primary_group_keys"]),
-            "inferred_variant_group_keys": list(inferred_roles["variant_group_keys"]),
+            "inferred_path_role_inference": bool(inferred_roles.get("inference_applied")),
+            "inferred_primary_group_keys": _string_list(inferred_roles.get("primary_group_keys")),
+            "inferred_variant_group_keys": _string_list(inferred_roles.get("variant_group_keys")),
             "primary_source_ids": primary_source_ids,
             "variant_source_ids": variant_source_ids,
             "primary_delegate_paths": primary_delegate_paths,
@@ -742,6 +761,27 @@ def _find_legacy_path_gap(
 
 def _is_explicit_truth(*, truth: TruthLedgerEntry) -> bool:
     return truth.source_kind in {"user_specification", "user_acceptance"}
+
+
+def _is_primary_evidence_record(*, record: ExtractedClaimRecord) -> bool:
+    claim = record.claim
+    assertion_status = str(getattr(claim, "assertion_status", "asserted") or "asserted").strip()
+    source_authority = str(getattr(claim, "source_authority", "") or "").strip()
+    metadata = getattr(claim, "metadata", {}) or {}
+    temporal_status = str(metadata.get("source_temporal_status") or "").strip()
+    governance_level = str(metadata.get("source_governance_level") or "").strip()
+    return not (
+        assertion_status in {"deprecated", "secondary_only", "not_ssot"}
+        or source_authority == "historical"
+        or temporal_status == "historical"
+        or governance_level == "historical"
+    )
+
+
+def _is_legacy_comparable_record(*, record: ExtractedClaimRecord) -> bool:
+    claim = record.claim
+    assertion_status = str(getattr(claim, "assertion_status", "asserted") or "asserted").strip()
+    return assertion_status != "secondary_only"
 
 
 def _is_legacy_path_scope(*, subject_key: str) -> bool:
@@ -942,44 +982,44 @@ def _variant_family_groups(*, comparison_pairs: Sequence[dict[str, object]]) -> 
         )
         family_group["primary_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["primary_family_keys"]],
-                *[str(item) for item in comparison.get("primary_family_keys", [])],
+                *_string_list(family_group.get("primary_family_keys")),
+                *_string_list(comparison.get("primary_family_keys")),
             }
         )
         family_group["variant_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["variant_family_keys"]],
-                *[str(item) for item in comparison.get("variant_family_keys", [])],
+                *_string_list(family_group.get("variant_family_keys")),
+                *_string_list(comparison.get("variant_family_keys")),
             }
         )
         family_group["qualified_primary_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["qualified_primary_family_keys"]],
-                *[str(item) for item in comparison.get("qualified_primary_family_keys", [])],
+                *_string_list(family_group.get("qualified_primary_family_keys")),
+                *_string_list(comparison.get("qualified_primary_family_keys")),
             }
         )
         family_group["qualified_variant_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["qualified_variant_family_keys"]],
-                *[str(item) for item in comparison.get("qualified_variant_family_keys", [])],
+                *_string_list(family_group.get("qualified_variant_family_keys")),
+                *_string_list(comparison.get("qualified_variant_family_keys")),
             }
         )
         family_group["variant_source_ids"] = sorted(
             {
-                *[str(item) for item in family_group["variant_source_ids"]],
+                *_string_list(family_group.get("variant_source_ids")),
                 str(comparison.get("variant_source_id") or ""),
             }
         )
         overlap = sorted(
             {
-                *[str(item) for item in family_group["family_overlap_keys"]],
-                *[str(item) for item in comparison.get("family_overlap_keys", [])],
+                *_string_list(family_group.get("family_overlap_keys")),
+                *_string_list(comparison.get("family_overlap_keys")),
             }
         )
         qualified_overlap = sorted(
             {
-                *[str(item) for item in family_group["qualified_family_overlap_keys"]],
-                *[str(item) for item in comparison.get("qualified_family_overlap_keys", [])],
+                *_string_list(family_group.get("qualified_family_overlap_keys")),
+                *_string_list(comparison.get("qualified_family_overlap_keys")),
             }
         )
         family_group["family_overlap_keys"] = overlap
@@ -1017,87 +1057,90 @@ def _variant_family_match_groups(*, comparison_pairs: Sequence[dict[str, object]
         )
         family_group["primary_group_keys"] = sorted(
             {
-                *[str(item) for item in family_group["primary_group_keys"]],
+                *_string_list(family_group.get("primary_group_keys")),
                 str(comparison.get("primary_group_key") or ""),
             }
         )
         family_group["primary_source_ids"] = sorted(
             {
-                *[str(item) for item in family_group["primary_source_ids"]],
+                *_string_list(family_group.get("primary_source_ids")),
                 str(comparison.get("primary_source_id") or ""),
             }
         )
         family_group["variant_source_ids"] = sorted(
             {
-                *[str(item) for item in family_group["variant_source_ids"]],
+                *_string_list(family_group.get("variant_source_ids")),
                 str(comparison.get("variant_source_id") or ""),
             }
         )
         family_group["primary_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["primary_family_keys"]],
-                *[str(item) for item in comparison.get("primary_family_keys", [])],
+                *_string_list(family_group.get("primary_family_keys")),
+                *_string_list(comparison.get("primary_family_keys")),
             }
         )
         family_group["variant_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["variant_family_keys"]],
-                *[str(item) for item in comparison.get("variant_family_keys", [])],
+                *_string_list(family_group.get("variant_family_keys")),
+                *_string_list(comparison.get("variant_family_keys")),
             }
         )
         family_group["qualified_primary_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["qualified_primary_family_keys"]],
-                *[str(item) for item in comparison.get("qualified_primary_family_keys", [])],
+                *_string_list(family_group.get("qualified_primary_family_keys")),
+                *_string_list(comparison.get("qualified_primary_family_keys")),
             }
         )
         family_group["qualified_variant_family_keys"] = sorted(
             {
-                *[str(item) for item in family_group["qualified_variant_family_keys"]],
-                *[str(item) for item in comparison.get("qualified_variant_family_keys", [])],
+                *_string_list(family_group.get("qualified_variant_family_keys")),
+                *_string_list(comparison.get("qualified_variant_family_keys")),
             }
         )
         family_group["family_overlap_keys"] = sorted(
             {
-                *[str(item) for item in family_group["family_overlap_keys"]],
-                *[str(item) for item in comparison.get("family_overlap_keys", [])],
+                *_string_list(family_group.get("family_overlap_keys")),
+                *_string_list(comparison.get("family_overlap_keys")),
             }
         )
         family_group["qualified_family_overlap_keys"] = sorted(
             {
-                *[str(item) for item in family_group["qualified_family_overlap_keys"]],
-                *[str(item) for item in comparison.get("qualified_family_overlap_keys", [])],
+                *_string_list(family_group.get("qualified_family_overlap_keys")),
+                *_string_list(comparison.get("qualified_family_overlap_keys")),
             }
         )
         family_group["family_alignment_states"] = sorted(
             {
-                *[str(item) for item in family_group["family_alignment_states"]],
+                *_string_list(family_group.get("family_alignment_states")),
                 str(comparison.get("family_alignment") or ""),
             }
         )
-        score = tuple(int(item) for item in comparison.get("qualified_chain_similarity", []))
-        if score and score not in family_group["chain_similarity_scores"]:
-            family_group["chain_similarity_scores"].append(score)
+        score = tuple(_coerce_int(item) for item in _object_list(comparison.get("qualified_chain_similarity")))
+        chain_similarity_scores = _tuple_int_list(family_group.get("chain_similarity_scores"))
+        if score and score not in chain_similarity_scores:
+            chain_similarity_scores.append(score)
             family_group["chain_similarity_scores"] = sorted(
-                family_group["chain_similarity_scores"],
+                chain_similarity_scores,
                 reverse=True,
             )
-        prefix = tuple(str(item) for item in comparison.get("chain_alignment_prefix", []))
-        if prefix and prefix not in family_group["chain_alignment_prefixes"]:
-            family_group["chain_alignment_prefixes"].append(prefix)
-            family_group["chain_alignment_prefixes"] = sorted(family_group["chain_alignment_prefixes"])
-        suffix = tuple(str(item) for item in comparison.get("chain_alignment_suffix", []))
-        if suffix and suffix not in family_group["chain_alignment_suffixes"]:
-            family_group["chain_alignment_suffixes"].append(suffix)
-            family_group["chain_alignment_suffixes"] = sorted(family_group["chain_alignment_suffixes"])
+        prefix = tuple(_string_list(comparison.get("chain_alignment_prefix")))
+        chain_alignment_prefixes = _tuple_str_list(family_group.get("chain_alignment_prefixes"))
+        if prefix and prefix not in chain_alignment_prefixes:
+            chain_alignment_prefixes.append(prefix)
+            family_group["chain_alignment_prefixes"] = sorted(chain_alignment_prefixes)
+        suffix = tuple(_string_list(comparison.get("chain_alignment_suffix")))
+        chain_alignment_suffixes = _tuple_str_list(family_group.get("chain_alignment_suffixes"))
+        if suffix and suffix not in chain_alignment_suffixes:
+            chain_alignment_suffixes.append(suffix)
+            family_group["chain_alignment_suffixes"] = sorted(chain_alignment_suffixes)
     normalized: list[dict[str, object]] = []
     for group in grouped.values():
         normalized.append(
             {
                 **group,
-                "chain_similarity_scores": [list(score) for score in group["chain_similarity_scores"]],
-                "chain_alignment_prefixes": [list(prefix) for prefix in group["chain_alignment_prefixes"]],
-                "chain_alignment_suffixes": [list(suffix) for suffix in group["chain_alignment_suffixes"]],
+                "chain_similarity_scores": [list(score) for score in _tuple_int_list(group.get("chain_similarity_scores"))],
+                "chain_alignment_prefixes": [list(prefix) for prefix in _tuple_str_list(group.get("chain_alignment_prefixes"))],
+                "chain_alignment_suffixes": [list(suffix) for suffix in _tuple_str_list(group.get("chain_alignment_suffixes"))],
             }
         )
     return sorted(normalized, key=lambda group: str(group.get("variant_group_key") or ""))
@@ -1122,47 +1165,47 @@ def _primary_family_groups(*, primary_records: Sequence[ExtractedClaimRecord]) -
         )
         group["primary_source_ids"] = sorted(
             {
-                *[str(item) for item in group["primary_source_ids"]],
+                *_string_list(group.get("primary_source_ids")),
                 record.claim.source_id,
             }
         )
         group["primary_source_types"] = sorted(
             {
-                *[str(item) for item in group["primary_source_types"]],
+                *_string_list(group.get("primary_source_types")),
                 str(record.claim.source_type),
             }
         )
         role = _path_variant_role(record=record) or "documented_primary"
-        group["primary_roles"] = sorted({*[str(item) for item in group["primary_roles"]], role})
+        group["primary_roles"] = sorted({*_string_list(group.get("primary_roles")), role})
         group["primary_values"] = sorted(
             {
-                *[str(item) for item in group["primary_values"]],
+                *_string_list(group.get("primary_values")),
                 str(record.claim.normalized_value or "").strip(),
             }
         )
         group["primary_delegate_paths"] = sorted(
             {
-                *[str(item) for item in group["primary_delegate_paths"]],
-                *[str(item) for item in _delegation_paths(record=record)],
+                *_string_list(group.get("primary_delegate_paths")),
+                *_delegation_paths(record=record),
             }
         )
         group["primary_family_keys"] = sorted(
             {
-                *[str(item) for item in group["primary_family_keys"]],
-                *[str(item) for item in _path_family_keys(record=record)],
+                *_string_list(group.get("primary_family_keys")),
+                *_path_family_keys(record=record),
             }
         )
         group["qualified_primary_family_keys"] = sorted(
             {
-                *[str(item) for item in group["qualified_primary_family_keys"]],
-                *[str(item) for item in _qualified_path_family_keys(record=record)],
+                *_string_list(group.get("qualified_primary_family_keys")),
+                *_qualified_path_family_keys(record=record),
             }
         )
     return sorted(
         grouped.values(),
         key=lambda group: (
             str(group.get("primary_group_key") or ""),
-            str(group.get("primary_source_ids", [""])[0] if group.get("primary_source_ids") else ""),
+            (_string_list(group.get("primary_source_ids")) or [""])[0],
         ),
     )
 
@@ -1187,7 +1230,7 @@ def _shared_variant_family_match_groups(*, comparison_pairs: Sequence[dict[str, 
     return [
         group
         for group in _variant_family_match_groups(comparison_pairs=comparison_pairs)
-        if any(str(item).startswith("shared_") for item in group.get("family_alignment_states", []))
+        if any(str(item).startswith("shared_") for item in _string_list(group.get("family_alignment_states")))
     ]
 
 
@@ -1195,7 +1238,7 @@ def _isolated_variant_family_match_groups(*, comparison_pairs: Sequence[dict[str
     return [
         group
         for group in _variant_family_match_groups(comparison_pairs=comparison_pairs)
-        if all(str(item) == "isolated_service_family" for item in group.get("family_alignment_states", []))
+        if all(str(item) == "isolated_service_family" for item in _string_list(group.get("family_alignment_states")))
     ]
 
 
@@ -1299,8 +1342,8 @@ def _matched_primary_variant_groups(
                 **group,
                 "variant_roles": sorted({str(match.get("variant_role") or "").strip() for match in matches if str(match.get("variant_role") or "").strip()}),
                 "variant_source_ids": sorted({str(match.get("variant_source_id") or "").strip() for match in matches if str(match.get("variant_source_id") or "").strip()}),
-                "variant_family_keys": sorted({key for match in matches for key in [str(item) for item in match.get("variant_family_keys", [])]}),
-                "qualified_variant_family_keys": sorted({key for match in matches for key in [str(item) for item in match.get("qualified_variant_family_keys", [])]}),
+                "variant_family_keys": sorted({key for match in matches for key in _string_list(match.get("variant_family_keys"))}),
+                "qualified_variant_family_keys": sorted({key for match in matches for key in _string_list(match.get("qualified_variant_family_keys"))}),
                 "family_alignment_states": sorted({str(match.get("family_alignment") or "").strip() for match in matches if str(match.get("family_alignment") or "").strip()}),
                 "comparison_count": len(matches),
             }
@@ -1309,7 +1352,7 @@ def _matched_primary_variant_groups(
         matched_groups,
         key=lambda group: (
             str(group.get("primary_group_key") or ""),
-            str(group.get("primary_source_ids", [""])[0] if group.get("primary_source_ids") else ""),
+            (_string_list(group.get("primary_source_ids")) or [""])[0],
         ),
     )
 
@@ -1322,7 +1365,7 @@ def _primary_variant_family_matches(
     variant_match_groups = _variant_family_match_groups(comparison_pairs=comparison_pairs)
     grouped_variant_matches: dict[str, list[dict[str, object]]] = {}
     for variant_group in variant_match_groups:
-        for primary_group_key in variant_group.get("primary_group_keys", []):
+        for primary_group_key in _string_list(variant_group.get("primary_group_keys")):
             grouped_variant_matches.setdefault(str(primary_group_key), []).append(variant_group)
     matches: list[dict[str, object]] = []
     for primary_group in primary_family_groups:
@@ -1350,7 +1393,7 @@ def _primary_variant_family_matches(
                     {
                         source_id
                         for group in variant_groups
-                        for source_id in [str(item) for item in group.get("variant_source_ids", [])]
+                                    for source_id in _string_list(group.get("variant_source_ids"))
                     }
                 ),
                 "match_group_count": len(variant_groups),
@@ -1409,11 +1452,11 @@ def _infer_unmarked_path_roles(
         primary_groups = [
             group
             for group in groups
-            if int(group["strength_score"]) >= primary_score
+            if _coerce_int(group.get("strength_score")) >= primary_score
         ]
     else:
-        strongest_score = max(int(group["strength_score"]) for group in groups)
-        weakest_score = min(int(group["strength_score"]) for group in groups)
+        strongest_score = max(_coerce_int(group.get("strength_score")) for group in groups)
+        weakest_score = min(_coerce_int(group.get("strength_score")) for group in groups)
         if strongest_score == weakest_score:
             return {
                 "primary_records": [],
@@ -1422,16 +1465,16 @@ def _infer_unmarked_path_roles(
                 "variant_group_keys": [],
                 "inference_applied": False,
             }
-        primary_groups = [group for group in groups if int(group["strength_score"]) == strongest_score]
-        baseline_records = [record for group in primary_groups for record in group["records"]]
+        primary_groups = [group for group in groups if _coerce_int(group.get("strength_score")) == strongest_score]
+        baseline_records = [record for group in primary_groups for record in _record_list(group.get("records"))]
 
     inferred_variant_groups: list[dict[str, object]] = []
     baseline_strength = max(_path_strength_score(record=record) for record in baseline_records) if baseline_records else 0
     for group in groups:
         if group in primary_groups:
             continue
-        group_records = list(group["records"])
-        group_strength = int(group["strength_score"])
+        group_records = _record_list(group.get("records"))
+        group_strength = _coerce_int(group.get("strength_score"))
         if not _values_conflict(baseline_records, group_records, subject_key=subject_key):
             continue
         if group_strength >= baseline_strength and not _group_looks_noncanonical(group=group):
@@ -1440,7 +1483,7 @@ def _infer_unmarked_path_roles(
 
     if not inferred_variant_groups:
         return {
-            "primary_records": [record for group in primary_groups for record in group["records"]] if not primary_records else [],
+            "primary_records": [record for group in primary_groups for record in _record_list(group.get("records"))] if not primary_records else [],
             "variant_records": [],
             "primary_group_keys": [str(group["group_key"]) for group in primary_groups] if not primary_records else [],
             "variant_group_keys": [],
@@ -1448,8 +1491,8 @@ def _infer_unmarked_path_roles(
         }
 
     return {
-        "primary_records": [record for group in primary_groups for record in group["records"]] if not primary_records else [],
-        "variant_records": [record for group in inferred_variant_groups for record in group["records"]],
+        "primary_records": [record for group in primary_groups for record in _record_list(group.get("records"))] if not primary_records else [],
+        "variant_records": [record for group in inferred_variant_groups for record in _record_list(group.get("records"))],
         "primary_group_keys": [str(group["group_key"]) for group in primary_groups],
         "variant_group_keys": [str(group["group_key"]) for group in inferred_variant_groups],
         "inference_applied": True,
@@ -1471,19 +1514,27 @@ def _path_record_groups(*, records: Sequence[ExtractedClaimRecord]) -> list[dict
                 "strength_score": 0,
             },
         )
-        group["records"].append(record)
-        group["strength_score"] = max(int(group["strength_score"]), _path_strength_score(record=record))
-        group["delegate_paths"].update(_delegation_paths(record=record))
-        group["qualified_family_keys"].update(_qualified_path_family_keys(record=record))
-        group["family_keys"].update(_path_family_keys(record=record))
+        group_records = _record_list(group.get("records"))
+        group_records.append(record)
+        group["records"] = group_records
+        group["strength_score"] = max(_coerce_int(group.get("strength_score")), _path_strength_score(record=record))
+        delegate_paths = _string_set(group.get("delegate_paths"))
+        delegate_paths.update(_delegation_paths(record=record))
+        group["delegate_paths"] = delegate_paths
+        qualified_family_keys = _string_set(group.get("qualified_family_keys"))
+        qualified_family_keys.update(_qualified_path_family_keys(record=record))
+        group["qualified_family_keys"] = qualified_family_keys
+        family_keys = _string_set(group.get("family_keys"))
+        family_keys.update(_path_family_keys(record=record))
+        group["family_keys"] = family_keys
     normalized: list[dict[str, object]] = []
     for group in grouped.values():
         normalized.append(
             {
                 **group,
-                "delegate_paths": sorted(str(item) for item in group["delegate_paths"]),
-                "qualified_family_keys": sorted(str(item) for item in group["qualified_family_keys"]),
-                "family_keys": sorted(str(item) for item in group["family_keys"]),
+                "delegate_paths": sorted(_string_set(group.get("delegate_paths"))),
+                "qualified_family_keys": sorted(_string_set(group.get("qualified_family_keys"))),
+                "family_keys": sorted(_string_set(group.get("family_keys"))),
             }
         )
     return sorted(normalized, key=lambda group: str(group["group_key"]))
@@ -1619,7 +1670,7 @@ def _group_looks_noncanonical(*, group: dict[str, object]) -> bool:
     descriptor = " ".join(
         [
             str(group.get("group_key") or ""),
-            *[str(item) for item in group.get("delegate_paths", [])],
+            *_string_list(group.get("delegate_paths")),
         ]
     ).casefold()
     return any(
@@ -1644,10 +1695,10 @@ def _family_overlap_keys(*, primary_family_keys: Sequence[str], variant_family_k
 
 def _variant_group_key_for_comparison(*, comparison: dict[str, object]) -> str:
     variant_role = str(comparison.get("variant_role") or "").strip() or "variant"
-    qualified_keys = [str(item) for item in comparison.get("qualified_variant_family_keys", []) if str(item)]
+    qualified_keys = _string_list(comparison.get("qualified_variant_family_keys"))
     if qualified_keys:
         return f"{variant_role}|{'|'.join(qualified_keys)}"
-    family_keys = [str(item) for item in comparison.get("variant_family_keys", []) if str(item)]
+    family_keys = _string_list(comparison.get("variant_family_keys"))
     if family_keys:
         return f"{variant_role}|{'|'.join(family_keys)}"
     variant_source_id = str(comparison.get("variant_source_id") or "").strip()
@@ -1704,7 +1755,7 @@ def _best_chain_alignment(
 ) -> dict[str, list[str]]:
     primary_chains = _qualified_family_chains(record=primary_record)
     variant_chains = _qualified_family_chains(record=variant_record)
-    best = {
+    best: dict[str, list[str]] = {
         "prefix": [],
         "suffix": [],
         "qualified_overlap": [],
@@ -1789,8 +1840,8 @@ def _service_family_alignment(
 def _build_finding(
     *,
     subject_key: str,
-    category: AuditFinding.__annotations__["category"],
-    severity: AuditFinding.__annotations__["severity"],
+    category: FindingCategory,
+    severity: FindingSeverity,
     title: str,
     summary: str,
     recommendation: str,
@@ -1907,7 +1958,7 @@ def _classify_finding_link(
     *,
     left: AuditFinding,
     right: AuditFinding,
-) -> tuple[str, str, float, AuditFinding, AuditFinding] | None:
+) -> tuple[FindingLinkRelation, str, float, AuditFinding, AuditFinding] | None:
     left_scopes = _finding_scope_keys(left)
     right_scopes = _finding_scope_keys(right)
     shared_scopes = left_scopes.intersection(right_scopes)
@@ -1972,7 +2023,9 @@ def _classify_finding_link(
         )
 
     if shared_scopes:
-        relation = "gap_hint" if left.category == "missing_definition" or right.category == "missing_definition" else "supports"
+        relation: FindingLinkRelation = (
+            "gap_hint" if left.category == "missing_definition" or right.category == "missing_definition" else "supports"
+        )
         return (
             relation,
             "Beide Findings ueberlappen im selben fachlichen Scope und liefern gemeinsame Evidenz fuer denselben Bereich.",
@@ -2024,6 +2077,45 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _object_list(value: object) -> list[object]:
+    if not isinstance(value, list):
+        return []
+    return value
+
+
+def _record_list(value: object) -> list[ExtractedClaimRecord]:
+    return [item for item in _object_list(value) if isinstance(item, ExtractedClaimRecord)]
+
+
+def _string_set(value: object) -> set[str]:
+    if isinstance(value, set):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return set(_string_list(value))
+
+
+def _coerce_int(value: object, *, fallback: int = 0) -> int:
+    try:
+        return int(str(value).strip()) if value is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _tuple_int_list(value: object) -> list[tuple[int, ...]]:
+    tuples: list[tuple[int, ...]] = []
+    for item in _object_list(value):
+        if isinstance(item, tuple):
+            tuples.append(tuple(_coerce_int(part) for part in item))
+    return tuples
+
+
+def _tuple_str_list(value: object) -> list[tuple[str, ...]]:
+    tuples: list[tuple[str, ...]] = []
+    for item in _object_list(value):
+        if isinstance(item, tuple):
+            tuples.append(tuple(str(part).strip() for part in item if str(part).strip()))
+    return tuples
 
 
 def _is_subject_impacted(*, subject_key: str, impacted_scope_keys: set[str]) -> bool:

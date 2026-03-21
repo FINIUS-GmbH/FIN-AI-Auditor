@@ -258,6 +258,26 @@ def build_reference_gold_set_cases() -> list[GoldSetCase]:
             ],
         ),
         GoldSetCase(
+            case_id="process_phase_count_metamodel_conflict",
+            expected_findings=[
+                GoldSetFindingExpectation(
+                    category="contradiction",
+                    subject_key="BSM.process",
+                    title_contains="Metamodell",
+                )
+            ],
+        ),
+        GoldSetCase(
+            case_id="process_phase_count_negative_case",
+            forbidden_findings=[
+                GoldSetFindingExpectation(
+                    category="contradiction",
+                    subject_key="BSM.process",
+                    title_contains="Metamodell",
+                )
+            ],
+        ),
+        GoldSetCase(
             case_id="evidence_chain_conflict",
             expected_findings=[
                 GoldSetFindingExpectation(
@@ -597,6 +617,62 @@ def build_reference_gold_set_documents() -> list[tuple[GoldSetCase, list[Collect
                         ]
                     ),
                     path_hint="models/finai_meta_ssot_pipeline_as_is.puml",
+                ),
+            ],
+        ),
+        (
+            cases["process_phase_count_metamodel_conflict"],
+            [
+                _doc(
+                    source_type="metamodel",
+                    source_id="current_dump",
+                    title="current_dump",
+                    body=(
+                        '[{"phase_id":"draft","phase_name":"Draft"},'
+                        '{"phase_id":"review","phase_name":"Review"},'
+                        '{"phase_id":"release","phase_name":"Release"}]'
+                    ),
+                    path_hint="data/metamodel/current_dump.json",
+                ),
+                _doc(
+                    source_type="confluence_page",
+                    source_id="page-process-definition",
+                    title="Process Definition",
+                    body="\n".join(
+                        [
+                            "# Process",
+                            "BSM process has 4 phases.",
+                        ]
+                    ),
+                    path_hint="wiki/process-definition",
+                ),
+            ],
+        ),
+        (
+            cases["process_phase_count_negative_case"],
+            [
+                _doc(
+                    source_type="metamodel",
+                    source_id="current_dump",
+                    title="current_dump",
+                    body=(
+                        '[{"phase_id":"draft","phase_name":"Draft"},'
+                        '{"phase_id":"review","phase_name":"Review"},'
+                        '{"phase_id":"release","phase_name":"Release"}]'
+                    ),
+                    path_hint="data/metamodel/current_dump.json",
+                ),
+                _doc(
+                    source_type="confluence_page",
+                    source_id="page-process-definition",
+                    title="Process Definition",
+                    body="\n".join(
+                        [
+                            "# Process",
+                            "BSM process has 3 phases.",
+                        ]
+                    ),
+                    path_hint="wiki/process-definition",
                 ),
             ],
         ),

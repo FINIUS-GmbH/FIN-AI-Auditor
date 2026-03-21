@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -22,13 +22,11 @@ from fin_ai_auditor.domain.models import (
     AuditClaimEntry,
     AuditRun,
     ClarificationMessage,
-    ClarificationOutcomeType,
+    ClarificationPurpose,
     ClarificationThread,
-    DecisionPackage,
     TruthLedgerEntry,
     utc_now_iso,
     new_claim_id,
-    new_truth_id,
 )
 
 if TYPE_CHECKING:
@@ -80,6 +78,17 @@ class _LLMFollowUpResult(BaseModel):
     question_type: str = Field(default="clarification", description="Type: clarification, confirmation, summary")
 
 
+class _IndicationPayload(TypedDict, total=False):
+    statement: str
+    source: str
+    confidence_grade: str
+    confidence: str
+    canonical_key_hint: str
+    scope_kind: str
+    detected_patterns: list[str]
+    extracted_by: str
+
+
 class ClarificationService:
     """Manages clarification dialogs bound to decision packages or atomic facts."""
 
@@ -104,7 +113,7 @@ class ClarificationService:
         package_id: str | None = None,
         atomic_fact_id: str | None = None,
         review_card_id: str | None = None,
-        purpose: str,
+        purpose: ClarificationPurpose,
         initial_content: str | None = None,
     ) -> AuditRun:
         """Open a new clarification thread and generate the first question."""
@@ -599,13 +608,13 @@ class ClarificationService:
                 # Related claims
                 related_claims = [
                     c for c in run.claims
-                    if any(fid in (c.metadata.get("finding_id", "") if isinstance(c.metadata, dict) else "")
+                    if any(fid in str(c.metadata.get("finding_id") or "")
                            for fid in pkg.related_finding_ids)
                 ]
                 if related_claims:
                     lines.append(f"\nZugehörige Claims ({len(related_claims)}):")
                     for claim in related_claims[:5]:
-                        lines.append(f"  - {claim.predicate}: {claim.object_value} (Quelle: {claim.source_type})")
+                        lines.append(f"  - {claim.predicate}: {claim.normalized_value} (Quelle: {claim.source_type})")
 
                 # Related findings
                 related_findings = [
@@ -637,7 +646,7 @@ class ClarificationService:
     def _generate_initial_question(
         self,
         *,
-        purpose: str,
+        purpose: ClarificationPurpose,
         anchor_context: str,
         global_context: str,
     ) -> ClarificationMessage:
@@ -690,7 +699,7 @@ class ClarificationService:
         *,
         thread: ClarificationThread,
         user_answer: str,
-        indications: list[dict[str, str]],
+        indications: list[_IndicationPayload],
         run: AuditRun,
         llm_follow_up_question: str = "",
     ) -> list[ClarificationMessage]:
@@ -798,7 +807,7 @@ class ClarificationService:
         content: str,
         run: AuditRun,
         thread: ClarificationThread,
-    ) -> list[dict[str, str]]:
+    ) -> list[_IndicationPayload]:
         """Extract potential truth-like statements from user answer.
 
         Uses multi-pattern heuristic analysis to classify statement confidence:
@@ -807,7 +816,7 @@ class ClarificationService:
           - negation:  contains clear exclusions → 0.75
           - general:   substantive but not clearly assertive → 0.65
         """
-        indications: list[dict[str, str]] = []
+        indications: list[_IndicationPayload] = []
         content_stripped = content.strip()
         content_lower = content_stripped.lower()
 
@@ -1184,7 +1193,7 @@ class ClarificationService:
             content=content,
         )
 
-        indications: list[dict[str, str]] | None = None
+        indications: list[_IndicationPayload] | None = None
         llm_follow_up_question = ""
         resolution_status = "needs_more"
         resolution_summary = ""
@@ -1254,7 +1263,7 @@ class ClarificationService:
         *,
         thread: ClarificationThread,
         run: AuditRun,
-        indication: dict[str, str],
+        indication: _IndicationPayload,
         statement: str,
     ) -> dict[str, object]:
         subject_key = self._derive_subject_key(thread, run)

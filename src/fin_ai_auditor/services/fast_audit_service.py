@@ -1,22 +1,26 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, cast
 
 from pydantic import BaseModel, Field
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
     AuditFinding,
     AuditLocation,
     AuditPosition,
+    FindingCategory,
+    FindingSeverity,
     ReviewCard,
     ReviewCardCoverageSummary,
+    ReviewCardDeviationType,
+    ReviewCardPriority,
 )
 from fin_ai_auditor.llm import ChatMessage, GenerationConfig, LiteLLMClient
 from fin_ai_auditor.services.bsm_domain_contradiction_detector import detect_bsm_domain_contradictions
@@ -128,7 +132,7 @@ class _LLMReviewCardBatch(BaseModel):
 class FastAuditResult:
     review_cards: list[ReviewCard]
     findings: list[AuditFinding]
-    claims: list[object]
+    claims: list[AuditClaimEntry]
     analysis_notes: list[str]
     summary: str
     coverage_summary: ReviewCardCoverageSummary
@@ -282,11 +286,12 @@ class FastAuditService:
         for index in range(0, len(candidates), LLM_BATCH_SIZE):
             batch = candidates[index : index + LLM_BATCH_SIZE]
             try:
-                parsed, response = await client.structured_output_with_usage(
+                parsed_result, response = await client.structured_output_with_usage(
                     messages=_build_fast_audit_messages(candidates=batch),
                     schema=_LLMReviewCardBatch,
                     config=GenerationConfig(slot=slot, max_tokens=2200, temperature=0.1, timeout_s=45.0),
                 )
+                parsed = cast(_LLMReviewCardBatch, parsed_result)
                 _merge_usage(total=usage, response=response)
                 review_cards.extend(
                     card
@@ -438,7 +443,7 @@ def _build_candidates(
             if len(chosen_matches) >= 2:
                 break
         if not chosen_matches and section.priority_score >= 8:
-            candidate_key = tuple(sorted((section.section_id, "missing")))
+            candidate_key: tuple[str, str] = (section.section_id, "missing")
             if candidate_key in used_pairs:
                 continue
             used_pairs.add(candidate_key)
@@ -457,7 +462,8 @@ def _build_candidates(
             )
             continue
         for other in chosen_matches:
-            pair_key = tuple(sorted((section.section_id, other.section_id)))
+            left_id, right_id = sorted((section.section_id, other.section_id))
+            pair_key: tuple[str, str] = (left_id, right_id)
             if pair_key in used_pairs:
                 continue
             used_pairs.add(pair_key)
@@ -505,7 +511,7 @@ def _heuristic_card(*, candidate: ComparisonCandidate) -> ReviewCard | None:
     if right is None:
         source_a_claim = _statement_excerpt(left.body)
         source_b_claim = "Kein belastbares Gegenstueck innerhalb des priorisierten Fast-Audit-Budgets gefunden."
-        deviation_type = "gap"
+        deviation_type: ReviewCardDeviationType = "gap"
         return ReviewCard(
             title=f"Spiegelungsluecke bei {left.heading}",
             deviation_type=deviation_type,
@@ -547,7 +553,7 @@ def _heuristic_card(*, candidate: ComparisonCandidate) -> ReviewCard | None:
         deviation_type = "obsolete"
         why = "Eine der beiden Aussagen wirkt zeitlich oder fachlich veraltet."
         recommended = "Festlegen, welche Quelle den aktuellen Stand repraesentiert, und die veraltete Aussage entfernen."
-        priority = "medium"
+        priority: ReviewCardPriority = "medium"
     elif _contains_gap_signal(left.body) or _contains_gap_signal(right.body):
         deviation_type = "gap"
         why = "Mindestens eine Seite beschreibt das Thema nur unvollstaendig oder indirekt."
@@ -647,7 +653,16 @@ def _llm_item_to_review_card(
         if item.source_b_evidence
         else (_statement_excerpt(right.body) if right is not None else "Kein Gegenstueck im Budget gefunden.")
     )
-    deviation_type = item.deviation_type if item.deviation_type in {"error", "gap", "misunderstanding", "obsolete", "unclear"} else "unclear"
+    deviation_type: ReviewCardDeviationType = (
+        cast(ReviewCardDeviationType, item.deviation_type)
+        if item.deviation_type in {"error", "gap", "misunderstanding", "obsolete", "unclear"}
+        else "unclear"
+    )
+    priority: ReviewCardPriority = (
+        cast(ReviewCardPriority, item.priority)
+        if item.priority in {"high", "medium", "low"}
+        else "medium"
+    )
     return ReviewCard(
         title=item.title or f"{left.heading} Abweichung",
         deviation_type=deviation_type,
@@ -661,7 +676,7 @@ def _llm_item_to_review_card(
         why_it_matters=item.why_it_matters or "Die Abweichung beeinflusst die inhaltliche Konsistenz des Auditmaterials.",
         recommended_decision=item.recommended_decision or "Die beiden Aussagen fachlich gegeneinander abgleichen und den gueltigen Stand festhalten.",
         confidence=item.confidence,
-        priority=item.priority if item.priority in {"high", "medium", "low"} else "medium",
+        priority=priority,
         follow_up_capabilities=_follow_up_capabilities(
             source_types={left.source_type, *( [right.source_type] if right is not None else [] )}
         ),
@@ -676,14 +691,14 @@ def _llm_item_to_review_card(
 
 
 def _review_card_to_finding(*, card: ReviewCard) -> AuditFinding:
-    category_map = {
+    category_map: dict[ReviewCardDeviationType, FindingCategory] = {
         "error": "contradiction",
         "gap": "missing_documentation",
         "misunderstanding": "clarification_needed",
         "obsolete": "obsolete_documentation",
         "unclear": "open_decision",
     }
-    severity_map = {
+    severity_map: dict[ReviewCardPriority, FindingSeverity] = {
         "high": "high",
         "medium": "medium",
         "low": "low",
@@ -736,7 +751,7 @@ def _review_card_from_bsm_finding(*, finding: AuditFinding) -> ReviewCard:
         source_b_evidence=source_b_evidence[0],
     )
     follow_up_capabilities = _follow_up_capabilities(source_types={location.source_type for location in locations}) or ["confluence_page_update", "jira_ticket_create"]
-    priority = "high" if finding.severity in {"critical", "high"} else "medium"
+    priority: ReviewCardPriority = "high" if finding.severity in {"critical", "high"} else "medium"
     return ReviewCard(
         title=finding.title,
         deviation_type=deviation_type,
@@ -1010,7 +1025,7 @@ def _determine_lane(
     return ("process_scope", "Prozess, Run & Scope", 2)
 
 
-def _deviation_type_for_bsm_finding(*, finding: AuditFinding) -> str:
+def _deviation_type_for_bsm_finding(*, finding: AuditFinding) -> ReviewCardDeviationType:
     if finding.category == "contradiction":
         return "error"
     if finding.category in {"implementation_drift", "obsolete_documentation"}:

@@ -6,8 +6,8 @@ import json
 import math
 import re
 import sqlite3
-from typing import Callable
 from dataclasses import dataclass
+from typing import Callable, Literal, Protocol, cast
 
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import AuditFinding, RetrievalSegment, RetrievalSegmentClaimLink
@@ -17,7 +17,7 @@ from fin_ai_auditor.services.finding_prioritization import (
     is_core_root_cause_bucket,
     select_findings_for_retrieval,
 )
-from fin_ai_auditor.services.pipeline_models import CollectedDocument, ExtractedClaimRecord
+from fin_ai_auditor.services.pipeline_models import CollectedDocument, CollectedSourceType, ExtractedClaimRecord
 
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]{3,}")
@@ -68,6 +68,11 @@ class _SourceSegmentIndex:
     by_anchor: dict[str, list[RetrievalSegment]]
     by_section: dict[str, list[RetrievalSegment]]
     by_line: dict[int, list[RetrievalSegment]]
+
+
+class _Embedder(Protocol):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_query(self, text: str) -> list[float]: ...
 
 
 def build_retrieval_index(
@@ -148,7 +153,7 @@ def build_recommendation_contexts(
         slot = _select_embedding_slot(settings=settings)
         if slot is not None:
             try:
-                embedder = get_embeddings_from_llm_slot(settings=settings, llm_slot=int(slot))
+                embedder = cast(_Embedder, get_embeddings_from_llm_slot(settings=settings, llm_slot=int(slot)))
                 for finding in target_findings:
                     query = _query_text_for_finding(finding=finding)
                     if query:
@@ -261,6 +266,8 @@ def _segment_document(*, run_id: str, document: CollectedDocument) -> list[Retri
         return _segment_code_document(run_id=run_id, document=document)
     if document.source_type == "metamodel":
         return _segment_metamodel_document(run_id=run_id, document=document)
+    if document.source_type == "jira_ticket":
+        return []
     return _segment_text_document(run_id=run_id, document=document)
 
 
@@ -511,6 +518,9 @@ def _build_segment(
     cleaned = content.strip()
     if len(cleaned) < 16:
         return None
+    source_type = _retrieval_source_type(document.source_type)
+    if source_type is None:
+        return None
     segment_hash = _sha256_text(cleaned)
     keyword_source = " ".join(
         part
@@ -524,7 +534,7 @@ def _build_segment(
     return RetrievalSegment(
         run_id=run_id,
         snapshot_id=document.snapshot.snapshot_id,
-        source_type=document.source_type,
+        source_type=source_type,
         source_id=document.source_id,
         title=document.title,
         path_hint=document.path_hint,
@@ -570,7 +580,7 @@ def _attach_embeddings(
     if slot is None:
         return segments, ["Kein Embedding-faehiger LLM-Slot fuer den Retrieval-Index konfiguriert."]
     try:
-        embedder = get_embeddings_from_llm_slot(settings=settings, llm_slot=int(slot))
+        embedder = cast(_Embedder, get_embeddings_from_llm_slot(settings=settings, llm_slot=int(slot)))
         texts = [segment.content for segment in segments]
         embeddings = _embed_in_batches(
             embedder=embedder,
@@ -593,7 +603,7 @@ def _attach_embeddings(
 
 def _embed_in_batches(
     *,
-    embedder: object,
+    embedder: _Embedder,
     texts: list[str],
     batch_size: int,
     progress_callback: RetrievalIndexProgressCallback | None = None,
@@ -637,6 +647,7 @@ def _link_claims_to_segments(
         if source_index is None:
             continue
         direct_candidates = _direct_candidate_segments(source_index=source_index, record=record)
+        scored_candidates: list[tuple[RetrievalSegment, float]]
         if direct_candidates:
             scored_candidates = [
                 (segment, _claim_segment_score(segment=segment, record=record))
@@ -648,18 +659,20 @@ def _link_claims_to_segments(
                 str(location.source_id),
                 str(record.claim.subject_key).strip().casefold(),
             )
-            scored_candidates = keyword_candidate_cache.get(cache_key)
-            if scored_candidates is None:
+            cached_candidates = keyword_candidate_cache.get(cache_key)
+            if cached_candidates is None:
                 scored_candidates = _top_keyword_candidates(
                     segments=source_index.segments,
                     record=record,
                     limit=4,
                 )
                 keyword_candidate_cache[cache_key] = scored_candidates
+            else:
+                scored_candidates = cached_candidates
         for segment, score in scored_candidates:
             if score <= 0.0:
                 continue
-            relation_type = "evidence" if score >= 0.95 else "scope_match"
+            relation_type: Literal["evidence", "scope_match"] = "evidence" if score >= 0.95 else "scope_match"
             key = (segment.segment_id, record.claim.claim_id, relation_type)
             existing = links.get(key)
             if existing is None or existing.score < score:
@@ -698,8 +711,8 @@ def _build_source_segment_indexes(
             normalized_section = _normalize_section_path(segment.section_path)
             if normalized_section:
                 by_section[normalized_section].append(segment)
-            line_start = int(segment.metadata.get("line_start", -1) or -1)
-            line_end = int(segment.metadata.get("line_end", -1) or -1)
+            line_start = _coerce_int(segment.metadata.get("line_start"), fallback=-1)
+            line_end = _coerce_int(segment.metadata.get("line_end"), fallback=-1)
             if segment.source_type == "github_file" and line_start > 0 and line_end >= line_start:
                 for line_no in range(line_start, line_end + 1):
                     by_line[line_no].append(segment)
@@ -752,13 +765,28 @@ def _normalize_section_path(value: str | None) -> str:
     return str(value or "").strip().casefold()
 
 
+def _retrieval_source_type(
+    source_type: CollectedSourceType,
+) -> Literal["github_file", "confluence_page", "metamodel", "local_doc"] | None:
+    if source_type == "jira_ticket":
+        return None
+    return source_type
+
+
+def _coerce_int(value: object, *, fallback: int) -> int:
+    try:
+        return int(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _claim_segment_score(*, segment: RetrievalSegment, record: ExtractedClaimRecord) -> float:
     location = record.evidence.location
     if location.position is not None:
         line_start = location.position.line_start
         if line_start is not None:
-            seg_start = int(segment.metadata.get("line_start", -1) or -1)
-            seg_end = int(segment.metadata.get("line_end", -1) or -1)
+            seg_start = _coerce_int(segment.metadata.get("line_start"), fallback=-1)
+            seg_end = _coerce_int(segment.metadata.get("line_end"), fallback=-1)
             if seg_start > 0 and seg_end >= seg_start and seg_start <= int(line_start) <= seg_end:
                 return 1.0
         if location.position.section_path and segment.section_path:
@@ -812,8 +840,8 @@ def _finding_has_direct_segment_match(*, finding: AuditFinding, segment: Retriev
         if location.position.anchor_value == segment.anchor_value:
             return True
         if location.position.line_start is not None:
-            seg_start = int(segment.metadata.get("line_start", -1) or -1)
-            seg_end = int(segment.metadata.get("line_end", -1) or -1)
+            seg_start = _coerce_int(segment.metadata.get("line_start"), fallback=-1)
+            seg_end = _coerce_int(segment.metadata.get("line_end"), fallback=-1)
             if seg_start > 0 and seg_end >= seg_start and seg_start <= int(location.position.line_start) <= seg_end:
                 return True
         if location.position.section_path and segment.section_path:

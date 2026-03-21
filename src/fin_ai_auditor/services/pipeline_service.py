@@ -5,7 +5,7 @@ from collections import defaultdict
 import hashlib
 import logging
 import re
-from typing import Callable, Iterable
+from typing import Callable, cast
 from uuid import uuid4
 
 from fin_ai_auditor.config import Settings
@@ -41,6 +41,7 @@ from fin_ai_auditor.services.fast_audit_service import FastAuditService
 from fin_ai_auditor.services.pipeline_models import (
     CollectionBundle,
     CollectedDocument,
+    CollectedSourceType,
     ExtractedClaimEvidence,
     ExtractedClaimRecord,
     PipelineAnalysisResult,
@@ -858,7 +859,7 @@ class AuditPipelineService:
             )
         reused_docs = sum(1 for document in bundle.documents if bool(document.metadata.get("incremental_reused")))
         changed_sections = sum(
-            len(document.metadata.get("changed_section_paths") or [])
+            len(_string_list(document.metadata.get("changed_section_paths")))
             for document in bundle.documents
             if document.source_type == "confluence_page"
         )
@@ -982,9 +983,13 @@ def _rebuild_cached_claim_records(
 ) -> tuple[list[ExtractedClaimRecord], set[tuple[str, str]]]:
     if previous_run is None or not reused_documents:
         return [], set()
-    document_map = {(document.source_type, document.source_id): document for document in reused_documents}
-    claims_by_source: dict[tuple[str, str], list[AuditClaimEntry]] = defaultdict(list)
+    document_map: dict[tuple[CollectedSourceType, str], CollectedDocument] = {
+        (document.source_type, document.source_id): document for document in reused_documents
+    }
+    claims_by_source: dict[tuple[CollectedSourceType, str], list[AuditClaimEntry]] = defaultdict(list)
     for claim in previous_run.claims:
+        if claim.source_type == "user_truth":
+            continue
         key = (claim.source_type, claim.source_id)
         if key in document_map:
             claims_by_source[key].append(claim)
@@ -1100,7 +1105,8 @@ def _build_section_regeneration_documents(
     document: CollectedDocument,
     selected_section_paths: list[str],
 ) -> list[CollectedDocument]:
-    blocks = list(document.metadata.get("structured_blocks") or [])
+    raw_blocks = document.metadata.get("structured_blocks")
+    blocks = cast(list[object], raw_blocks) if isinstance(raw_blocks, list) else []
     documents: list[CollectedDocument] = []
     for index, section_path in enumerate(selected_section_paths, start=1):
         rendered_body = _render_section_document_body(blocks=blocks, target_section_path=section_path)
@@ -1330,7 +1336,7 @@ def _finding_scope_key(*, finding: AuditFinding) -> str:
 
 def _optional_int(value: object) -> int | None:
     try:
-        parsed = int(value) if value is not None else None
+        parsed = int(cast(int | float | str, value)) if value is not None else None
     except (TypeError, ValueError):
         return None
     return parsed if parsed is not None and parsed >= 0 else None
@@ -1412,12 +1418,16 @@ def _annotate_claim_deltas(*, current: list[AuditClaimEntry], previous: list[Aud
     return annotated
 
 
-def _replace_claims_in_records(*, records: list[object], claims: list[AuditClaimEntry]) -> list[object]:
+def _replace_claims_in_records(
+    *,
+    records: list[ExtractedClaimRecord],
+    claims: list[AuditClaimEntry],
+) -> list[ExtractedClaimRecord]:
     claim_map = {claim.fingerprint: claim for claim in claims}
-    updated_records = []
+    updated_records: list[ExtractedClaimRecord] = []
     for record in records:
         updated_records.append(
-            record.__class__(
+            ExtractedClaimRecord(
                 claim=claim_map.get(record.claim.fingerprint, record.claim),
                 evidence=record.evidence,
             )
@@ -1538,7 +1548,7 @@ def _scope_keys_overlap(*, left: str, right: str) -> bool:
 def _claim_scope_keys_for_delta(*, claim: AuditClaimEntry) -> set[str]:
     semantic_scope_keys = {
         str(scope_key or "").strip()
-        for scope_key in claim.metadata.get("semantic_cluster_keys", [])
+        for scope_key in _string_list(claim.metadata.get("semantic_cluster_keys"))
         if str(scope_key or "").strip()
     }
     semantic_scope_keys.add(str(claim.metadata.get("delta_scope_key") or package_scope_key(claim.subject_key)))

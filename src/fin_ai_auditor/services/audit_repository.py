@@ -5,12 +5,12 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Sequence, TypedDict, cast
 from uuid import uuid4
 
 from fin_ai_auditor.domain.models import (
     AtomicFactEntry,
     AuditClaimEntry,
-    AuditFinding,
     AuditFindingLink,
     AuditLocation,
     AuditPosition,
@@ -38,6 +38,21 @@ from fin_ai_auditor.services.secret_store import SecretStore
 _EXTERNAL_SECRET_SENTINEL = "__external_secret__"
 _ATLASSIAN_ACCESS_SECRET_KEY = "atlassian/access_token"
 _ATLASSIAN_REFRESH_SECRET_KEY = "atlassian/refresh_token"
+
+
+class _DecisionPackagePayload(TypedDict):
+    package_id: str
+    title: str
+    category: object
+    severity_summary: object
+    scope_summary: str
+    decision_state: object
+    decision_required: bool
+    rerender_required_after_decision: bool
+    recommendation_summary: str
+    related_finding_ids: list[str]
+    problem_elements: list[DecisionProblemElement]
+    metadata: dict[str, object]
 
 
 class SQLiteAuditRepository:
@@ -1238,8 +1253,8 @@ class SQLiteAuditRepository:
                 str(metadata.get("restriction_state") or "unknown"),
                 str(metadata.get("sensitivity_level") or "unknown"),
                 self._CONFLUENCE_ATTACHMENT_POLICY,
-                int(metadata.get("attachment_count") or 0),
-                int(metadata.get("structured_block_count") or 0),
+                _coerce_int(metadata.get("attachment_count")),
+                _coerce_int(metadata.get("structured_block_count")),
                 _dump_json(metadata),
             ),
         )
@@ -1741,7 +1756,7 @@ class SQLiteAuditRepository:
             """,
             (run_id,),
         ).fetchall()
-        packages: dict[str, dict[str, object]] = {}
+        packages: dict[str, _DecisionPackagePayload] = {}
         for row in package_rows:
             package_id = str(row["package_id"])
             packages[package_id] = {
@@ -1812,7 +1827,7 @@ class SQLiteAuditRepository:
         return sorted(
             loaded_packages,
             key=lambda package: (
-                int(package.metadata.get("package_sort_rank") or 999),
+                _coerce_int(package.metadata.get("package_sort_rank"), fallback=999),
                 _severity_order(str(package.severity_summary)),
                 package.title,
             ),
@@ -1942,7 +1957,7 @@ class SQLiteAuditRepository:
                     snippet_hash=row["snippet_hash"],
                     content_hash=row["content_hash"],
                 )
-            finding["locations"].append(
+            cast(list[AuditLocation], finding["locations"]).append(
                 AuditLocation(
                     location_id=row["location_id"],
                     snapshot_id=row["snapshot_id"],
@@ -2014,9 +2029,16 @@ def _dump_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
 
-def _dump_json_list(items: list[object]) -> str:
+def _dump_json_list(items: Sequence[object]) -> str:
     payload = [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in items]
     return _dump_json(payload)
+
+
+def _coerce_int(value: object, *, fallback: int = 0) -> int:
+    try:
+        return int(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return fallback
 
 
 _FTS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}")

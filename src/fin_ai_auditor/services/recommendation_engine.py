@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Callable
+from typing import Callable, cast
 
 from pydantic import BaseModel, Field
 
@@ -179,12 +179,12 @@ class RecommendationEngine:
             cached = cache_svc.get_llm_response(cache_key=cache_key)
             if cached:
                 try:
-                    batch = _RecommendationBatch.model_validate_json(cached)
+                    batch = cast(_RecommendationBatch, _RecommendationBatch.model_validate_json(cached))
                 except Exception:
                     batch = None
 
         if batch is None:
-            batch, response = await client.structured_output_with_usage(
+            batch_result, response = await client.structured_output_with_usage(
                 messages=_build_enriched_messages(
                     findings=findings,
                     truths=truths,
@@ -196,6 +196,7 @@ class RecommendationEngine:
                 schema=_RecommendationBatch,
                 config=GenerationConfig(slot=slot, max_tokens=2400, temperature=0.1, timeout_s=90.0),
             )
+            batch = cast(_RecommendationBatch, batch_result)
             # Track usage from this call
             chunk_usage = _extract_usage_from_response(response)
 

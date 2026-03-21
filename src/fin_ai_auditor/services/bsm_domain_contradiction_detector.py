@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Sequence
+from typing import cast, Sequence
 
 from fin_ai_auditor.domain.models import AuditFinding, AuditLocation
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
@@ -681,32 +681,32 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
         config = _eventual_consistency_config(subtype=eventual_subtype)
         source_ids = sorted({record.claim.source_id for record in records})
         locations = [record.evidence.location for record in records if record.evidence.location]
-        support_predicates: set[str] = set()
-        sequence_values: set[str] = set()
-        sequence_functions: set[str] = set()
-        sequence_line_windows: set[str] = set()
+        eventual_support_predicates: set[str] = set()
+        eventual_sequence_values: set[str] = set()
+        eventual_sequence_functions: set[str] = set()
+        eventual_sequence_line_windows: set[str] = set()
         for record in records:
             support_records = support_index.get((record.claim.source_id, record.claim.subject_key), [])
-            support_predicates.update(item.claim.predicate for item in support_records)
-            sequence_values.update(
+            eventual_support_predicates.update(item.claim.predicate for item in support_records)
+            eventual_sequence_values.update(
                 str(item.claim.normalized_value or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
             )
-            sequence_functions.update(
+            eventual_sequence_functions.update(
                 str((item.claim.metadata or {}).get("function_name") or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
                 and str((item.claim.metadata or {}).get("function_name") or "").strip()
             )
-            sequence_line_windows.update(
+            eventual_sequence_line_windows.update(
                 f"L{(item.claim.metadata or {}).get('sequence_start_line')}→L{(item.claim.metadata or {}).get('sequence_end_line')}"
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
                 and (item.claim.metadata or {}).get("sequence_start_line") is not None
                 and (item.claim.metadata or {}).get("sequence_end_line") is not None
             )
-        path_count = max(len(sequence_functions), len(records), len(source_ids))
+        path_count = max(len(eventual_sequence_functions), len(records), len(source_ids))
         findings.append(
             AuditFinding(
                 severity=_CODE_RISK_CONFIG[risk_predicate]["severity"],  # type: ignore[arg-type]
@@ -716,7 +716,7 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
                     f"{subject_key} zeigt dieselbe Async-Luecke in {path_count} Pfaden vom Typ {config['label']} "
                     f"({', '.join(_source_label(record) for record in records[:3])}).\n\n"
                     f"Extrahierter Hinweis: Persistenz wird vor dem Enqueue abgeschlossen, ohne geschuetzten Reaggregationsschritt dazwischen.\n"
-                    f"Betroffene Funktionen: {', '.join(sorted(sequence_functions)) or 'unbekannt'}"
+                    f"Betroffene Funktionen: {', '.join(sorted(eventual_sequence_functions)) or 'unbekannt'}"
                 ),
                 recommendation=config["recommendation"],
                 canonical_key=canonical_key,
@@ -726,10 +726,10 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
                     "risk_predicate": risk_predicate,
                     "subject_key": subject_key,
                     "source_ids": source_ids,
-                    "support_predicates": sorted(support_predicates),
-                    "sequence_values": sorted(item for item in sequence_values if item),
-                    "sequence_functions": sorted(item for item in sequence_functions if item),
-                    "sequence_line_windows": sorted(item for item in sequence_line_windows if item),
+                    "support_predicates": sorted(eventual_support_predicates),
+                    "sequence_values": sorted(item for item in eventual_sequence_values if item),
+                    "sequence_functions": sorted(item for item in eventual_sequence_functions if item),
+                    "sequence_line_windows": sorted(item for item in eventual_sequence_line_windows if item),
                     "eventual_consistency_subtype": eventual_subtype,
                     "eventual_consistency_label": config["label"],
                     "grouped_eventual_package_title": config["grouped_package_title"],
@@ -754,25 +754,25 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
         seen_keys.add(canonical_key)
         source_ids = sorted({record.claim.source_id for record in records})
         locations = [record.evidence.location for record in records if record.evidence.location]
-        support_predicates: set[str] = set()
-        sequence_values: set[str] = set()
-        sequence_functions: set[str] = set()
-        sequence_line_windows: set[str] = set()
+        chain_support_predicates: set[str] = set()
+        chain_sequence_values: set[str] = set()
+        chain_sequence_functions: set[str] = set()
+        chain_sequence_line_windows: set[str] = set()
         for record in records:
             support_records = support_index.get((record.claim.source_id, record.claim.subject_key), [])
-            support_predicates.update(item.claim.predicate for item in support_records)
-            sequence_values.update(
+            chain_support_predicates.update(item.claim.predicate for item in support_records)
+            chain_sequence_values.update(
                 str(item.claim.normalized_value or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
             )
-            sequence_functions.update(
+            chain_sequence_functions.update(
                 str((item.claim.metadata or {}).get("function_name") or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
                 and str((item.claim.metadata or {}).get("function_name") or "").strip()
             )
-            sequence_line_windows.update(
+            chain_sequence_line_windows.update(
                 f"L{(item.claim.metadata or {}).get('sequence_start_line')}→L{(item.claim.metadata or {}).get('sequence_end_line')}"
                 for item in support_records
                 if item.claim.predicate == "code_temporal_sequence"
@@ -788,7 +788,7 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
                     f"{subject_key} zeigt dieselbe Kettenunterbrechung in {len(source_ids)} Reaggregationspfaden "
                     f"({', '.join(_source_label(record) for record in records[:3])}).\n\n"
                     f"Extrahierter Hinweis: Supersede erfolgt vor Rebuild/Materialisierung.\n"
-                    f"Betroffene Funktionen: {', '.join(sorted(sequence_functions)) or 'unbekannt'}"
+                    f"Betroffene Funktionen: {', '.join(sorted(chain_sequence_functions)) or 'unbekannt'}"
                 ),
                 recommendation=_GROUPED_CHAIN_INTERRUPTION_RISK_CONFIG["recommendation"],
                 canonical_key=canonical_key,
@@ -798,10 +798,10 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
                     "risk_predicate": risk_predicate,
                     "subject_key": subject_key,
                     "source_ids": source_ids,
-                    "support_predicates": sorted(support_predicates),
-                    "sequence_values": sorted(item for item in sequence_values if item),
-                    "sequence_functions": sorted(item for item in sequence_functions if item),
-                    "sequence_line_windows": sorted(item for item in sequence_line_windows if item),
+                    "support_predicates": sorted(chain_support_predicates),
+                    "sequence_values": sorted(item for item in chain_sequence_values if item),
+                    "sequence_functions": sorted(item for item in chain_sequence_functions if item),
+                    "sequence_line_windows": sorted(item for item in chain_sequence_line_windows if item),
                     "grouped_chain_paths": True,
                     "chain_path_type": chain_path_type,
                     "path_count": len(source_ids),
@@ -822,19 +822,19 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
         seen_keys.add(canonical_key)
         source_ids = sorted({record.claim.source_id for record in records})
         locations = [record.evidence.location for record in records if record.evidence.location]
-        support_predicates: set[str] = set()
-        missing_fields: set[str] = set()
-        propagation_contexts: set[str] = set()
+        manual_support_predicates: set[str] = set()
+        manual_missing_fields: set[str] = set()
+        manual_propagation_contexts: set[str] = set()
         function_names: set[str] = set()
         for record in records:
             support_records = support_index.get((record.claim.source_id, record.claim.subject_key), [])
-            support_predicates.update(item.claim.predicate for item in support_records)
-            missing_fields.update(
+            manual_support_predicates.update(item.claim.predicate for item in support_records)
+            manual_missing_fields.update(
                 str(item.claim.normalized_value or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_missing_required_field"
             )
-            propagation_contexts.update(
+            manual_propagation_contexts.update(
                 str(item.claim.normalized_value or "").strip()
                 for item in support_records
                 if item.claim.predicate == "code_propagation_context"
@@ -861,9 +861,9 @@ def _detect_code_risks(*, domain_claims: Sequence[ExtractedClaimRecord]) -> list
                     "risk_predicate": risk_predicate,
                     "subject_key": subject_key,
                     "source_ids": source_ids,
-                    "support_predicates": sorted(support_predicates),
-                    "missing_fields": sorted(item for item in missing_fields if item),
-                    "propagation_contexts": sorted(item for item in propagation_contexts if item),
+                    "support_predicates": sorted(manual_support_predicates),
+                    "missing_fields": sorted(item for item in manual_missing_fields if item),
+                    "propagation_contexts": sorted(item for item in manual_propagation_contexts if item),
                     "boundary_path_type": boundary_path_type,
                     "boundary_function_names": sorted(function_names),
                     "legacy_path_gap": True,
@@ -894,17 +894,17 @@ def _risk_summary_detail(
         segment = str(primary.get("missing_sequence_segment_path") or "").strip()
         return (
             f"Fehlende Sequenzsicherung: {segment or 'unbekannt'}\n"
-            f"Beobachteter Ablauf: {' -> '.join(primary['observed_sequence_path'])}\n"
+            f"Beobachteter Ablauf: {' -> '.join(cast(list[str], primary['observed_sequence_path']))}\n"
         )
     if risk_predicate == "code_field_propagation_gap":
         variants = _propagation_variants(support_records=support_records, subject_key=subject_key)
         if not variants:
             return ""
         primary = variants[0]
-        missing = ", ".join(primary["missing_field_segments"]) or "unbekannt"
+        missing = ", ".join(cast(list[str], primary["missing_field_segments"])) or "unbekannt"
         return (
             f"Fehlende Feldsegmente: {missing}\n"
-            f"Betroffener Propagationspfad: {' -> '.join(primary['propagation_path'])}\n"
+            f"Betroffener Propagationspfad: {' -> '.join(cast(list[str], primary['propagation_path']))}\n"
         )
     return ""
 
@@ -1020,8 +1020,14 @@ def _sequence_variants(
         if item.claim.predicate != "code_temporal_sequence":
             continue
         metadata = item.claim.metadata or {}
-        observed_sequence_path = list(metadata.get("sequence_path") or _fallback_sequence_path(item.claim.normalized_value))
-        expected_sequence_path = list(metadata.get("expected_sequence_path") or _fallback_expected_sequence_path(item.claim.normalized_value))
+        observed_sequence_path = _string_list_value(
+            metadata.get("sequence_path"),
+            fallback=_fallback_sequence_path(item.claim.normalized_value),
+        )
+        expected_sequence_path = _string_list_value(
+            metadata.get("expected_sequence_path"),
+            fallback=_fallback_expected_sequence_path(item.claim.normalized_value),
+        )
         missing_sequence_segments = [
             part for part in expected_sequence_path
             if part not in observed_sequence_path
@@ -1066,8 +1072,14 @@ def _propagation_variants(
                 "function_name": function_name,
                 "target_entity": target_entity,
                 "propagation_break_mode": str(metadata.get("propagation_break_mode") or "field_drop"),
-                "propagation_path": list(metadata.get("propagation_path") or [function_name or "entrypoint", target_entity]),
-                "expected_propagation_fields": list(metadata.get("expected_propagation_fields") or ["phase_run_id"]),
+                "propagation_path": _string_list_value(
+                    metadata.get("propagation_path"),
+                    fallback=[function_name or "entrypoint", target_entity],
+                ),
+                "expected_propagation_fields": _string_list_value(
+                    metadata.get("expected_propagation_fields"),
+                    fallback=["phase_run_id"],
+                ),
                 "missing_field_segments": [],
                 "propagation_contexts": [],
                 "propagation_break_before": function_name or "entrypoint",
@@ -1077,13 +1089,23 @@ def _propagation_variants(
         )
         if item.claim.predicate == "code_missing_required_field":
             field_name = str(item.claim.normalized_value or "").strip()
-            if field_name and field_name not in entry["missing_field_segments"]:
-                entry["missing_field_segments"].append(field_name)
+            missing_field_segments = cast(list[str], entry["missing_field_segments"])
+            if field_name and field_name not in missing_field_segments:
+                missing_field_segments.append(field_name)
         if item.claim.predicate == "code_propagation_context":
             context_name = str(item.claim.normalized_value or "").strip()
-            if context_name and context_name not in entry["propagation_contexts"]:
-                entry["propagation_contexts"].append(context_name)
+            propagation_contexts = cast(list[str], entry["propagation_contexts"])
+            if context_name and context_name not in propagation_contexts:
+                propagation_contexts.append(context_name)
     return sorted(grouped.values(), key=lambda item: (str(item["function_name"]), str(item["target_entity"])))
+
+
+def _string_list_value(value: object, *, fallback: list[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(item).strip() for item in fallback if str(item).strip()]
 
 
 def _unique_variant_dicts(variants: Sequence[dict[str, object]]) -> list[dict[str, object]]:
@@ -1414,9 +1436,10 @@ def _detect_evidence_chain_breaks(*, domain_claims: Sequence[ExtractedClaimRecor
         return []
 
     observed_records = [*derived_records, *support_records]
-    observed_chain_steps = _sorted_chain_steps(
-        str(record.claim.normalized_value or "").strip() for record in observed_records
-    )
+    observed_chain_steps = _sorted_chain_steps([
+        str(record.claim.normalized_value or "").strip()
+        for record in observed_records
+    ])
     derived_targets = sorted(
         {
             str((record.claim.metadata or {}).get("end_label") or "").strip()
@@ -1487,13 +1510,14 @@ def _detect_evidence_chain_breaks(*, domain_claims: Sequence[ExtractedClaimRecor
         observed_full_chain_variants=observed_full_chain_variants,
         expected_full_chain_variants=expected_full_chain_variants,
     )
+    matched_break_pairs = cast(list[dict[str, object]], break_matching["matched_pairs"])
     break_context = _best_break_context(
         chain_break_at=chain_break_at,
         observed_full_chain_variants=observed_full_chain_variants,
         expected_full_chain_variants=expected_full_chain_variants,
-        matched_pairs=break_matching["matched_pairs"],
+        matched_pairs=matched_break_pairs,
     )
-    incomplete_variant_count = len(break_matching["matched_pairs"]) or 1
+    incomplete_variant_count = len(matched_break_pairs) or 1
     summary_prefix = (
         "Die aktive Implementierung materialisiert aktive Evidenzkettenvarianten, "
         "zeigt aber keinen korrespondierenden Statement-zu-BSM_Element-Hop."
@@ -1529,7 +1553,7 @@ def _detect_evidence_chain_breaks(*, domain_claims: Sequence[ExtractedClaimRecor
                 "expected_chain_variants": expected_chain_variants,
                 "observed_full_chain_variants": observed_full_chain_variants,
                 "expected_full_chain_variants": expected_full_chain_variants,
-                "matched_break_variants": break_matching["matched_pairs"],
+                        "matched_break_variants": matched_break_pairs,
                 "unmatched_observed_full_chain_variants": break_matching["unmatched_observed_paths"],
                 "unmatched_expected_full_chain_variants": break_matching["unmatched_expected_paths"],
                 "chain_break_at": chain_break_at,
@@ -1621,10 +1645,11 @@ def _annotate_evidence_chain_full_path_conflicts(
             documented_paths=documented_paths,
             implemented_paths=implemented_paths,
         )
+        matched_full_path_pairs = cast(list[dict[str, object]], path_matching["matched_pairs"])
         documented_path, implemented_path, divergence = _best_full_path_divergence(
             documented_paths=documented_paths,
             implemented_paths=implemented_paths,
-            matched_pairs=path_matching["matched_pairs"],
+            matched_pairs=matched_full_path_pairs,
         )
         if divergence is None:
             enriched.append(finding)
@@ -1636,7 +1661,7 @@ def _annotate_evidence_chain_full_path_conflicts(
                         **finding.metadata,
                         "documented_full_chain_variants": documented_paths,
                         "implemented_full_chain_variants": implemented_paths,
-                        "matched_full_chain_pairs": path_matching["matched_pairs"],
+                        "matched_full_chain_pairs": matched_full_path_pairs,
                         "unmatched_documented_full_chain_variants": path_matching["unmatched_documented_paths"],
                         "unmatched_implemented_full_chain_variants": path_matching["unmatched_implemented_paths"],
                         "documented_full_chain_path": documented_path,
@@ -1694,6 +1719,9 @@ def _best_break_context(
     )
     observed_parts = [part.strip() for part in observed_full_chain_path.split("->") if part.strip()]
     expected_parts = [part.strip() for part in expected_full_chain_path.split("->") if part.strip()]
+    before: str | None
+    after: str | None
+    chain_rejoin_at: str | None
     if chain_break_at == "Statement.SUPPORTS":
         before = "Statement"
         after = "BSM_Element"
@@ -1807,8 +1835,8 @@ def _path_break_details(
         documented_parts=expected_parts,
         implemented_parts=observed_parts,
     )
-    common_prefix = list(divergence["common_prefix"])
-    common_suffix = list(divergence["common_suffix"])
+    common_prefix = list(cast(list[str], divergence["common_prefix"]))
+    common_suffix = list(cast(list[str], divergence["common_suffix"]))
     missing_start = len(common_prefix)
     missing_end = len(expected_parts) - len(common_suffix)
     missing_chain_segments = list(expected_parts[missing_start:missing_end])
@@ -1860,9 +1888,9 @@ def _break_match_score(
         bool(_evidence_chain_family(observed_path))
         and _evidence_chain_family(observed_path) == _evidence_chain_family(expected_path)
     )
-    common_prefix_len = len(break_details["common_prefix"])
-    common_suffix_len = len(break_details["common_suffix"])
-    missing_count = len(break_details["missing_chain_segments"])
+    common_prefix_len = len(cast(list[str], break_details["common_prefix"]))
+    common_suffix_len = len(cast(list[str], break_details["common_suffix"]))
+    missing_count = len(cast(list[str], break_details["missing_chain_segments"]))
     return (
         same_family,
         common_prefix_len + common_suffix_len,
@@ -1897,7 +1925,7 @@ def _best_full_path_divergence(
                 "rejoin_at": first_pair["rejoin_at"],
             },
         )
-    best_pair = ("", "", None)
+    best_pair: tuple[str, str, dict[str, object] | None] = ("", "", None)
     best_score: tuple[int, int, int] | None = None
     for documented_path in documented_paths:
         documented_parts = _chain_path_parts(documented_path)
@@ -1998,13 +2026,17 @@ def _path_divergence(
     implemented_parts: Sequence[str],
 ) -> dict[str, object]:
     common_prefix: list[str] = []
-    for documented_part, implemented_part in zip(documented_parts, implemented_parts):
-        if documented_part != implemented_part:
+    for documented_item, implemented_item in zip(documented_parts, implemented_parts):
+        if documented_item != implemented_item:
             break
-        common_prefix.append(documented_part)
+        common_prefix.append(documented_item)
     divergence_index = len(common_prefix)
-    documented_part = documented_parts[divergence_index] if divergence_index < len(documented_parts) else None
-    implemented_part = implemented_parts[divergence_index] if divergence_index < len(implemented_parts) else None
+    documented_part: str | None = (
+        documented_parts[divergence_index] if divergence_index < len(documented_parts) else None
+    )
+    implemented_part: str | None = (
+        implemented_parts[divergence_index] if divergence_index < len(implemented_parts) else None
+    )
     common_suffix: list[str] = []
     for documented_part_suffix, implemented_part_suffix in zip(reversed(documented_parts), reversed(implemented_parts)):
         if documented_part_suffix != implemented_part_suffix:
@@ -2086,8 +2118,8 @@ def _full_path_match_score(
         bool(_evidence_chain_family(documented_path))
         and _evidence_chain_family(documented_path) == _evidence_chain_family(implemented_path)
     )
-    prefix_len = len(divergence["common_prefix"])
-    suffix_len = len(divergence["common_suffix"])
+    prefix_len = len(cast(list[str], divergence["common_prefix"]))
+    suffix_len = len(cast(list[str], divergence["common_suffix"]))
     return (same_family, prefix_len, suffix_len)
 
 

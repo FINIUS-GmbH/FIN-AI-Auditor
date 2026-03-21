@@ -12,15 +12,18 @@ Covers:
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import fin_ai_auditor.llm as llm_module
 from fin_ai_auditor.domain.models import (
-    AuditRun,
+    AuditClaimEntry,
     AuditTarget,
     CreateAuditRunRequest,
     DecisionPackage,
 )
+from fin_ai_auditor.llm import LLMResponse
 from fin_ai_auditor.services.audit_repository import SQLiteAuditRepository
 from fin_ai_auditor.services.audit_service import AuditService
 from fin_ai_auditor.services.clarification_service import ClarificationService
@@ -114,6 +117,35 @@ class TestThreadLifecycle:
         assert len(user_msgs) == 1
         assert user_msgs[0].content == "Das API ist aktiv."
 
+    def test_open_thread_with_related_claims_uses_normalized_value_context(self, tmp_path: Path) -> None:
+        repo, audit_svc, cs, run_id, pkg = _make_env(tmp_path)
+        run = audit_svc.get_run(run_id=run_id)
+        assert run is not None
+        pkg = pkg.model_copy(update={"related_finding_ids": ["finding_ctx"]})
+        claim = AuditClaimEntry(
+            source_type="github_file",
+            source_id="src/api.py",
+            subject_kind="api",
+            subject_key="api_x",
+            predicate="status",
+            normalized_value="aktiv",
+            scope_kind="global",
+            scope_key="*",
+            confidence=0.9,
+            fingerprint="claim_status_api_x",
+            metadata={"finding_id": "finding_ctx"},
+        )
+        repo.upsert_run(run=run.model_copy(update={"decision_packages": [pkg], "claims": [claim]}))
+
+        result = cs.open_thread(
+            run_id=run_id,
+            package_id=pkg.package_id,
+            purpose="truth_clarification",
+            initial_content="Bitte klären.",
+        )
+
+        assert len(result.clarification_threads) == 1
+
     def test_dismiss_thread(self, tmp_path: Path) -> None:
         _, _, cs, run_id, pkg = _make_env(tmp_path)
 
@@ -139,7 +171,7 @@ class TestDefinitiveTruth:
         r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
         tid = r1.clarification_threads[0].thread_id
 
-        r2 = cs.process_answer(run_id=run_id, thread_id=tid, content="API X ist definitiv aktiv")
+        cs.process_answer(run_id=run_id, thread_id=tid, content="API X ist definitiv aktiv")
 
         r3 = cs.confirm_truth(
             run_id=run_id,
@@ -193,6 +225,28 @@ class TestDefinitiveTruth:
         conf_msgs = [m for m in thread.messages if m.outcome_type == "truth_confirmed"]
         assert len(conf_msgs) >= 1
         assert conf_msgs[-1].outcome_type == "truth_confirmed"
+
+    def test_generate_revised_recommendation_uses_chat_response(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _, audit_svc, _, _, pkg = _make_env(tmp_path)
+        audit_svc._settings.get_configured_llm_slots.return_value = [SimpleNamespace(slot=1, model="gpt-test", deployment="")]
+
+        class FakeClient:
+            def __init__(self, *, settings: object, default_slot: int | None = None) -> None:
+                self.settings = settings
+                self.default_slot = default_slot
+
+            async def chat(self, *, messages: list[object], config: object | None = None) -> LLMResponse:
+                return LLMResponse(content="Überarbeitete Empfehlung")
+
+        monkeypatch.setattr(llm_module, "LiteLLMClient", FakeClient)
+
+        result = audit_svc._generate_revised_recommendation(
+            package=pkg,
+            clarification_context="Der Nutzer hat den Zielpfad bestätigt.",
+            resolution_summary="Write-Pfad ist verbindlich.",
+        )
+
+        assert result == "Überarbeitete Empfehlung"
 
 
 # ── 3. Indication capture ────────────────────────────────────
@@ -326,7 +380,7 @@ class TestSupersedeFlow:
         cs.process_answer(run_id=run_id, thread_id=tid2, content="deprecated")
 
         # Trigger conflict
-        r4 = cs.confirm_truth(
+        cs.confirm_truth(
             run_id=run_id, thread_id=tid2,
             truth_canonical_key="api.status",
             truth_normalized_value="deprecated",
@@ -452,7 +506,7 @@ class TestPersistence:
         r1 = cs.open_thread(run_id=run_id, package_id=pkg.package_id, purpose="truth_clarification")
         tid = r1.clarification_threads[0].thread_id
         cs.process_answer(run_id=run_id, thread_id=tid, content="X")
-        r3 = cs.confirm_truth(
+        cs.confirm_truth(
             run_id=run_id, thread_id=tid,
             truth_canonical_key="a.b",
             truth_normalized_value="val",
@@ -625,7 +679,7 @@ class TestLLMIntegration:
 
     def _make_env_with_llm(self, tmp_path: Path):
         """Bootstrap environment with mocked LLM settings."""
-        from unittest.mock import MagicMock, AsyncMock, patch
+        from unittest.mock import MagicMock
 
         repo, audit_svc, _, run_id, pkg = _make_env(tmp_path)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import cast
 
 from fin_ai_auditor.domain.models import AuditClaimEntry, AuditFinding, SemanticEntity, SemanticRelation
 from fin_ai_auditor.services.causal_graph_models import CausalGraph, CausalGraphEdge, CausalGraphNode
@@ -88,9 +89,10 @@ def _attach_graph_based_causal_attribution(
     nodes_by_id = {node.node_id: node for node in causal_graph.nodes}
     outgoing = _graph_adjacency(edges=causal_graph.edges, reverse=False)
     incoming = _graph_adjacency(edges=causal_graph.edges, reverse=True)
+    semantic_to_causal_node_ids = _string_mapping(causal_graph.metadata.get("semantic_to_causal_node_ids"))
     node_id_by_semantic_id = {
         str(semantic_id): str(node_id)
-        for semantic_id, node_id in (causal_graph.metadata.get("semantic_to_causal_node_ids") or {}).items()
+        for semantic_id, node_id in semantic_to_causal_node_ids.items()
         if str(semantic_id).strip() and str(node_id).strip()
     }
     claims_by_subject: dict[str, list[AuditClaimEntry]] = {}
@@ -597,9 +599,9 @@ def _group_anchor_for_candidate(
     nodes_by_id: dict[str, CausalGraphNode],
 ) -> CausalGraphNode:
     path_node_ids = [
-        str(node_id)
-        for node_id in candidate.get("path_node_ids", [])
-        if str(node_id).strip() and str(node_id) in nodes_by_id
+        node_id
+        for node_id in _string_list(candidate.get("path_node_ids"))
+        if node_id in nodes_by_id
     ]
     non_truth_nodes = [
         nodes_by_id[node_id]
@@ -614,8 +616,8 @@ def _group_anchor_for_candidate(
 
 def _graph_candidate_sort_key(candidate: dict[str, object]) -> tuple[int, int, float, str]:
     bucket = str(candidate.get("bucket") or "")
-    distance = int(candidate.get("distance") or 99)
-    score = float(candidate.get("score") or 0.0)
+    distance = _coerce_int(candidate.get("distance"), fallback=99)
+    score = _coerce_float(candidate.get("score"), fallback=0.0)
     node_label = str(candidate.get("node_label") or "")
     return (
         _BUCKET_SELECTION_PRIORITY.get(bucket, 99),
@@ -627,8 +629,8 @@ def _graph_candidate_sort_key(candidate: dict[str, object]) -> tuple[int, int, f
 
 def _candidate_sort_key(candidate: dict[str, object]) -> tuple[int, int, float, str]:
     bucket = str(candidate.get("bucket") or "")
-    distance = int(candidate.get("distance") or 99)
-    score = float(candidate.get("score") or 0.0)
+    distance = _coerce_int(candidate.get("distance"), fallback=99)
+    score = _coerce_float(candidate.get("score"), fallback=0.0)
     entity_label = str(candidate.get("entity_label") or "")
     return (
         _BUCKET_SELECTION_PRIORITY.get(bucket, 99),
@@ -670,6 +672,30 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _string_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in cast(dict[object, object], value).items()
+        if str(key).strip() and str(item).strip()
+    }
+
+
+def _coerce_int(value: object, *, fallback: int) -> int:
+    try:
+        return int(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_float(value: object, *, fallback: float) -> float:
+    try:
+        return float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:

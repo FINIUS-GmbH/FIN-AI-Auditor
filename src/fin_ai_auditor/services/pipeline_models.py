@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
     AuditFinding,
     AuditFindingLink,
     AuditLocation,
@@ -55,7 +56,7 @@ class ExtractedClaimEvidence:
 
 @dataclass(frozen=True)
 class ExtractedClaimRecord:
-    claim: object
+    claim: AuditClaimEntry
     evidence: ExtractedClaimEvidence
 
 
@@ -72,7 +73,7 @@ class PipelineAnalysisResult:
     findings: list[AuditFinding]
     finding_links: list[AuditFindingLink]
     review_cards: list[ReviewCard]
-    claims: list[object]
+    claims: list[AuditClaimEntry]
     truths: list[TruthLedgerEntry]
     schema_truths: list[SchemaTruthEntry]
     semantic_entities: list[SemanticEntity]

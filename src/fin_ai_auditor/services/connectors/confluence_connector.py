@@ -7,8 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
-from typing import Any
+from typing import Any, Callable, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -207,7 +206,7 @@ class ConfluenceKnowledgeBaseConnector:
                         )
                         if cached_document is not None:
                             title = str(page.get("title") or cached_document.title).strip() or cached_document.title
-                            ancestor_titles = list(cached_document.metadata.get("ancestor_titles") or [])
+                            ancestor_titles = _string_list(cached_document.metadata.get("ancestor_titles"))
                             space_name = str((space.get("name") or "")).strip() or None
                             page_url = str(cached_document.url or "").strip() or _build_page_url(
                                 site_base_url=access_context.site_base_url,
@@ -562,7 +561,7 @@ def _fetch_space(*, client: httpx.Client, api_base_url: str, space_key: str) -> 
 def _fetch_pages_for_space(*, client: httpx.Client, api_base_url: str, space_id: str, limit: int) -> list[dict[str, Any]]:
     max_items = max(1, int(limit))
     request_limit = min(max_items, 100)
-    next_url = f"{api_base_url}/wiki/api/v2/spaces/{space_id}/pages"
+    next_url: str | None = f"{api_base_url}/wiki/api/v2/spaces/{space_id}/pages"
     next_params: dict[str, object] | None = {"space-id": space_id, "status": "current", "limit": request_limit}
     rows: list[dict[str, Any]] = []
     while next_url and len(rows) < max_items:
@@ -574,8 +573,8 @@ def _fetch_pages_for_space(*, client: httpx.Client, api_base_url: str, space_id:
         )
         response.raise_for_status()
         payload = response.json()
-        results = payload.get("results") if isinstance(payload, dict) else []
-        rows.extend(dict(row) for row in results if isinstance(row, dict))
+        results = _dict_list(payload.get("results") if isinstance(payload, dict) else [])
+        rows.extend(dict(row) for row in results)
         next_url = _next_page_link(payload=payload, api_base_url=api_base_url)
         next_params = None
         if not results:
@@ -761,8 +760,8 @@ def _build_confluence_section_delta_metadata(
             "removed_section_paths": [],
             "section_delta_status": "unchanged" if latest_cached_document is not None else "new_page",
         }
-    previous_blocks = list(latest_cached_document.metadata.get("structured_blocks") or [])
-    current_blocks = list(extracted_metadata.get("structured_blocks") or [])
+    previous_blocks = _object_list(latest_cached_document.metadata.get("structured_blocks"))
+    current_blocks = _object_list(extracted_metadata.get("structured_blocks"))
     previous_map = _section_block_digest_map(previous_blocks)
     current_map = _section_block_digest_map(current_blocks)
     previous_paths = set(previous_map)
@@ -1331,7 +1330,7 @@ def _collect_adf_row_cells(*, node: dict[str, Any]) -> list[str]:
 
 
 def _describe_adf_media(*, node: dict[str, Any]) -> str:
-    attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    attrs = _dict_value(node.get("attrs"))
     media_type = str(attrs.get("type") or "media").strip()
     alt_text = str(attrs.get("alt") or attrs.get("displayName") or attrs.get("fileName") or "").strip()
     collection = str(attrs.get("collection") or "").strip()
@@ -1340,7 +1339,7 @@ def _describe_adf_media(*, node: dict[str, Any]) -> str:
 
 
 def _describe_adf_card(*, node: dict[str, Any]) -> str:
-    attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    attrs = _dict_value(node.get("attrs"))
     url = str(attrs.get("url") or "").strip()
     title = str(attrs.get("title") or "").strip()
     label = title or url
@@ -1348,7 +1347,7 @@ def _describe_adf_card(*, node: dict[str, Any]) -> str:
 
 
 def _describe_adf_status(*, node: dict[str, Any]) -> str:
-    attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    attrs = _dict_value(node.get("attrs"))
     text = str(attrs.get("text") or "").strip()
     color = str(attrs.get("color") or "").strip()
     if not text and not color:
@@ -1357,15 +1356,35 @@ def _describe_adf_status(*, node: dict[str, Any]) -> str:
 
 
 def _describe_adf_mention(*, node: dict[str, Any]) -> str:
-    attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    attrs = _dict_value(node.get("attrs"))
     text = str(attrs.get("text") or attrs.get("id") or "").strip()
     return f"[Mention: {text}]" if text else ""
 
 
 def _describe_adf_extension(*, node: dict[str, Any]) -> str:
-    attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    attrs = _dict_value(node.get("attrs"))
     extension_key = str(attrs.get("extensionKey") or attrs.get("layout") or node.get("type") or "").strip()
     title = str(attrs.get("title") or attrs.get("text") or "").strip()
     if not extension_key and not title:
         return ""
     return f"[Macro: {extension_key}{f' | {title}' if title else ''}]"
+
+
+def _object_list(value: object) -> list[object]:
+    if not isinstance(value, list):
+        return []
+    return cast(list[object], value)
+
+
+def _dict_list(value: object) -> list[dict[str, Any]]:
+    return [dict(item) for item in _object_list(value) if isinstance(item, dict)]
+
+
+def _dict_value(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return cast(dict[str, Any], value)
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item).strip() for item in _object_list(value) if str(item).strip()]

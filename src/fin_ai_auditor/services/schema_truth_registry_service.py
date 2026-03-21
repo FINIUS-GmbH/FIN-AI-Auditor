@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Literal
 
-from fin_ai_auditor.domain.models import AuditClaimEntry, SchemaTruthEntry, TruthLedgerEntry
+from fin_ai_auditor.domain.models import (
+    AuditClaimEntry,
+    SchemaTruthEntry,
+    SchemaTruthSourceKind,
+    TruthLedgerEntry,
+)
 
 
 _STATUS_PRIORITY: dict[str, int] = {
@@ -120,7 +126,7 @@ def build_schema_truth_registry(
     return sorted(registry, key=lambda entry: (entry.schema_key, -_STATUS_PRIORITY.get(entry.status, 0)))
 
 
-def _source_kind_from_claim(*, claim: AuditClaimEntry) -> str:
+def _source_kind_from_claim(*, claim: AuditClaimEntry) -> SchemaTruthSourceKind:
     if claim.source_type == "metamodel":
         return "metamodel"
     if claim.source_type in {"confluence_page", "local_doc"}:
@@ -130,7 +136,7 @@ def _source_kind_from_claim(*, claim: AuditClaimEntry) -> str:
     return "implementation_inference"
 
 
-def _schema_kind(target: str) -> str:
+def _schema_kind(target: str) -> Literal["node", "relationship", "property", "unknown"]:
     normalized = str(target or "").strip()
     if normalized.startswith("Node:"):
         return "node"

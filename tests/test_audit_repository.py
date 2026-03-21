@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from fin_ai_auditor.config import Settings
 from fin_ai_auditor.domain.models import (
     AtomicFactEntry,
@@ -765,6 +767,73 @@ def test_package_specification_creates_truths_and_marks_impacted_packages(tmp_pa
         for truth in updated.truths
     )
     assert any(entry.source_type == "truth_update" for entry in updated.analysis_log)
+
+
+def test_apply_package_decision_rejects_unknown_action(tmp_path: Path) -> None:
+    settings = Settings(database_path=tmp_path / "auditor.db")
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+
+    created = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    completed = service.complete_run_with_demo_findings(run_id=created.run_id)
+    package = completed.decision_packages[0]
+
+    with pytest.raises(ValueError, match="Unbekannte Entscheidungsaktion"):
+        service.apply_package_decision(
+            run_id=completed.run_id,
+            package_id=package.package_id,
+            action="later",
+            comment_text=None,
+        )
+
+
+def test_create_writeback_approval_request_rejects_unknown_target_type(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "auditor.db",
+        fixed_jira_project_key="FINAI",
+        jira_board_url="https://finius.atlassian.net/jira/software/projects/FINAI/boards/67",
+    )
+    repository = SQLiteAuditRepository(db_path=settings.database_path)
+    service = AuditService(repository=repository, settings=settings)
+
+    created = service.create_run(
+        payload=CreateAuditRunRequest(
+            analysis_mode="deep",
+            target=AuditTarget(
+                local_repo_path="/Users/martinwaelter/GitHub/FIN-AI",
+                github_ref="main",
+                confluence_space_keys=["FINAI"],
+                jira_project_keys=["FINAI"],
+                include_metamodel=True,
+                include_local_docs=True,
+            )
+        )
+    )
+    completed = service.complete_run_with_demo_findings(run_id=created.run_id)
+
+    with pytest.raises(ValueError, match="Unbekannter Writeback-Zieltyp"):
+        service.create_writeback_approval_request(
+            run_id=completed.run_id,
+            target_type="slack_message",
+            title="Unbekannter Writeback",
+            summary="Sollte hart abgewiesen werden.",
+            target_url=settings.jira_board_url,
+            related_package_ids=[],
+            related_finding_ids=[],
+            payload_preview=[],
+        )
 
 
 def test_service_records_jira_ticket_with_ai_coding_brief(tmp_path: Path) -> None:

@@ -72,7 +72,7 @@ class AtlassianOAuthService:
             configured_redirect_uri=configured_redirect_uri,
             recommended_redirect_uri=redirect_uri,
             redirect_uri_matches_local_api=(
-                bool(configured_redirect_uri)
+                configured_redirect_uri is not None
                 and _redirect_matches_local_api(
                     configured_redirect_uri=configured_redirect_uri,
                     expected_redirect_uri=redirect_uri,

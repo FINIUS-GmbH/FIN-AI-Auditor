@@ -70,11 +70,6 @@ function TreeItem({ node, checked, onToggle, depth }: {
 
 type Step = "auth" | "scope" | "confirm";
 
-// Fixed config — not user-editable
-const GITHUB_URL = "https://github.com/FINIUS-GmbH/FIN-AI";
-const LOCAL_PATH = "../FIN-AI";
-const GIT_REF = "main";
-
 interface RunModalProps {
   ea: AtlassianAuthStatus;
   sp: SourceProfile;
@@ -84,9 +79,13 @@ interface RunModalProps {
   submitting: boolean;
 }
 
-export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunModalProps): ReactNode {
+export default function RunModal({ ea, sp, boot, onClose, onStart, submitting }: RunModalProps): ReactNode {
   const [step, setStep] = useState<Step>(ea.token_valid ? "scope" : "auth");
   const analysisMode: AnalysisMode = "fast";
+  const bootstrapDefaults = boot?.defaults;
+  const githubUrl = bootstrapDefaults?.github_repo_url ?? "";
+  const localPath = bootstrapDefaults?.local_repo_path ?? "";
+  const gitRef = bootstrapDefaults?.github_ref ?? "main";
   const [authStatus, setAuthStatus] = useState<AtlassianAuthStatus>(ea);
   const [authBusy, setAuthBusy] = useState(false);
   const [authErr, setAuthErr] = useState("");
@@ -220,10 +219,10 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
 
   function handleStart() {
     void onStart(
-      {
-        github_repo_url: GITHUB_URL,
-        local_repo_path: LOCAL_PATH,
-        github_ref: GIT_REF,
+        {
+        github_repo_url: githubUrl || null,
+        local_repo_path: localPath || null,
+        github_ref: gitRef,
         confluence_space_keys: [spaceKey],
         confluence_page_ids: [...selectedPages].sort(),
         jira_project_keys: [sp.jira_project_key],
@@ -315,7 +314,7 @@ export default function RunModal({ ea, sp, onClose, onStart, submitting }: RunMo
             <h2>Audit-Run starten</h2>
             <div className="confirm-summary">
               <div className="confirm-row">{CONF_SVG} <strong>{selectedPages.size} Confluence-Seiten</strong> aus Space <strong>{spaceKey}</strong></div>
-              <div className="confirm-row">{GH_SVG} <strong>FINIUS-GmbH/FIN-AI</strong> @ <code>{GIT_REF}</code></div>
+              <div className="confirm-row">{GH_SVG} <strong>{githubUrl || localPath || "Lokaler FIN-AI-Checkout"}</strong> @ <code>{gitRef}</code></div>
               <div className="confirm-row">◆ <strong>Metamodell</strong> — lokal</div>
             </div>
             <div className="wc-context" style={{ marginTop: 16 }}>

@@ -11,15 +11,10 @@ from __future__ import annotations
 import gc
 import logging
 import math
-from typing import Callable, Sequence
+from typing import Callable
 
 from fin_ai_auditor.config import Settings
-from fin_ai_auditor.domain.models import (
-    AuditFinding,
-    AuditLocation,
-    AuditPosition,
-    new_location_id,
-)
+from fin_ai_auditor.domain.models import AuditFinding, FindingSeverity
 from fin_ai_auditor.llm import get_embeddings_from_llm_slot, select_embedding_slot
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
 
@@ -258,7 +253,7 @@ def detect_cross_document_contradictions(
                 continue
             seen_pairs.add(pair_key)
 
-            severity = "high" if sim_val >= SIMILARITY_HIGH else "medium"
+            severity: FindingSeverity = "high" if sim_val >= SIMILARITY_HIGH else "medium"
             src_label_i = _SOURCE_LABELS.get(rec_i.claim.source_type, rec_i.claim.source_type)
             src_label_j = _SOURCE_LABELS.get(rec_j.claim.source_type, rec_j.claim.source_type)
             text_i = str(rec_i.evidence.matched_text or "")[:120]

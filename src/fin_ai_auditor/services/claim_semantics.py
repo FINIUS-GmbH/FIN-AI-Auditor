@@ -25,6 +25,7 @@ _APPROVAL_BYPASS_PATTERNS: Final[tuple[str, ...]] = (
     "direct persist",
     "auto persist",
 )
+_NEGATION_MARKERS: Final[tuple[str, ...]] = ("kein ", "keine ", "keinen ", "ohne ", "no ", "not ", "nicht ")
 _READ_ONLY_PATTERNS: Final[tuple[str, ...]] = ("read only", "read-only", "readonly", "nur lesend")
 _WRITE_ENABLED_PATTERNS: Final[tuple[str, ...]] = (
     "write",
@@ -93,6 +94,14 @@ def normalize_claim_value(value: str) -> str:
     return _WHITESPACE_PATTERN.sub(" ", lowered)
 
 
+def semantic_consensus_bucket(*, subject_key: str, predicate: str, value: str) -> str:
+    signature = semantic_signature_for_claim(subject_key=subject_key, predicate=predicate, value=value)
+    meaningful_signature = _meaningful_signature(signature)
+    if meaningful_signature:
+        return f"semantic:{'|'.join(meaningful_signature)}"
+    return f"text:{normalize_claim_value(value)}"
+
+
 def package_scope_key(subject_key: str) -> str:
     raw_key = str(subject_key or "").strip()
     if not raw_key:
@@ -124,9 +133,11 @@ def semantic_signature_for_claim(*, subject_key: str, predicate: str, value: str
     tags: set[str] = set()
 
     if subject_key.endswith((".write_path", ".policy", ".approval_policy", ".scope_policy")) or "write" in predicate or "policy" in predicate:
-        if _contains_any(normalized, _APPROVAL_REQUIRED_PATTERNS):
+        approval_bypass = _contains_any(normalized, _APPROVAL_BYPASS_PATTERNS)
+        negated_bypass = approval_bypass and _looks_like_bypass_is_forbidden(normalized_value=normalized)
+        if _contains_any(normalized, _APPROVAL_REQUIRED_PATTERNS) or negated_bypass:
             tags.add("approval_required")
-        if _contains_any(normalized, _APPROVAL_BYPASS_PATTERNS):
+        if approval_bypass and not negated_bypass:
             tags.add("approval_bypass")
         if _contains_any(normalized, _READ_ONLY_PATTERNS):
             tags.add("read_only")
@@ -136,7 +147,7 @@ def semantic_signature_for_claim(*, subject_key: str, predicate: str, value: str
     if subject_key.endswith(".read_path") or "read" in predicate:
         if _contains_any(normalized, _READ_ONLY_PATTERNS):
             tags.add("read_only")
-        if "query" in normalized or "fetch" in normalized or "load" in normalized:
+        if "read" in normalized or "query" in normalized or "fetch" in normalized or "load" in normalized:
             tags.add("read_operation")
 
     if subject_key.endswith((".lifecycle", ".review_status")) or "lifecycle" in predicate or "review_status" in predicate:
@@ -169,6 +180,9 @@ def semantic_signature_for_claim(*, subject_key: str, predicate: str, value: str
         phase_order = _phase_order_tag(normalized_value=normalized, predicate=predicate)
         if phase_order is not None:
             tags.add(phase_order)
+        phase_count = _phase_count_tag(normalized_value=normalized, predicate=predicate)
+        if phase_count is not None:
+            tags.add(phase_count)
         question_count = _question_count_tag(normalized_value=normalized, predicate=predicate)
         if question_count is not None:
             tags.add(question_count)
@@ -227,7 +241,10 @@ def _has_direct_semantic_conflict(
             if ("read_only" in left_tags and "write_enabled" in right_tags) or (
                 "write_enabled" in left_tags and "read_only" in right_tags
             ):
-                return True
+                left_is_gated_write = "write_enabled" in left_tags and "approval_required" in left_tags
+                right_is_gated_write = "write_enabled" in right_tags and "approval_required" in right_tags
+                if not left_is_gated_write and not right_is_gated_write:
+                    return True
             lifecycle_tags = {"review_status", "approved_status", "draft_status", "archived_status"}
             left_lifecycle = left_tags.intersection(lifecycle_tags)
             right_lifecycle = right_tags.intersection(lifecycle_tags)
@@ -238,6 +255,8 @@ def _has_direct_semantic_conflict(
             ):
                 return True
             if _dynamic_semantic_values(left_tags=left_tags, right_tags=right_tags, prefix="phase_order:"):
+                return True
+            if _dynamic_semantic_values(left_tags=left_tags, right_tags=right_tags, prefix="phase_count:"):
                 return True
             if _dynamic_semantic_values(left_tags=left_tags, right_tags=right_tags, prefix="question_count:"):
                 return True
@@ -289,11 +308,19 @@ def _has_meaningful_semantic_overlap(
         for signature in right_signatures
         if _meaningful_signature(signature)
     ]
-    return any(left_tags.intersection(right_tags) for left_tags in left_meaningful for right_tags in right_meaningful)
+    return any(
+        left_tags.intersection(right_tags) or _compatible_policy_tags(left_tags=left_tags, right_tags=right_tags)
+        for left_tags in left_meaningful
+        for right_tags in right_meaningful
+    )
 
 
 def _contains_any(value: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in value for pattern in patterns)
+
+
+def _looks_like_bypass_is_forbidden(*, normalized_value: str) -> bool:
+    return any(marker in normalized_value for marker in _NEGATION_MARKERS)
 
 
 def _meaningful_signature(signature: tuple[str, ...]) -> tuple[str, ...]:
@@ -303,7 +330,7 @@ def _meaningful_signature(signature: tuple[str, ...]) -> tuple[str, ...]:
             for tag in signature
             if (
                 (tag in _MEANINGFUL_SEMANTIC_TAGS and tag not in _REFERENCE_TAGS)
-                or tag.startswith(("phase_reference:", "question_reference:", "phase_order:", "question_count:"))
+                or tag.startswith(("phase_reference:", "question_reference:", "phase_order:", "phase_count:", "question_count:"))
             )
         )
     )
@@ -313,6 +340,12 @@ def _dynamic_semantic_values(*, left_tags: set[str], right_tags: set[str], prefi
     left_values = {tag for tag in left_tags if tag.startswith(prefix)}
     right_values = {tag for tag in right_tags if tag.startswith(prefix)}
     return bool(left_values and right_values and left_values.isdisjoint(right_values))
+
+
+def _compatible_policy_tags(*, left_tags: set[str], right_tags: set[str]) -> bool:
+    left_is_gated_write = "approval_required" in left_tags and "write_enabled" in left_tags
+    right_is_gated_write = "approval_required" in right_tags and "write_enabled" in right_tags
+    return ("read_only" in left_tags and right_is_gated_write) or ("read_only" in right_tags and left_is_gated_write)
 
 
 def _phase_or_question_reference_conflict(
@@ -366,6 +399,21 @@ def _phase_order_tag(*, normalized_value: str, predicate: str) -> str | None:
         return None
     value = str(match.group(1) or "").strip()
     return _normalized_numeric_tag(prefix="phase_order", value=value)
+
+
+def _phase_count_tag(*, normalized_value: str, predicate: str) -> str | None:
+    if "phase_count" in predicate:
+        digits = re.findall(r"\d{1,3}", normalized_value)
+        if digits:
+            return _normalized_numeric_tag(prefix="phase_count", value=digits[0])
+    match = re.search(
+        r"\b(\d{1,3})\s*(?:phases|phase|phasen)\b|\b(?:phase count|phasenzahl)\s*[:=]?\s*(\d{1,3})\b",
+        normalized_value,
+    )
+    if match is None:
+        return None
+    value = str(match.group(1) or match.group(2) or "").strip()
+    return _normalized_numeric_tag(prefix="phase_count", value=value)
 
 
 def _question_count_tag(*, normalized_value: str, predicate: str) -> str | None:

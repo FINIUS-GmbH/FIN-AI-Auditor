@@ -14,7 +14,6 @@ from fin_ai_auditor.services.connectors.jira_connector import (
     JiraTicketTarget,
     JiraTicketingConnector,
 )
-from fin_ai_auditor.services.jira_ticket_writer import build_jira_issue_payload
 from fin_ai_auditor.services.change_payloads import build_jira_ticket_brief
 
 

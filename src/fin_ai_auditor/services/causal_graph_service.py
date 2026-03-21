@@ -8,13 +8,15 @@ from fin_ai_auditor.services.causal_graph_models import (
     CausalGraph,
     CausalGraphEdge,
     CausalGraphNode,
+    CausalNodeLayer,
+    CausalNodeType,
     CausalGraphTruthBinding,
     CausalPropagationFrame,
 )
 from fin_ai_auditor.services.claim_semantics import package_scope_key
 
 
-_NODE_LAYER_BY_TYPE: dict[str, str] = {
+_NODE_LAYER_BY_TYPE: dict[str, CausalNodeLayer] = {
     "truth": "truth",
     "policy": "governance",
     "lifecycle": "governance",
@@ -176,11 +178,11 @@ def expand_impacted_scope_keys(
     impacted_scope_keys = set(normalized_seed_scope_keys)
     while queue:
         node_id, depth = queue.popleft()
-        node = nodes_by_id.get(node_id)
-        if node is None:
+        current_node = nodes_by_id.get(node_id)
+        if current_node is None:
             continue
-        impacted_scope_keys.add(node.scope_key)
-        impacted_scope_keys.add(package_scope_key(node.canonical_key))
+        impacted_scope_keys.add(current_node.scope_key)
+        impacted_scope_keys.add(package_scope_key(current_node.canonical_key))
         if depth >= max_depth:
             continue
         for edge in outgoing.get(node_id, []):
@@ -1049,7 +1051,11 @@ def _build_truth_propagation_frames(
                 affected_node_ids=_dedupe_preserve_order(affected_node_ids),
                 affected_edge_ids=_dedupe_preserve_order(affected_edge_ids),
                 metadata={
-                    "origin_scope_key": nodes_by_id.get(binding.bound_node_id).scope_key if binding.bound_node_id in nodes_by_id else "",
+                    "origin_scope_key": (
+                        nodes_by_id[binding.bound_node_id].scope_key
+                        if binding.bound_node_id in nodes_by_id
+                        else ""
+                    ),
                     "predicate": binding.predicate,
                 },
             )
@@ -1093,7 +1099,7 @@ def _merge_propagation_mode(left: str, right: str) -> str:
     return "none"
 
 
-def _causal_node_type_for_semantic_entity(*, entity: SemanticEntity) -> str:
+def _causal_node_type_for_semantic_entity(*, entity: SemanticEntity) -> CausalNodeType:
     if entity.entity_type == "truth":
         return "truth"
     if entity.entity_type == "process":
@@ -1107,7 +1113,7 @@ def _causal_node_type_for_semantic_entity(*, entity: SemanticEntity) -> str:
     if entity.entity_type == "lifecycle":
         return "lifecycle"
     if entity.entity_type in {"write_contract", "read_contract"}:
-        return entity.entity_type
+        return "write_contract" if entity.entity_type == "write_contract" else "read_contract"
     if entity.entity_type == "documentation_section":
         return "document_anchor"
     if entity.entity_type == "code_component":
@@ -1115,7 +1121,7 @@ def _causal_node_type_for_semantic_entity(*, entity: SemanticEntity) -> str:
     return "artifact"
 
 
-def _classify_code_node_type(*, entity: SemanticEntity) -> str:
+def _classify_code_node_type(*, entity: SemanticEntity) -> CausalNodeType:
     descriptor = " ".join(
         [
             str(entity.label or ""),
@@ -1134,7 +1140,7 @@ def _classify_code_node_type(*, entity: SemanticEntity) -> str:
     return "code_anchor"
 
 
-def _fallback_subject_node_type(*, subject_key: str) -> tuple[str, str]:
+def _fallback_subject_node_type(*, subject_key: str) -> tuple[CausalNodeType, CausalNodeLayer]:
     if subject_key == "BSM.process":
         return "scope", "process"
     if subject_key.startswith("BSM.phase."):

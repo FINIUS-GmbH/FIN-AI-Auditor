@@ -156,7 +156,7 @@ class MetaModelConnector:
         snapshot = AuditSourceSnapshot(
             source_type="metamodel",
             source_id="finai-current-dump",
-            revision_id=dump_payload["collected_at"],
+            revision_id=str(dump_payload.get("collected_at") or "").strip() or None,
             content_hash=content_hash,
             sync_token="metamodel:current_dump",
             metadata={

@@ -2621,6 +2621,60 @@ def test_semantic_policy_variants_align_without_false_conflict() -> None:
     )
 
 
+def test_semantic_confluence_writeback_policy_aligns_across_approval_gate() -> None:
+    left_value = "kein externes Writeback auf Confluence ohne Freigabe"
+    right_value = "externer Confluence-Writeback ist nach Approval erlaubt"
+
+    assert semantic_values_aligned(
+        subject_key="ConfluencePage.approval_policy",
+        predicate="documented_approval_policy",
+        left_value=left_value,
+        right_value=right_value,
+    )
+    assert not semantic_values_conflict(
+        subject_key="ConfluencePage.approval_policy",
+        predicate="documented_approval_policy",
+        left_values={left_value},
+        right_values={right_value},
+    )
+
+
+def test_semantic_confluence_read_variants_align_without_false_conflict() -> None:
+    left_value = "Confluence Read Collector"
+    right_value = "aktueller Confluence-Live-Read bleibt getrennt vom Jira-Writeback-Scope"
+
+    assert semantic_values_aligned(
+        subject_key="ConfluencePage.read_path",
+        predicate="documented_read",
+        left_value=left_value,
+        right_value=right_value,
+    )
+    assert not semantic_values_conflict(
+        subject_key="ConfluencePage.read_path",
+        predicate="documented_read",
+        left_values={left_value},
+        right_values={right_value},
+    )
+
+
+def test_semantic_confluence_read_only_and_approved_writeback_policy_do_not_conflict() -> None:
+    left_value = "read-only Confluence-Collector"
+    right_value = "Confluence writeback is allowed after approval"
+
+    assert semantic_values_aligned(
+        subject_key="ConfluencePage.policy",
+        predicate="documented_policy",
+        left_value=left_value,
+        right_value=right_value,
+    )
+    assert not semantic_values_conflict(
+        subject_key="ConfluencePage.policy",
+        predicate="documented_policy",
+        left_values={left_value},
+        right_values={right_value},
+    )
+
+
 def test_claim_extractor_derives_process_phase_and_question_semantics_from_docs() -> None:
     snapshot = AuditSourceSnapshot(source_type="local_doc", source_id="_docs/bsm.md", content_hash="sha256:test")
     document = CollectedDocument(
@@ -5037,6 +5091,410 @@ def test_consensus_detector_weights_ssot_and_code_above_historical_doc() -> None
     contradiction = next(finding for finding in findings if finding.category == "contradiction")
     assert contradiction.metadata["consensus_value"] == "approval-gated"
     assert contradiction.locations[0].source_id == "_docs/legacy_as_is_statement.md"
+
+
+def test_consensus_detector_aligns_semantic_phase_count_values() -> None:
+    claim_records = [
+        _record_for_consensus(
+            source_type="metamodel",
+            source_id="current_dump",
+            title="current_dump",
+            path_hint="data/metamodel/current_dump.json",
+            subject_key="BSM.process",
+            predicate="phase_count",
+            normalized_value="3",
+        ),
+        _record_for_consensus(
+            source_type="confluence_page",
+            source_id="page-process",
+            title="Process Definition",
+            path_hint="wiki/process-definition",
+            subject_key="BSM.process",
+            predicate="phase_count",
+            normalized_value="BSM process has 3 phases.",
+        ),
+    ]
+
+    findings = detect_consensus_deviations(claim_records=claim_records)
+
+    assert not any(
+        str(finding.canonical_key or "").startswith("consensus_deviation:BSM.process:phase_count")
+        for finding in findings
+    )
+    assert not any(
+        str(finding.canonical_key or "") == "consensus_ambiguous:BSM.process:phase_count"
+        for finding in findings
+    )
+
+
+def test_consensus_detector_skips_doc_only_gap_for_process_structure_without_code() -> None:
+    claim_records = [
+        _record_for_consensus(
+            source_type="metamodel",
+            source_id="current_dump",
+            title="current_dump",
+            path_hint="data/metamodel/current_dump.json",
+            subject_key="BSM.process",
+            predicate="phase_count",
+            normalized_value="3",
+        ),
+        _record_for_consensus(
+            source_type="confluence_page",
+            source_id="page-process",
+            title="Process Definition",
+            path_hint="wiki/process-definition",
+            subject_key="BSM.process",
+            predicate="phase_count",
+            normalized_value="BSM process has 3 phases.",
+        ),
+    ]
+
+    findings = detect_consensus_deviations(claim_records=claim_records)
+
+    assert not any(
+        str(finding.canonical_key or "") == "coverage_gap:doc_only:BSM.process:phase_count"
+        for finding in findings
+    )
+
+
+def test_document_claim_extractor_skips_generic_meta_subject_noise() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:architecture"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- externe Ressourcen bis zu einer expliziten User-Entscheidung strikt read-only",
+                "- FIN-AI Metamodell direkt read-only aus Neo4j",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+    subject_keys = {record.claim.subject_key for record in records}
+
+    assert "Architektur.read_path" not in subject_keys
+    assert "Architektur.policy" not in subject_keys
+    assert not any(
+        record.claim.subject_key == "BSM.process" and record.claim.predicate == "documented_process"
+        for record in records
+    )
+
+
+def test_document_claim_extractor_does_not_infer_process_from_heading_only() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/process-plan.md", content_hash="sha256:process-heading"),
+        source_type="local_doc",
+        source_id="docs/process-plan.md",
+        title="process-plan.md",
+        body="\n".join(
+            [
+                "# Prozess",
+                "- Pflicht:",
+                "- Snapshot Chain",
+            ]
+        ),
+        path_hint="docs/process-plan.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(
+        record.claim.subject_key == "BSM.process" and record.claim.predicate == "documented_process"
+        for record in records
+    )
+
+
+def test_document_claim_extractor_skips_generic_document_subject_fallback_noise() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:subject-noise"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- FIN-AI Metamodell direkt read-only aus Neo4j",
+                "- Doku behauptet Promotion-Regel Y",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+    subject_keys = {record.claim.subject_key for record in records}
+
+    assert "FIN.read_path" not in subject_keys
+    assert "FIN.policy" not in subject_keys
+    assert "Doku.lifecycle" not in subject_keys
+
+
+def test_document_claim_extractor_keeps_explicit_backtick_subjects_without_object_hints() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/custom-graph.md", content_hash="sha256:explicit-subject"),
+        source_type="local_doc",
+        source_id="docs/custom-graph.md",
+        title="custom-graph.md",
+        body="\n".join(
+            [
+                "# Graph",
+                "- save `CausalGraphTruthBinding` after review",
+            ]
+        ),
+        path_hint="docs/custom-graph.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert any(
+        record.claim.subject_key == "CausalGraphTruthBinding.write_path"
+        and record.claim.predicate == "documented_write"
+        for record in records
+    )
+
+
+def test_document_claim_extractor_does_not_treat_generic_phase_headings_as_bsm_phases() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/product-scope.md", content_hash="sha256:phase-heading-noise"),
+        source_type="local_doc",
+        source_id="docs/product-scope.md",
+        title="product-scope.md",
+        body="\n".join(
+            [
+                "# Produkt-Scope",
+                "### Phase 3",
+                "- Freigabe- und Publishing-Workflow",
+            ]
+        ),
+        path_hint="docs/product-scope.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(record.claim.subject_key.startswith("BSM.phase.") for record in records)
+
+
+def test_document_claim_extractor_does_not_match_run_keyword_inside_unrelated_words() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/product-scope.md", content_hash="sha256:run-keyword-noise"),
+        source_type="local_doc",
+        source_id="docs/product-scope.md",
+        title="product-scope.md",
+        body="\n".join(
+            [
+                "# Produkt-Scope",
+                "- Confluence-Patch-Preview mit Review-Markierungen, weiterhin nur lokal",
+            ]
+        ),
+        path_hint="docs/product-scope.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(record.claim.subject_key.startswith("FINAI_Run.") for record in records)
+
+
+def test_document_claim_extractor_does_not_treat_review_patch_notes_as_lifecycle() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:review-note"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- externer Confluence-Writeback fuehrt nach Approval section-anchored Review-Patches ueber die API aus",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(record.claim.subject_key == "ConfluencePage.lifecycle" for record in records)
+
+
+def test_document_claim_extractor_does_not_treat_status_node_mentions_as_lifecycle() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:status-node"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- Confluence-Reads/-Writes behandeln auch Tabellen, Makros, Attachments, Status- und Card-Knoten strukturierter",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(record.claim.subject_key == "ConfluencePage.lifecycle" for record in records)
+
+
+def test_code_claim_extractor_does_not_treat_generic_source_symbols_as_input_source() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="github_file", source_id="src/example.py", content_hash="sha256:source-symbols"),
+        source_type="github_file",
+        source_id="src/example.py",
+        title="example.py",
+        body="\n".join(
+            [
+                "def summarize_source(source_id: str, source_type: str) -> dict[str, str]:",
+                "    current_source = source_id.strip()",
+                "    return {'source_id': current_source, 'source_type': source_type}",
+            ]
+        ),
+        path_hint="src/example.py",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert not any(record.claim.subject_key.startswith("InputSource.") for record in records)
+
+
+def test_code_claim_extractor_keeps_explicit_input_source_subject() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="github_file", source_id="src/input_source.py", content_hash="sha256:inputsource"),
+        source_type="github_file",
+        source_id="src/input_source.py",
+        title="input_source.py",
+        body="\n".join(
+            [
+                "class InputSourceService:",
+                "    def read_inputsource(self) -> str:",
+                "        return load_inputsource()",
+            ]
+        ),
+        path_hint="src/input_source.py",
+    )
+
+    records = extract_claim_records(documents=[document])
+
+    assert any(record.claim.subject_key.startswith("InputSource.") for record in records)
+
+
+def test_meta_analysis_code_claims_are_marked_secondary_only() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(
+            source_type="github_file",
+            source_id="src/fin_ai_auditor/services/claim_extractor.py",
+            content_hash="sha256:meta-claim",
+        ),
+        source_type="github_file",
+        source_id="src/fin_ai_auditor/services/claim_extractor.py",
+        title="claim_extractor.py",
+        body="\n".join(
+            [
+                "def build_meta_claim() -> None:",
+                '    subject_key = "BSM.process"',
+                '    predicate = "implemented_process"',
+                '    anchor_value = "BSM.process.phase_count"',
+                "    return None",
+            ]
+        ),
+        path_hint="src/fin_ai_auditor/services/claim_extractor.py",
+    )
+
+    records = extract_claim_records(documents=[document])
+    bsm_process_records = [record for record in records if record.claim.subject_key == "BSM.process"]
+
+    assert bsm_process_records
+    assert all(record.claim.assertion_status == "secondary_only" for record in bsm_process_records)
+
+
+def test_meta_analysis_code_claims_do_not_trigger_process_drift_or_doc_gap() -> None:
+    doc = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/process.md", content_hash="sha256:process-doc"),
+        source_type="local_doc",
+        source_id="docs/process.md",
+        title="process.md",
+        body="\n".join(
+            [
+                "# Process",
+                "BSM process has 3 phases.",
+            ]
+        ),
+        path_hint="docs/process.md",
+    )
+    code = CollectedDocument(
+        snapshot=AuditSourceSnapshot(
+            source_type="github_file",
+            source_id="src/fin_ai_auditor/services/claim_extractor.py",
+            content_hash="sha256:process-meta-code",
+        ),
+        source_type="github_file",
+        source_id="src/fin_ai_auditor/services/claim_extractor.py",
+        title="claim_extractor.py",
+        body="\n".join(
+            [
+                "def build_meta_claim() -> None:",
+                '    subject_key = "BSM.process"',
+                '    predicate = "implemented_process"',
+                '    anchor_value = "BSM.process.phase_count"',
+                "    return None",
+            ]
+        ),
+        path_hint="src/fin_ai_auditor/services/claim_extractor.py",
+    )
+
+    records = extract_claim_records(documents=[doc, code])
+    findings, _ = generate_findings(claim_records=records, inherited_truths=[])
+    doc_gap_findings = detect_documentation_gaps(claim_records=records, documents=[doc, code])
+    consensus_findings = detect_consensus_deviations(claim_records=records)
+
+    assert not any(str(finding.canonical_key or "") == "BSM.process" for finding in findings)
+    assert not any("doc_gap:BSM.process" == str(finding.canonical_key or "") for finding in doc_gap_findings)
+    assert not any("BSM.process" in str(finding.canonical_key or "") for finding in consensus_findings)
+
+
+def test_meta_process_documentation_claims_are_marked_secondary_only() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:meta-process-doc"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- BSM-Prozessclaims werden tiefer normalisiert: Phase-/Frage-Referenzen und question_count.",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+    bsm_process_records = [record for record in records if record.claim.subject_key == "BSM.process"]
+
+    assert bsm_process_records
+    assert all(record.claim.assertion_status == "secondary_only" for record in bsm_process_records)
+
+
+def test_meta_bsm_phase_documentation_claims_are_marked_secondary_only() -> None:
+    document = CollectedDocument(
+        snapshot=AuditSourceSnapshot(source_type="local_doc", source_id="docs/architecture.md", content_hash="sha256:meta-phase-doc"),
+        source_type="local_doc",
+        source_id="docs/architecture.md",
+        title="architecture.md",
+        body="\n".join(
+            [
+                "# Architektur",
+                "- BSM-Prozessclaims werden tiefer normalisiert: Phase-/Frage-Referenzen, `phase_order`, `question_count` sowie Review-/Approval-Unterclaims werden kanonisch abgeleitet.",
+            ]
+        ),
+        path_hint="docs/architecture.md",
+    )
+
+    records = extract_claim_records(documents=[document])
+    bsm_phase_records = [record for record in records if record.claim.subject_key.startswith("BSM_Phase.")]
+
+    assert bsm_phase_records
+    assert all(record.claim.assertion_status == "secondary_only" for record in bsm_phase_records)
 
 
 def test_documentation_gap_detector_surfaces_missing_subscope_when_root_is_documented() -> None:

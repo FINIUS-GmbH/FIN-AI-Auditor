@@ -23,7 +23,8 @@ import logging
 from collections import Counter, defaultdict
 from typing import Sequence
 
-from fin_ai_auditor.domain.models import AuditFinding, AuditLocation, TruthLedgerEntry
+from fin_ai_auditor.domain.models import AuditFinding, FindingSeverity, TruthLedgerEntry
+from fin_ai_auditor.services.claim_semantics import semantic_consensus_bucket
 from fin_ai_auditor.services.pipeline_models import ExtractedClaimRecord
 
 logger = logging.getLogger(__name__)
@@ -77,15 +78,29 @@ def detect_consensus_deviations(
         )
 
     # 1. Group claims by (subject_key, predicate) → list of (value, source_type, record)
-    claims_by_aspect: dict[tuple[str, str], list[tuple[str, str, ExtractedClaimRecord]]] = defaultdict(list)
+    claims_by_aspect: dict[tuple[str, str], list[tuple[str, str, str, ExtractedClaimRecord]]] = defaultdict(list)
     for record in claim_records:
+        assertion_status = str(getattr(record.claim, "assertion_status", "asserted") or "asserted").strip()
+        if assertion_status == "secondary_only":
+            continue
         key = (record.claim.subject_key, record.claim.predicate)
         value = record.claim.normalized_value.strip()
         if value:
-            claims_by_aspect[key].append((value, record.claim.source_type, record))
+            claims_by_aspect[key].append(
+                (
+                    value,
+                    semantic_consensus_bucket(
+                        subject_key=record.claim.subject_key,
+                        predicate=record.claim.predicate,
+                        value=value,
+                    ),
+                    record.claim.source_type,
+                    record,
+                )
+            )
 
     findings: list[AuditFinding] = []
-    consensus_stats = {
+    consensus_stats: dict[str, int | float] = {
         "total_aspects": 0, "with_consensus": 0, "deviations": 0,
         "coverage_gaps": 0, "ambiguous": 0, "truth_overrides": len(truth_overrides),
         "target_confidence_pct": 0,
@@ -109,31 +124,37 @@ def detect_consensus_deviations(
                     truth_value_override = tv
                     break
 
+        weighted_counter: dict[str, float]
         if truth_value_override:
             # Confirmed truth — this is the definitive target
             consensus_display = truth_value_override
-            most_common_value = truth_value_override.casefold()
+            most_common_value = semantic_consensus_bucket(
+                subject_key=subject_key,
+                predicate=predicate,
+                value=truth_value_override,
+            )
             consensus_ratio = 1.0  # 100% confidence — truth is absolute
             is_truth_fixed = True
             aspects_with_fixed_target += 1
             value_counter: Counter[str] = Counter(
-                value.casefold() for value, _src_type, _record in entries
+                bucket for _value, bucket, _src_type, _record in entries
             )
-            weighted_counter: dict[str, float] = {
+            weighted_counter = {
                 normalized: sum(
                     _entry_weight(record=record)
-                    for value, _src_type, record in entries
-                    if value.casefold() == normalized
+                    for _value, bucket, _src_type, record in entries
+                    if bucket == normalized
                 )
                 for normalized in value_counter
             }
         else:
             value_counter = Counter()
-            weighted_counter: dict[str, float] = defaultdict(float)
-            for value, _src_type, record in entries:
-                normalized = value.casefold()
-                value_counter[normalized] += 1
-                weighted_counter[normalized] += _entry_weight(record=record)
+            weighted_counter = defaultdict(float)
+            consensus_display_by_bucket: dict[str, str] = {}
+            for value, bucket, _src_type, record in entries:
+                value_counter[bucket] += 1
+                weighted_counter[bucket] += _entry_weight(record=record)
+                consensus_display_by_bucket.setdefault(bucket, value)
 
             total_weight = sum(weighted_counter.values()) or 1.0
             most_common_value = max(
@@ -148,18 +169,15 @@ def detect_consensus_deviations(
             is_truth_fixed = False
 
             # Find the original-case version of the consensus value
-            consensus_display = next(
-                (v for v, _st, _r in entries if v.casefold() == most_common_value),
-                most_common_value,
-            )
+            consensus_display = consensus_display_by_bucket.get(most_common_value, most_common_value)
 
         total_votes = len(entries)
 
         # 3. Determine source coverage
-        source_types_present = {src_type for _, src_type, _ in entries}
+        source_types_present = {src_type for _, _bucket, src_type, _ in entries}
         has_doc = any(
             src_type in _DOC_SOURCES and _counts_as_target_documentation(record=record)
-            for _, src_type, record in entries
+            for _, _bucket, src_type, record in entries
         )
         has_code = bool(source_types_present & _CODE_SOURCES)
 
@@ -169,8 +187,8 @@ def detect_consensus_deviations(
 
             # Find records that deviate from consensus
             deviating_by_source: dict[str, list[tuple[str, ExtractedClaimRecord]]] = defaultdict(list)
-            for value, src_type, record in entries:
-                if value.casefold() != most_common_value:
+            for value, bucket, src_type, record in entries:
+                if bucket != most_common_value:
                     source_key = f"{src_type}:{record.evidence.location.source_id or ''}"
                     deviating_by_source[source_key].append((value, record))
 
@@ -183,7 +201,7 @@ def detect_consensus_deviations(
                 source_short = source_path.split("/")[-1] if "/" in source_path else source_path
 
                 # Truth-fixed targets are critical; majority-derived are high
-                severity = "critical" if is_truth_fixed else "high"
+                severity: FindingSeverity = "critical" if is_truth_fixed else "high"
                 target_label = (
                     "bestaetigte Wahrheit"
                     if is_truth_fixed
@@ -231,7 +249,7 @@ def detect_consensus_deviations(
                 weighted_counter.items(),
                 key=lambda item: (-item[1], -value_counter[item[0]], item[0]),
             )[:2]
-            all_records = [r for _, _, r in entries]
+            all_records = [r for _, _, _, r in entries]
 
             findings.append(AuditFinding(
                 severity="medium",
@@ -261,7 +279,7 @@ def detect_consensus_deviations(
         # 5. Coverage gap analysis: concept in code but not docs, or vice versa
         if has_code and not has_doc:
             consensus_stats["coverage_gaps"] += 1
-            code_records = [r for _, st, r in entries if st in _CODE_SOURCES]
+            code_records = [r for _, _bucket, st, r in entries if st in _CODE_SOURCES]
 
             findings.append(AuditFinding(
                 severity="medium",
@@ -288,8 +306,10 @@ def detect_consensus_deviations(
             ))
 
         elif has_doc and not has_code:
+            if _is_document_only_process_structure(subject_key=subject_key, predicate=predicate):
+                continue
             consensus_stats["coverage_gaps"] += 1
-            doc_records = [r for _, st, r in entries if st in _DOC_SOURCES]
+            doc_records = [r for _, _bucket, st, r in entries if st in _DOC_SOURCES]
 
             findings.append(AuditFinding(
                 severity="medium",
@@ -387,3 +407,9 @@ def _counts_as_target_documentation(*, record: ExtractedClaimRecord) -> bool:
     if assertion_status == "secondary_only":
         return False
     return True
+
+
+def _is_document_only_process_structure(*, subject_key: str, predicate: str) -> bool:
+    if subject_key != "BSM.process" and not subject_key.startswith("BSM.phase."):
+        return False
+    return predicate in {"phase_count", "phase_reference", "phase_order", "question_count", "question_reference"}

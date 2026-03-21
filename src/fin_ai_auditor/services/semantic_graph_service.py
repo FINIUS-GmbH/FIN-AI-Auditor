@@ -4,10 +4,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import re
-from typing import Callable, Sequence
+from typing import Callable, cast, Sequence
 
 from fin_ai_auditor.domain.models import (
     AuditClaimEntry,
+    AuditFinding,
     SemanticEntity,
     SemanticRelation,
     TruthLedgerEntry,
@@ -219,12 +220,11 @@ def build_semantic_graph(
 
 def attach_semantic_context_to_findings(
     *,
-    findings: list[object],
+    findings: list[AuditFinding],
     claims: list[AuditClaimEntry],
     semantic_entities: list[SemanticEntity],
     semantic_relations: list[SemanticRelation],
-) -> list[object]:
-    claim_map = {claim.claim_id: claim for claim in claims}
+) -> list[AuditFinding]:
     entities_by_id = {entity.entity_id: entity for entity in semantic_entities}
     relation_map = {
         (relation.source_entity_id, relation.target_entity_id, relation.relation_type): relation
@@ -235,7 +235,7 @@ def attach_semantic_context_to_findings(
         relations_by_entity.setdefault(relation.source_entity_id, []).append(relation)
         relations_by_entity.setdefault(relation.target_entity_id, []).append(relation)
 
-    enriched = []
+    enriched: list[AuditFinding] = []
     for finding in findings:
         cluster_anchor = str(
             finding.metadata.get("subject_key")
@@ -288,12 +288,12 @@ def attach_semantic_context_to_findings(
             ]
         )
         contract_paths = _contract_path_summaries(
-            relation_map=relation_map,
+            relation_map=cast(dict[tuple[str, str, str], SemanticRelation], relation_map),
             entities_by_id=entities_by_id,
             entity_ids=set(entity_ids),
         )
         evidence_chain_paths = _evidence_chain_path_summaries(
-            relation_map=relation_map,
+            relation_map=cast(dict[tuple[str, str, str], SemanticRelation], relation_map),
             entities_by_id=entities_by_id,
             entity_ids=set(entity_ids),
         )
@@ -311,7 +311,7 @@ def attach_semantic_context_to_findings(
                         "semantic_evidence_chain_paths": evidence_chain_paths,
                         "semantic_evidence_chain_full_paths": evidence_chain_full_paths,
                         "semantic_process_context": _process_context_summaries(
-                            relation_map=relation_map,
+                            relation_map=cast(dict[tuple[str, str, str], SemanticRelation], relation_map),
                             entities_by_id=entities_by_id,
                             entity_ids=set(entity_ids),
                         ),
@@ -678,7 +678,7 @@ def _claim_relation_types(
     entity_ids: set[str],
 ) -> list[str]:
     relation_types = [
-        relation.relation_type
+        str(relation.relation_type)
         for relation in relation_map.values()
         if relation.source_entity_id in entity_ids or relation.target_entity_id in entity_ids
     ]
@@ -776,8 +776,10 @@ def _claim_matches_cluster(*, claim: AuditClaimEntry, cluster_key: str) -> bool:
 
 
 def _relation_summary(*, relation: SemanticRelation, entities_by_id: dict[str, SemanticEntity]) -> str:
-    source_label = entities_by_id.get(relation.source_entity_id).label if relation.source_entity_id in entities_by_id else relation.source_entity_id
-    target_label = entities_by_id.get(relation.target_entity_id).label if relation.target_entity_id in entities_by_id else relation.target_entity_id
+    source_entity = entities_by_id.get(relation.source_entity_id)
+    target_entity = entities_by_id.get(relation.target_entity_id)
+    source_label = source_entity.label if source_entity is not None else relation.source_entity_id
+    target_label = target_entity.label if target_entity is not None else relation.target_entity_id
     return f"{source_label} -> {relation.relation_type} -> {target_label}"
 
 
@@ -1282,7 +1284,8 @@ def _contract_path_summaries(
             prefix_parts = [prefix] if prefix else []
             if owners:
                 prefix_parts.append(_entity_path_label(owners[0]))
-            for target in targets or [None]:
+            candidate_targets: tuple[SemanticEntity | None, ...] = tuple(targets) if targets else (None,)
+            for target in candidate_targets:
                 path_parts = [*prefix_parts, _entity_path_label(policy_entity)]
                 if target is not None:
                     path_parts.append(_entity_path_label(target))
